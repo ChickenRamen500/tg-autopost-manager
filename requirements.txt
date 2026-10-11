@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+aiogram>=3.4
+aiosqlite
+apscheduler
+aiohttp
+yt-dlp
+Pillow
+imagehash
+jinja2
+python-dotenv
+pixivy

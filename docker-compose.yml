@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # Local Bot API Server (снимает лимиты 50 МБ upload / 20 МБ download) — ТЗ §3.2
+  local-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: always
+    command: >
+      --api-id=${TELEGRAM_API_ID}
+      --api-hash=${TELEGRAM_API_HASH}
+      --local
+      --dir=/var/lib/telegram-bot-api
+    volumes:
+      - bot-api-data:/var/lib/telegram-bot-api
+    ports:
+      - "8081:8081"
+
+  # Основной бот
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: always
+    depends_on:
+      - local-bot-api
+    environment:
+      - BOT_API_URL=http://local-bot-api:8081
+      - BOT_TOKEN=${BOT_TOKEN}
+      - SECRET_TOKEN=${SECRET_TOKEN}
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - DATABASE_URL=sqlite:///./data/bot.db
+    volumes:
+      - ./data:/app/data
+      - D:\Media:/app/media   # Путь к диску с медиа
+    ports:
+      - "8000:8000"           # Веб-интерфейс
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+volumes:
+  bot-api-data:
