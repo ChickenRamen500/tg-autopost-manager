@@ -1,0 +1,43 @@
+# Файлы, которые НЕ должны попадать в Docker-образ (build context).
+# Dockerfile копирует app/, scripts/, data/ — но data/ содержит runtime-БД (bot.db, tags.db),
+# которая залочена работающим контейнером на Windows (Docker volume).
+# Это вызывает ошибку "Access is denied" при `docker compose up -d --build`.
+
+# Runtime-БД (создаётся при старте контейнера, не должна быть в образе)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Загруженные файлы и медиа (runtime, volume-mounted)
+data/downloads/*
+data/media/*
+# .gitkeep нужны в образе (создают структуру каталогов)
+!data/downloads/.gitkeep
+!data/media/.gitkeep
+
+# Окружение и кеши
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Git и IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Документация и тесты (не нужны в runtime-образе)
+DOCS/
+tests/
+*.md
+pyproject.toml
+conftest.py
+
+# OS
+.DS_Store
+Thumbs.db

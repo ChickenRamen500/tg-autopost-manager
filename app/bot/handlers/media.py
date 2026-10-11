@@ -84,17 +84,45 @@ def _extract_media(message: Message) -> dict[str, Any] | None:
 
 
 def _extract_source(message: Message) -> dict[str, Any]:
-    """Метаданные источника (ТЗ §2.2.1)."""
+    """Метаданные источника (ТЗ §2.2.1).
+
+    aiogram 3.x: forward_origin — union с типами:
+      - MessageOriginChannel (пересылка из канала): chat.id, chat.username, chat.title
+      - MessageOriginChat (пересылка из чата/группы): chat.id, chat.username, chat.title, author
+      - MessageOriginUser (пересылка от пользователя): sender_user.id, sender_user.username
+      - MessageOriginHiddenUser (скрытый отправитель): sender_user_name (str)
+    """
     fwd = message.forward_origin
     if fwd is not None:
-        # aiogram 3.x: ChatJoinByRequest / другой формат forward_origin
-        source_channel = getattr(fwd, "username", None) or getattr(fwd, "title", None)
-        chat_id = getattr(fwd, "chat_id", None)
-        return {
-            "source_type": "telegram_channel",
-            "source_id": str(chat_id) if chat_id is not None else source_channel,
-            "source_channel": f"@{source_channel}" if source_channel else None,
-        }
+        # MessageOriginChannel / MessageOriginChat — есть атрибут chat
+        chat = getattr(fwd, "chat", None)
+        if chat is not None:
+            chat_id = getattr(chat, "id", None)
+            username = getattr(chat, "username", None)
+            title = getattr(chat, "title", None)
+            source_channel = username or title
+            return {
+                "source_type": "telegram_channel",
+                "source_id": str(chat_id) if chat_id is not None else source_channel,
+                "source_channel": f"@{username}" if username else title,
+            }
+        # MessageOriginUser — пересылка от пользователя (не канал)
+        sender = getattr(fwd, "sender_user", None)
+        if sender is not None:
+            return {
+                "source_type": "telegram_user",
+                "source_id": str(sender.id),
+                "source_channel": f"@{sender.username}" if getattr(sender, "username", None) else None,
+            }
+        # MessageOriginHiddenUser — скрытый отправитель
+        hidden_name = getattr(fwd, "sender_user_name", None)
+        if hidden_name:
+            return {
+                "source_type": "telegram_user",
+                "source_id": hidden_name,
+                "source_channel": None,
+            }
+    # Не пересланное сообщение — отправитель из ЛС
     return {
         "source_type": "telegram_direct",
         "source_id": str(message.from_user.id) if message.from_user else None,

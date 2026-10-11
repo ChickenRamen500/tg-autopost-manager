@@ -101,7 +101,7 @@ curl http://localhost:8000/health/scheduler
 docker compose exec bot python scripts/check_phase2.py --scheduler
 ```
 
-> ⚠️ Новая очередь, добавленная через `/add_queue`, подхватится планировщиком **после перезапуска** контейнера (`docker compose restart bot`). Динамическая перерегистрация — Фаза 6.
+> ⚠️ **Внимание:** новая очередь, добавленная через `/add_queue`, подхватывается планировщиком **автоматически** (hot-reload) — перезапуск контейнера НЕ нужен. Команда `/reload_scheduler` принудительно перерегистрирует все очереди.
 
 ## Шаг 4. Telegram-команды (ТЗ §8)
 
@@ -109,16 +109,85 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 
 **Модератор + Admin:**
 - `/list_queues` — список очередей
+- `/list_inbox` — посты без очереди (Входящие)
 - `/queue <queue_id>` — посты очереди
-- `/remove_from_queue <post_id>` — перенести пост во «Входящие»
+- `/add_to_queue <post_id> <queue_id>` — поставить пост в очередь
+- `/remove_from_queue <post_id>` — вернуть пост во Входящие
 - `/stats` — статистика (постов/очередей/пользователей)
 
 **Только Admin:**
-- `/add_user @username <role>` → `/set_role @username <role>` (переслав сообщение юзера) — добавление пользователя
+- `/add_user <tg_id> <role> [имя]` — добавить по числовому ID (рекомендуется)
+- `/add_user @username <role>` → `/set_role @username <role>` (переслав сообщение юзера) — альтернатива
 - `/remove_user @username`, `/list_users`
 - `/add_channel <tg_chat_id> <name> [@username]`, `/list_channels`, `/remove_channel <channel_id>`
 - `/add_queue <channel_id> <name> <interval_min>`, `/remove_queue <queue_id>`
-- `/subscribe gelbooru <tag1> <tag2> ...`, `/list_subscriptions` (автопарсинг — Фаза 3)
+- `/reload_scheduler` — перерегистрировать планировщик (без restart контейнера)
+- `/subscribe gelbooru <tag1> ...`, `/list_subscriptions`
+
+## Как пользоваться: ответы на частые вопросы
+
+### 1. Как добавить пользователя?
+
+**Способ А (рекомендуемый) — по числовому tg_id:**
+1. Будущий пользователь пишет боту `@userinfobot` — тот отвечает числовым ID (например, `987654321`).
+2. Admin пишет боту:
+   ```
+   /add_user 987654321 moderator sankta17
+   ```
+   (третий аргумент — имя/username, опционален)
+3. Пользователь пишет боту `/start` — готово, он модератор.
+
+**Способ Б — по @username через пересылку:**
+1. Admin: `/add_user @sankta17 moderator`
+2. Будущий пользователь пишет боту `/start` (или любое сообщение).
+3. Admin пересылает это сообщение боту и отвечает на него: `/set_role @sankta17 moderator`
+   (либо отправляет `/set_role @sankta17 moderator` ответом (reply) на пересланное сообщение).
+
+> ⚠️ В aiogram 3.x `forward_from` недоступен (Telegram privacy) — используется `forward_origin` + `reply_to_message`.
+
+### 2. Как добавить канал, куда будут публиковаться посты?
+
+1. **Создайте Telegram-канал** (или используйте существующий).
+2. **Добавьте бота как администратора** в этот канал с правом публикации сообщений.
+   *(Без этого бот не сможет отправлять посты — будет ошибка `Forbidden: bot is not a member`)*
+3. **Узнайте числовой ID канала**:
+   - Перешлите любое сообщение из канала боту `@userinfobot` — он ответит ID (вида `-1002257882757`).
+   - Или: канал → информация → ID виден через сторонние инструменты.
+4. Admin пишет боту:
+   ```
+   /add_channel -1002257882757 МойКанал my_channel_username
+   ```
+   (`@username` опционален — нужен только для отображения; числовой ID обязателен)
+
+5. Проверьте: `/list_channels` → видите канал #1.
+
+### 3. Почему для активации очереди нужен перезапуск?
+
+**Раньше** (до этого фикса) — да, планировщик регистрировал job'ы только при старте контейнера. После `/add_queue` нужно было `docker compose restart bot`.
+
+**Теперь** — **перезапуск НЕ нужен**. При `/add_queue` и `/remove_queue` планировщик **автоматически перерегистрируется** (hot-reload). Команда `/reload_scheduler` принудительно перерегистрирует все очереди:
+```
+/add_queue 1 МояОчередь 60
+# → ✓ Очередь добавлена. Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен.
+```
+
+### Как связать посты с очередью?
+
+По умолчанию посты из ЛС идут во **«Входящие»** (нет правила маршрутизации). Два способа:
+
+**Способ А — вручную:**
+```
+/list_inbox                          # видите посты без очереди
+/add_to_queue 3 1                    # пост #3 → очередь #1
+```
+
+**Способ Б — правило маршрутизации (автоматически, Фаза 5 через веб):**
+Пока веб-интерфейса нет, правило можно добавить напрямую в БД:
+```sql
+INSERT INTO routing_rules (source_type, source_pattern, target_queue_id, priority)
+VALUES ('telegram_channel', '@anime_channel', 1, 10);
+```
+После этого все пересланные из `@anime_channel` посты автоматически пойдут в очередь #1.
 
 **Приём медиа:** просто пришлите боту фото/видео/GIF/документ (или перешлите из канала). Бот ответит, в какую очередь поставлен пост (или во «Входящие»).
 
@@ -132,18 +201,18 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 25 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 29 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 25 passed
+# 29 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
 #   test_scheduler.py      (4)  — стратегия file_id/файл, попытки, порядок pending
-#   test_regression.py     (3)  — caption_raw, дубликат канала, lookup канала
+#   test_regression.py     (7)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
 ruff check app/ scripts/ tests/ conftest.py   # All checks passed!
 ```
 
@@ -211,13 +280,15 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 ## Возможные проблемы
 
 - **Бот не отвечает на /start:** проверьте, что `ADMIN_TG_ID` совпадает с вашим `tg_id`, и что `logOut` выполнен (Фаза 1). Без admin в БД middleware пропустит только `/start`/`/help`.
-- **`/health/scheduler` → пустой список:** нет активных очередей. Создайте канал + очередь (`/add_channel`, `/add_queue`), затем `docker compose restart bot`.
-- **Новая очередь не публикует:** планировщик регистрирует job'ы только при старте. После `/add_queue` — `docker compose restart bot`.
+- **`/health/scheduler` → пустой список:** нет активных очередей. Создайте канал + очередь (`/add_channel`, `/add_queue`) — планировщик перерегистрируется автоматически (hot-reload).
+- **Бот не публикует в канал:** проверьте, что бот **добавлен как администратор** в целевой канал. Иначе `send_photo` вернёт `Forbidden: bot is not a member of the channel chat`.
+- **Посты идут во «Входящие», а не в очередь:** нет правила маршрутизации. `/list_inbox` → `/add_to_queue <post_id> <queue_id>` (вручную), либо добавьте правило в `routing_rules` (см. раздел «Как связать посты с очередью»).
+- **`docker compose up -d --build` → `Access is denied` на `data\bot.db`:** БД залочена работающим контейнером. Фикс: `.dockerignore` теперь исключает `data/*.db` из build context. Если ошибка повторяется — `docker compose down` перед билдом.
 - **`populate_tags.py` висит:** без `GELBOORU_API_KEY`/`GELBOORU_USER_ID` публичный endpoint работает, но медленнее. Ключи опциональны для Фазы 2.
 
 ## Исправления post-release (runtime-логи)
 
-После запуска Фазы 2 в реальном окружении обнаружены и исправлены 3 ошибки:
+### Раунд 1 — 3 ошибки (PR #14)
 
 | # | Симптом в логе | Причина | Фикс |
 |---|---|---|---|
@@ -225,10 +296,20 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 | 2 | `sqlite3.IntegrityError: UNIQUE constraint failed: channels.tg_chat_id` при повторном `/add_channel` | `/add_channel` с уже существующим `tg_chat_id` падал без обработки. | `app/repositories/channels.py`: введён `DuplicateChannelError`; `app/bot/handlers/admin.py`: проверка `get_channel_by_chat_id` до вставки + catch `DuplicateChannelError` (race condition). |
 | 3 | `sqlite3.OperationalError: unable to open database file` в `check_phase2.py --routing` при запущенном боте | `--routing` открывал **реальную** `bot.db`, которую уже держал uvicorn-процесс бота. На Windows + Docker volume `PRAGMA journal_mode=WAL` падала (файл `-shm` залочен). Плюс скрипт засорял БД демо-данными. | (а) `scripts/check_phase2.py --routing` переписан на **изолированную временную БД** (`tempfile.mkdtemp`) — не трогает реальную БД, работает всегда. (б) `app/db/database.py`: `PRAGMA busy_timeout=5000` + try/except вокруг `journal_mode=WAL` (fallback на default journal, если WAL не доступен). |
 
+### Раунд 2 — UX и баги из логов 3–5
+
+| # | Симптом | Причина | Фикс |
+|---|---|---|---|
+| 4 | После `/add_queue` очередь не публикует — нужен `docker compose restart bot` | Планировщик регистрировал job'ы только при старте контейнера (design-дефект). | `app/scheduler/__init__.py`: добавлен `reload_scheduler()` (hot-reload). `/add_queue` и `/remove_queue` вызывают его автоматически. Команда `/reload_scheduler` — ручная перерегистрация. **Перезапуск контейнера больше не нужен.** |
+| 5 | Все пересланные посты шли во «Входящие» — `routing: source_id=None` | `_extract_source` использовал `getattr(fwd, "chat_id")` — в aiogram 3.x `forward_origin` имеет тип `MessageOriginChannel` с вложенным `chat` (не `chat_id`). | `app/bot/handlers/media.py`: переписан `_extract_source` под aiogram 3.x — обрабатывает `MessageOriginChannel`/`Chat`/`User`/`HiddenUser` через `fwd.chat.id`/`fwd.sender_user.id`. |
+| 6 | `/add_user @sankta17 moderator` → «попроси его написать /start, перешли сообщение» — запутанный flow | Нельзя получить `tg_id` из `@username` через Bot API. | `app/bot/handlers/admin.py`: `/add_user` теперь принимает числовой `tg_id` напрямую: `/add_user 987654321 moderator [имя]` (рекомендуется). Пользователь узнаёт свой ID у `@userinfobot`. |
+| 7 | `/set_role` не работал — `forward_from` всегда None в aiogram 3.x | `message.forward_from` заменён на `forward_origin` в 3.x. | `app/bot/handlers/admin.py`: `/set_role` использует `forward_origin.sender_user` + `reply_to_message.from_user` (два способа определения tg_id). |
+| 8 | Нет команды переместить пост из «Входящих» в очередь | Только `/remove_from_queue` (обратное действие). | Добавлены `/add_to_queue <post_id> <queue_id>` и `/list_inbox` — ручная маршрутизация постов. |
+| 9 | `docker compose up -d --build` → `CreateFile data\bot.db: Access is denied` | Dockerfile копировал `data/` (с залоченной БД) в образ. | Создан `.dockerignore` — `data/*.db` исключены из build context. БД создаётся при старте контейнера, в образ не попадает. |
+
 Проверка фиксов:
 ```bash
-pytest tests/unit -q                              # 25 passed (3 новых в test_regression.py)
+pytest tests/unit -q                              # 29 passed (7 в test_regression.py)
 ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
-docker compose exec bot python scripts/check_phase2.py --routing
-# теперь работает даже при запущенном боте (временная БД)
+# /add_queue → "Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен."
 ```

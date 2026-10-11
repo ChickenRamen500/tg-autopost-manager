@@ -169,9 +169,13 @@ def setup_scheduler(scheduler: AsyncIOScheduler | None = None) -> AsyncIOSchedul
 
 
 async def setup_scheduler_async() -> AsyncIOScheduler:
-    """Асинхронная регистрация job'ов активных очередей (после init_db)."""
+    """Асинхронная регистрация job'ов активных очередей (после init_db).
+
+    Безопасно вызывать многократно — снимает старые job'ы очередей и регистрирует заново.
+    Используется и при старте приложения, и для hot-reload после /add_queue, /remove_queue.
+    """
     sched = get_scheduler()
-    setup_scheduler(sched)  # чистим старые
+    setup_scheduler(sched)  # чистим старые job'ы очередей
 
     queues = await queues_repo.list_active_queues()
     for q in queues:
@@ -193,3 +197,19 @@ async def setup_scheduler_async() -> AsyncIOScheduler:
     if not queues:
         log.info("Активных очередей нет — scheduler пустой")
     return sched
+
+
+async def reload_scheduler() -> int:
+    """Hot-reload: перерегистрирует job'ы всех активных очередей без перезапуска контейнера.
+
+    Возвращает количество зарегистрированных очередей. Вызывается:
+    - командой /reload_scheduler (admin);
+    - автоматически после /add_queue, /remove_queue.
+    """
+    sched = get_scheduler()
+    if not sched.running:
+        log.warning("reload_scheduler: scheduler не запущен — пропуск")
+        return 0
+    await setup_scheduler_async()
+    queue_jobs = [j for j in sched.get_jobs() if j.id.startswith("queue_")]
+    return len(queue_jobs)

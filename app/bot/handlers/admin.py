@@ -113,24 +113,55 @@ async def cmd_stats(message: Message) -> None:
 
 @router.message(Command("add_user"))
 async def cmd_add_user(message: Message, command: CommandObject, user_role: str | None = None) -> None:
+    """Добавление пользователя.
+
+    Способ 1 (рекомендуемый) — по числовому tg_id:
+        /add_user <tg_id> <role> [имя]
+        Пример: /add_user 479924833 moderator sankta17
+        tg_id узнаёт сам пользователь у @userinfobot (или пересылаем его сообщение).
+
+    Способ 2 — по @username (требует последующего пересылки сообщения от юзера):
+        /add_user @username <role>
+        Затем: /set_role @username <role>  (ответом на пересланное сообщение юзера)
+    """
     if user_role != "admin":
         await message.answer("🔒 Только admin может добавлять пользователей.")
         return
     args = (command.args or "").split()
     if len(args) < 2:
-        await message.answer("Использование: /add_user @username <role>\nrole: admin | moderator")
+        await message.answer(
+            "Использование:\n"
+            "/add_user <tg_id> <role> [имя]  — по числовому ID (рекомендуется)\n"
+            "/add_user @username <role>     — по @username (нужна пересылка сообщения)\n"
+            "role: admin | moderator\n\n"
+            "tg_id пользователь узнаёт у @userinfobot (написать ему — он ответит своим ID)."
+        )
         return
-    username = args[0].lstrip("@")
+    identifier = args[0]
     role = args[1].lower()
     if role not in ("admin", "moderator"):
         await message.answer("role должна быть admin или moderator.")
         return
-    # Нам нужен tg_id — его нельзя получить из @username через Bot API без прямого контакта.
-    # Поэтому просим админа переслать сообщение от будущего пользователя (как в gbooru_tg),
-    # либо используем /add_user_after_forward. Для простоты — просим переслать.
+
+    # Способ 1: числовой tg_id
+    if identifier.lstrip("-").isdigit():
+        tg_id = int(identifier)
+        username = args[2] if len(args) > 2 else None
+        await users_repo.add_user(tg_id, username, role)
+        await message.answer(
+            f"✓ Пользователь tg_id={tg_id} добавлен ролью {role}"
+            + (f" (@{username})" if username else "")
+            + ".\nПопроси его написать боту /start — после этого он сможет пользоваться ботом."
+        )
+        return
+
+    # Способ 2: @username — нужен forward для определения tg_id
+    username = identifier.lstrip("@")
     await message.answer(
-        f"Чтобы добавить @{username} ролью {role}, попроси его написать боту /start, "
-        "затем перешли мне любое его сообщение командой:\n"
+        f"Чтобы добавить @{username} ролью {role}, определи его tg_id:\n"
+        "1. Попроси пользователя написать @userinfobot — он ответит числовым ID.\n"
+        f"2. Затем: /add_user <его_ID> {role} {username}\n\n"
+        "Либо перешли мне любое сообщение от этого пользователя и ответь на него:\n"
         f"/set_role @{username} {role}"
     )
 
@@ -150,17 +181,36 @@ async def cmd_set_role(message: Message, command: CommandObject, user_role: str 
     if role not in ("admin", "moderator"):
         await message.answer("role: admin | moderator")
         return
-    fwd_user = getattr(message, "forward_from", None)
+    # Определяем tg_id целевого пользователя из пересланного сообщения или ответа
     target_tg_id = None
-    if fwd_user is not None:
-        target_tg_id = fwd_user.id
-    elif message.reply_to_message and message.reply_to_message.from_user:
+    target_username = None
+
+    # Вариант 1: ответ (reply) на сообщение пользователя в этом чате
+    if message.reply_to_message and message.reply_to_message.from_user:
         target_tg_id = message.reply_to_message.from_user.id
+        target_username = message.reply_to_message.from_user.username
+
+    # Вариант 2: пересланное сообщение (forward). В aiogram 3.x — forward_origin
+    if not target_tg_id and message.forward_origin is not None:
+        fwd = message.forward_origin
+        # MessageOriginUser — пересылка от пользователя
+        sender = getattr(fwd, "sender_user", None)
+        if sender is not None:
+            target_tg_id = sender.id
+            target_username = getattr(sender, "username", None)
+        # MessageOriginChannel/Chat — пересылка из канала, sender_user нет (это не ЛС-юзер)
+
     if not target_tg_id:
-        await message.answer("Не удалось определить tg_id. Перешли сообщение от будущего пользователя.")
+        await message.answer(
+            "Не удалось определить tg_id.\n"
+            "Перешли мне сообщение от будущего пользователя ИЛИ ответь (reply) на его сообщение "
+            "в этом чате командой /set_role <role>.\n\n"
+            "Альтернатива: добавь по числовому tg_id через /add_user <tg_id> <role>."
+        )
         return
-    await users_repo.add_user(target_tg_id, username, role)
-    await message.answer(f"✓ @{username} (tg_id={target_tg_id}) теперь {role}.")
+    final_username = username or (target_username.lstrip("@") if target_username else None)
+    await users_repo.add_user(target_tg_id, final_username, role)
+    await message.answer(f"✓ Пользователь tg_id={target_tg_id} теперь {role}.")
 
 
 @router.message(Command("remove_user"))
@@ -285,10 +335,12 @@ async def cmd_add_queue(message: Message, command: CommandObject, user_role: str
         await message.answer(f"Канал #{ch_id} не найден. Сначала /add_channel.")
         return
     qid = await queues_repo.create_queue(ch_id, name, interval_minutes=interval)
+    # Hot-reload: перерегистрируем job'ы планировщика без перезапуска контейнера
+    from app.scheduler import reload_scheduler
+    n = await reload_scheduler()
     await message.answer(
         f"✓ Очередь «{name}» добавлена (id={qid}, каждые {interval} мин).\n"
-        "⚠️ Планировщик подхватит новую очередь после перезапуска контейнера "
-        "(docker compose restart bot)."
+        f"✓ Планировщик перерегистрирован: активных очередей — {n}. Перезапуск не нужен."
     )
 
 
@@ -303,7 +355,72 @@ async def cmd_remove_queue(message: Message, command: CommandObject, user_role: 
         await message.answer("Использование: /remove_queue <queue_id>")
         return
     ok = await queues_repo.remove_queue(qid)
-    await message.answer("✓ Очередь удалена." if ok else "Очередь не найдена.")
+    if ok:
+        from app.scheduler import reload_scheduler
+        n = await reload_scheduler()
+        await message.answer(f"✓ Очередь удалена. Активных очередей осталось: {n}.")
+    else:
+        await message.answer("Очередь не найдена.")
+
+
+@router.message(Command("reload_scheduler"))
+async def cmd_reload_scheduler(message: Message, user_role: str | None = None) -> None:
+    """Принудительная перерегистрация job'ов планировщика (без перезапуска контейнера)."""
+    if user_role != "admin":
+        await message.answer("🔒 Только admin может перезагружать планировщик.")
+        return
+    from app.scheduler import reload_scheduler
+    n = await reload_scheduler()
+    await message.answer(f"✓ Планировщик перерегистрирован. Активных очередей: {n}.")
+
+
+@router.message(Command("add_to_queue"))
+async def cmd_add_to_queue(message: Message, command: CommandObject, user_role: str | None = None) -> None:
+    """Переместить пост из «Входящих» в очередь (ручная маршрутизация).
+
+    /add_to_queue <post_id> <queue_id>  — поставить пост в очередь
+    """
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.answer("Использование: /add_to_queue <post_id> <queue_id>")
+        return
+    try:
+        post_id = int(args[0])
+        queue_id = int(args[1])
+    except ValueError:
+        await message.answer("post_id и queue_id должны быть числами.")
+        return
+    queue = await queues_repo.get_queue(queue_id)
+    if not queue:
+        await message.answer(f"Очередь #{queue_id} не найдена. /list_queues — список.")
+        return
+    ok = await posts_repo.assign_queue(post_id, queue_id)
+    if ok:
+        # Если пост был в failed/duplicate — вернём в pending для публикации
+        post = await posts_repo.get_post(post_id)
+        if post and post["status"] in ("failed", "possible_duplicate", "duplicate"):
+            await posts_repo.update_status(post_id, "pending")
+        await message.answer(
+            f"✓ Пост #{post_id} добавлен в очередь «{queue['name']}» "
+            f"(каждые {queue['interval_minutes']} мин)."
+        )
+    else:
+        await message.answer(f"Пост #{post_id} не найден.")
+
+
+@router.message(Command("list_inbox"))
+async def cmd_list_inbox(message: Message, user_role: str | None = None) -> None:
+    """Показать посты из «Входящих» (без очереди) для ручной сортировки."""
+    inbox = await posts_repo.list_inbox(limit=20)
+    if not inbox:
+        await message.answer("📥 «Входящие» пусты.")
+        return
+    lines = [f"📥 «Входящие» (последние {len(inbox)}):"]
+    for p in inbox:
+        cap = (p.get("original_caption") or "")[:40]
+        lines.append(f"  #{p['id']} [{p['status']}] {p['file_type']} {cap}")
+    lines.append("\nНазначить очередь: /add_to_queue <post_id> <queue_id>")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("subscribe"))
