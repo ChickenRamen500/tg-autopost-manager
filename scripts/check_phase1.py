@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-"""Скрипт проверки Фазы 1 (ТЗ §13): Local Bot API Server + миграция.
+# -*- coding: utf-8 -*-
+"""РЎРєСЂРёРїС‚ РїСЂРѕРІРµСЂРєРё Р¤Р°Р·С‹ 1 (РўР— В§13): Local Bot API Server + РјРёРіСЂР°С†РёСЏ.
 
-Запуск на хосте (Windows/Linux) при поднятом контейнере local-bot-api:
+Р—Р°РїСѓСЃРє РЅР° С…РѕСЃС‚Рµ (Windows/Linux) РїСЂРё РїРѕРґРЅСЏС‚РѕРј РєРѕРЅС‚РµР№РЅРµСЂРµ local-bot-api:
 
-    # 1. Проверка конфигурации (.env должен быть заполнен)
+    # 1. РџСЂРѕРІРµСЂРєР° РєРѕРЅС„РёРіСѓСЂР°С†РёРё (.env РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ Р·Р°РїРѕР»РЅРµРЅ)
     python scripts/check_phase1.py --config
 
-    # 2. Разовая миграция: разлогинить бота с облачного API
+    # 2. Р Р°Р·РѕРІР°СЏ РјРёРіСЂР°С†РёСЏ: СЂР°Р·Р»РѕРіРёРЅРёС‚СЊ Р±РѕС‚Р° СЃ РѕР±Р»Р°С‡РЅРѕРіРѕ API
     python scripts/check_phase1.py --logout
 
-    # 3. Healthcheck: локальный сервер отвечает, токен принят
+    # 3. Healthcheck: Р»РѕРєР°Р»СЊРЅС‹Р№ СЃРµСЂРІРµСЂ РѕС‚РІРµС‡Р°РµС‚, С‚РѕРєРµРЅ РїСЂРёРЅСЏС‚
     python scripts/check_phase1.py --health
 
-    # 4. Главный тест: отправка файла ~300 МБ в тестовый чат + getFile обратно
-    #    (TEST_CHAT_ID — id ЛС с ботом или тестового канала, см. .env)
+    # 4. Р“Р»Р°РІРЅС‹Р№ С‚РµСЃС‚: РѕС‚РїСЂР°РІРєР° С„Р°Р№Р»Р° ~300 РњР‘ РІ С‚РµСЃС‚РѕРІС‹Р№ С‡Р°С‚ + getFile РѕР±СЂР°С‚РЅРѕ
+    #    (TEST_CHAT_ID вЂ” id Р›РЎ СЃ Р±РѕС‚РѕРј РёР»Рё С‚РµСЃС‚РѕРІРѕРіРѕ РєР°РЅР°Р»Р°, СЃРј. .env)
     python scripts/check_phase1.py --big-test
 
-Критерии приёмки Фазы 1 (ТЗ §13):
- - getMe через BOT_API_URL возвращает ok:true (иначе 401/409 > не сделан logOut);
- - send_document 300 МБ проходит (облако отклонило бы >50 МБ);
- - getFile возвращает file_path с абсолютным локальным путём (признак флага --local).
+РљСЂРёС‚РµСЂРёРё РїСЂРёС‘РјРєРё Р¤Р°Р·С‹ 1 (РўР— В§13):
+ - getMe С‡РµСЂРµР· BOT_API_URL РІРѕР·РІСЂР°С‰Р°РµС‚ ok:true (РёРЅР°С‡Рµ 401/409 > РЅРµ СЃРґРµР»Р°РЅ logOut);
+ - send_document 300 РњР‘ РїСЂРѕС…РѕРґРёС‚ (РѕР±Р»Р°РєРѕ РѕС‚РєР»РѕРЅРёР»Рѕ Р±С‹ >50 РњР‘);
+ - getFile РІРѕР·РІСЂР°С‰Р°РµС‚ file_path СЃ Р°Р±СЃРѕР»СЋС‚РЅС‹Рј Р»РѕРєР°Р»СЊРЅС‹Рј РїСѓС‚С‘Рј (РїСЂРёР·РЅР°Рє С„Р»Р°РіР° --local).
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ import os
 import sys
 from pathlib import Path
 
-# чтобы `import app...` работал при запуске из любого места
+# С‡С‚РѕР±С‹ `import app...` СЂР°Р±РѕС‚Р°Р» РїСЂРё Р·Р°РїСѓСЃРєРµ РёР· Р»СЋР±РѕРіРѕ РјРµСЃС‚Р°
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config.settings import settings  # noqa: E402
@@ -48,42 +49,42 @@ def check_config() -> int:
     problems = settings.validate()
     print(f"BOT_API_URL      = {settings.bot_api_url}")
     print(f"DATABASE_URL     = {settings.database_url}")
-    print(f"TELEGRAM_API_ID  = {settings.telegram_api_id or '<не задан>'}")
-    print(f"BOT_TOKEN        = {'***' + settings.bot_token[-6:] if settings.bot_token else '<не задан>'}")
+    print(f"TELEGRAM_API_ID  = {settings.telegram_api_id or '<РЅРµ Р·Р°РґР°РЅ>'}")
+    print(f"BOT_TOKEN        = {'***' + settings.bot_token[-6:] if settings.bot_token else '<РЅРµ Р·Р°РґР°РЅ>'}")
     if problems:
         for p in problems:
             print(f"[!] {p}")
         return 1
-    print("[OK] Конфигурация полная.")
+    print("[OK] РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ РїРѕР»РЅР°СЏ.")
     return 0
 
 
 async def check_health() -> int:
     me = await get_me()
     if me:
-        print(f"[OK] Local Bot API работает, бот: @{me.get('username')} (id={me.get('id')})")
-        print("     Если это http://localhost:8081 — сервер поднят с --local и миграция выполнена.")
+        print(f"[OK] Local Bot API СЂР°Р±РѕС‚Р°РµС‚, Р±РѕС‚: @{me.get('username')} (id={me.get('id')})")
+        print("     Р•СЃР»Рё СЌС‚Рѕ http://localhost:8081 вЂ” СЃРµСЂРІРµСЂ РїРѕРґРЅСЏС‚ СЃ --local Рё РјРёРіСЂР°С†РёСЏ РІС‹РїРѕР»РЅРµРЅР°.")
         return 0
-    print("[FAIL] Локальный сервер не отвечает / токен отклонён.")
-    print("       Чек-лист: 1) контейнер local-bot-api запущен; 2) выполнен logOut (--logout);")
-    print("       3) api_id/api_hash корректны; 4) порт 8081 проброшен на хост.")
+    print("[FAIL] Р›РѕРєР°Р»СЊРЅС‹Р№ СЃРµСЂРІРµСЂ РЅРµ РѕС‚РІРµС‡Р°РµС‚ / С‚РѕРєРµРЅ РѕС‚РєР»РѕРЅС‘РЅ.")
+    print("       Р§РµРє-Р»РёСЃС‚: 1) РєРѕРЅС‚РµР№РЅРµСЂ local-bot-api Р·Р°РїСѓС‰РµРЅ; 2) РІС‹РїРѕР»РЅРµРЅ logOut (--logout);")
+    print("       3) api_id/api_hash РєРѕСЂСЂРµРєС‚РЅС‹; 4) РїРѕСЂС‚ 8081 РїСЂРѕР±СЂРѕС€РµРЅ РЅР° С…РѕСЃС‚.")
     return 1
 
 
 async def check_big_test(size_mb: int | None) -> int:
     chat_id = int(os.getenv("TEST_CHAT_ID", "0") or 0)
     if not chat_id:
-        print("[FAIL] Задайте TEST_CHAT_ID в .env (id вашего ЛС-чата с ботом или тестового канала).")
+        print("[FAIL] Р—Р°РґР°Р№С‚Рµ TEST_CHAT_ID РІ .env (id РІР°С€РµРіРѕ Р›РЎ-С‡Р°С‚Р° СЃ Р±РѕС‚РѕРј РёР»Рё С‚РµСЃС‚РѕРІРѕРіРѕ РєР°РЅР°Р»Р°).")
         return 1
     size = size_mb or 300
-    print(f"Отправка документа {size} МБ в чат {chat_id} через {settings.bot_api_url} ...")
+    print(f"РћС‚РїСЂР°РІРєР° РґРѕРєСѓРјРµРЅС‚Р° {size} РњР‘ РІ С‡Р°С‚ {chat_id} С‡РµСЂРµР· {settings.bot_api_url} ...")
     try:
         ok = await test_big_upload_download(chat_id, size_mb=size)
     except Exception as e:
         print(f"[FAIL] {type(e).__name__}: {e}")
         return 1
     if ok:
-        print(f"[OK] Upload {size} МБ (> облачного лимита 50 МБ) и getFile прошли — Local Bot API c --local работает.")
+        print(f"[OK] Upload {size} РњР‘ (> РѕР±Р»Р°С‡РЅРѕРіРѕ Р»РёРјРёС‚Р° 50 РњР‘) Рё getFile РїСЂРѕС€Р»Рё вЂ” Local Bot API c --local СЂР°Р±РѕС‚Р°РµС‚.")
         return 0
     return 1
 
@@ -91,20 +92,20 @@ async def check_big_test(size_mb: int | None) -> int:
 async def check_logout() -> int:
     ok = await logout_from_cloud()
     if ok:
-        print("[OK] Бот разлогинен с облачного API. Теперь он обслуживается только локальным сервером.")
-        print("     ? Старые file_id остаются валидными (ТЗ §3.3), переиндексация не нужна.")
+        print("[OK] Р‘РѕС‚ СЂР°Р·Р»РѕРіРёРЅРµРЅ СЃ РѕР±Р»Р°С‡РЅРѕРіРѕ API. РўРµРїРµСЂСЊ РѕРЅ РѕР±СЃР»СѓР¶РёРІР°РµС‚СЃСЏ С‚РѕР»СЊРєРѕ Р»РѕРєР°Р»СЊРЅС‹Рј СЃРµСЂРІРµСЂРѕРј.")
+        print("     ? РЎС‚Р°СЂС‹Рµ file_id РѕСЃС‚Р°СЋС‚СЃСЏ РІР°Р»РёРґРЅС‹РјРё (РўР— В§3.3), РїРµСЂРµРёРЅРґРµРєСЃР°С†РёСЏ РЅРµ РЅСѓР¶РЅР°.")
         return 0
-    print("[FAIL] logOut не выполнен — проверьте BOT_TOKEN и доступ к api.telegram.org.")
+    print("[FAIL] logOut РЅРµ РІС‹РїРѕР»РЅРµРЅ вЂ” РїСЂРѕРІРµСЂСЊС‚Рµ BOT_TOKEN Рё РґРѕСЃС‚СѓРї Рє api.telegram.org.")
     return 1
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Проверка Фазы 1: Local Bot API Server")
-    ap.add_argument("--config", action="store_true", help="проверить .env/настройки")
-    ap.add_argument("--logout", action="store_true", help="разовая миграция: logOut с облачного API")
-    ap.add_argument("--health", action="store_true", help="getMe через локальный сервер")
-    ap.add_argument("--big-test", action="store_true", help="тест 300 МБ upload + getFile (нужен TEST_CHAT_ID)")
-    ap.add_argument("--size", type=int, default=None, help="размер тестового файла в МБ (по умолчанию 300)")
+    ap = argparse.ArgumentParser(description="РџСЂРѕРІРµСЂРєР° Р¤Р°Р·С‹ 1: Local Bot API Server")
+    ap.add_argument("--config", action="store_true", help="РїСЂРѕРІРµСЂРёС‚СЊ .env/РЅР°СЃС‚СЂРѕР№РєРё")
+    ap.add_argument("--logout", action="store_true", help="СЂР°Р·РѕРІР°СЏ РјРёРіСЂР°С†РёСЏ: logOut СЃ РѕР±Р»Р°С‡РЅРѕРіРѕ API")
+    ap.add_argument("--health", action="store_true", help="getMe С‡РµСЂРµР· Р»РѕРєР°Р»СЊРЅС‹Р№ СЃРµСЂРІРµСЂ")
+    ap.add_argument("--big-test", action="store_true", help="С‚РµСЃС‚ 300 РњР‘ upload + getFile (РЅСѓР¶РµРЅ TEST_CHAT_ID)")
+    ap.add_argument("--size", type=int, default=None, help="СЂР°Р·РјРµСЂ С‚РµСЃС‚РѕРІРѕРіРѕ С„Р°Р№Р»Р° РІ РњР‘ (РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ 300)")
     args = ap.parse_args()
 
     if not any([args.config, args.logout, args.health, args.big_test]):

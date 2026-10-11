@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Инфраструктура Local Bot API Server (ТЗ §3.3).
 
 Содержит:

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Юнит-тесты настроек и подключения к Local Bot API (Фаза 1)."""
 import os
 from pathlib import Path
