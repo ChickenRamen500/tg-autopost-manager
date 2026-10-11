@@ -34,15 +34,26 @@ log = logging.getLogger("main")
 _bot_polling_task: asyncio.Task | None = None
 
 
+def _on_polling_done(task: asyncio.Task) -> None:
+    """Логирует фатальный сбой polling (без него задача падает молча)."""
+    if task.cancelled():
+        log.info("Bot polling задача отменена (shutdown)")
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Bot polling задача упала с необработанным исключением: %r", exc)
+        # traceback
+        import traceback
+        log.error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+
+
 async def _bot_polling() -> None:
     """Запускает aiogram long-polling в фоне (только если есть BOT_TOKEN)."""
     if not settings.bot_token:
         log.warning("BOT_TOKEN не задан — polling бота пропущен (можно тестировать API/БД без бота)")
         return
+    # get_bot() лениво создаёт singleton через runtime (подключение к Local Bot API)
     bot = get_bot()
-    # Регистрируем bot в runtime, чтобы scheduler/handlers могли его получить
-    from app.bot.runtime import set_bot
-    set_bot(bot)
     dp = get_dispatcher()
     me = await get_me()
     if me:
@@ -85,6 +96,9 @@ async def lifespan(_app: FastAPI):
 
     # 6. Bot polling (ТЗ §8)
     _bot_polling_task = asyncio.create_task(_bot_polling())
+    # Важно: без done_callback исключение в задаче тихо проглатывается.
+    # Логируем любой фатальный сбой polling, чтобы видеть причину молчания бота.
+    _bot_polling_task.add_done_callback(_on_polling_done)
 
     try:
         yield
