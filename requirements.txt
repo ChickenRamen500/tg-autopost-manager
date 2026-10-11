@@ -9,4 +9,5 @@ Pillow
 imagehash
 jinja2
 python-dotenv
-pixivy
+# pixivy — опциональный парсер Pixiv (ТЗ §2.1, Фаза 5). Не ставим в базовый образ:
+# пакет нестабилен на PyPI и ломает docker-сборку. При необходимости: pip install pixivy
