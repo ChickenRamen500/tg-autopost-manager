@@ -1,0 +1,3 @@
+
+# Кодировка: все .py файлы принудительно UTF-8 (защита от cp1251 при сохранении в Windows)
+*.py text working=-crlf encoding=utf-8
