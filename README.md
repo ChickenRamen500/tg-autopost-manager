@@ -58,7 +58,7 @@
 
 ## 📂 Структура документации
 
-- [`ТЗ_TechnicalDoc_v5_2026-10-11.docx`](./ТЗ_TechnicalDoc_v5_2026-10-11.docx) — Полное техническое задание (архитектура, БД, API, сценарии).
+- [`ТЗ_TechnicalDoc_v5_2026-10-11.docx`](./DOCS/ТЗ_TechnicalDoc_v5_2026-10-11.docx) — Полное техническое задание (архитектура, БД, API, сценарии).
 - [`API_Reference.md`](./API_Reference.md) — Описание REST API эндпоинтов.
 - [`Chrome_Extension_Guide.md`](./Chrome_Extension_Guide.md) — Инструкция по сборке и настройке расширения.
 - [`Deployment.md`](./Deployment.md) — Детальное руководство по развертыванию и миграции с облачного API.
