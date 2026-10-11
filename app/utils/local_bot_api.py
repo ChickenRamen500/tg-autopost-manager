@@ -21,6 +21,7 @@ import aiohttp
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.types import BufferedInputFile
 
 from app.config.settings import settings
 
@@ -94,8 +95,14 @@ async def test_big_upload_download(chat_id: int, size_mb: int = 300) -> bool:
     try:
         bot = create_bot()
         async with bot:
-            doc = await bot.send_document(chat_id, document=tmp.open("rb"),
-                                          caption=f"Фаза 1: тест загрузки {size_mb} МБ")
+            # aiogram 3.x принимает в InputFile только объект BufferedInputFile/FSInputFile,
+            # "голый" open("rb") (BufferedReader) не проходит валидацию pydantic.
+            with tmp.open("rb") as fh:
+                doc = await bot.send_document(
+                    chat_id,
+                    document=BufferedInputFile(fh.read(), filename=tmp.name),
+                    caption=f"Фаза 1: тест загрузки {size_mb} МБ",
+                )
             log.info("Отправлено: file_unique_id=%s", doc.document.file_unique_id)
             file = await bot.get_file(doc.document.file_id)
             # На сервере с --local file.file_path — абсолютный локальный путь уже скачанного файла
