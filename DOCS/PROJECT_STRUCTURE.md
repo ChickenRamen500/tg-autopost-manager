@@ -47,7 +47,12 @@ tg-media-queue-bot/
 ├── tests/
 │   ├── unit/
 │   └── integration/
-├── DOCS/                       # Техническая документация (ТЗ v5)
+├── DOCS/                       # Техническая документация:
+│   ├── ТЗ_TechnicalDoc_v5_2026-10-11.docx   # исходное ТЗ
+│   ├── PROJECT_STRUCTURE.md    # этот файл
+│   ├── PHASE1_GUIDE.md         # пошаговый гайд Фазы 1
+│   ├── my_telegram_org_troubleshooting.md  # решение ERROR на my.telegram.org
+│   └── PULL_REQUEST.md         # описание PR Фазы 1 (историческое)
 ├── .env.example                # Шаблон переменных окружения
 ├── docker-compose.yml          # Сервисы bot + local-bot-api, лимиты памяти (ТЗ §3.2)
 ├── requirements.txt            # fastapi, aiogram, aiosqlite, apscheduler, yt-dlp, Pillow, imagehash...

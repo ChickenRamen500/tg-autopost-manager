@@ -36,8 +36,8 @@
 
 1. **Клонируйте репозиторий**:
    ```bash
-   git clone https://github.com/your-username/tg-media-queue-bot.git
-   cd tg-media-queue-bot
+   git clone https://github.com/ChickenRamen500/tg-autopost-manager.git
+   cd tg-autopost-manager
    ```
 
 2. **Настройте переменные окружения**:
@@ -59,9 +59,10 @@
 ## 📂 Структура документации
 
 - [`ТЗ_TechnicalDoc_v5_2026-10-11.docx`](./DOCS/ТЗ_TechnicalDoc_v5_2026-10-11.docx) — Полное техническое задание (архитектура, БД, API, сценарии).
-- [`API_Reference.md`](./API_Reference.md) — Описание REST API эндпоинтов.
-- [`Chrome_Extension_Guide.md`](./Chrome_Extension_Guide.md) — Инструкция по сборке и настройке расширения.
-- [`Deployment.md`](./Deployment.md) — Детальное руководство по развертыванию и миграции с облачного API.
+- [`DOCS/PHASE1_GUIDE.md`](./DOCS/PHASE1_GUIDE.md) — Пошаговый запуск Фазы 1 (Local Bot API Server, миграция, тест 300 МБ). ✅ актуально
+- [`DOCS/PROJECT_STRUCTURE.md`](./DOCS/PROJECT_STRUCTURE.md) — Структура проекта и соответствие фазам ТЗ §13. ✅ актуально
+- [`DOCS/my_telegram_org_troubleshooting.md`](./DOCS/my_telegram_org_troubleshooting.md) — Решение `ERROR` при создании приложения на my.telegram.org. ✅ актуально
+- `API_Reference.md`, `Chrome_Extension_Guide.md`, `Deployment.md` — будут добавлены на Фазах 3–4 (пока не существуют).
 
 ## ⚠️ Ограничения и безопасность
 
