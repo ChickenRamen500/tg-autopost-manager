@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 from pathlib import Path
 
@@ -105,10 +106,54 @@ async def test_big_upload_download(chat_id: int, size_mb: int = 300) -> bool:
                 )
             log.info("Отправлено: file_unique_id=%s", doc.document.file_unique_id)
             file = await bot.get_file(doc.document.file_id)
-            # На сервере с --local file.file_path — абсолютный локальный путь уже скачанного файла
+            # На сервере с --local file.file_path — абсолютный путь ВНУТРИ контейнера
+            # local-bot-api (/var/lib/telegram-bot-api/...). Скачивание по облачной ссылке
+            # api.telegram.org/file/bot<token>/ для таких файлов даёт "file is too big"
+            # (лимит облака 20 МБ) — читаем файл напрямую из volume bot-api-data.
             log.info("getFile: file_path=%s", file.file_path)
+            downloaded_bytes = resolve_local_file_size(file.file_path)
+            if downloaded_bytes is None:
+                log.warning(
+                    "Файл недоступен для прямого чтения (volume bot-api-data не примонтирован "
+                    "в контейнер bot). Убедитесь, что сообщение доставлено в чат — это и есть "
+                    "подтверждение работы --local."
+                )
+            else:
+                log.info("Прямое чтение из volume: %.1f МБ", downloaded_bytes / 1024 / 1024)
+                if downloaded_bytes < size_mb * 1024 * 1024 * 0.9:
+                    raise RuntimeError(
+                        f"Размер файла в volume ({downloaded_bytes}) не соответствует "
+                        f"отправленному ({size_mb} МБ)"
+                    )
             await bot.send_message(chat_id, "✅ Фаза 1: upload>50МБ и getFile>20МБ прошли — --local работает.")
             ok = True
     finally:
         tmp.unlink(missing_ok=True)  # временные файлы удаляем сразу (ТЗ §3.1)
     return ok
+
+# Volume bot-api-data примонтирован в контейнер bot по этому пути
+# (см. docker-compose.yml) — даёт прямое чтение файлов >20МБ, минуя облачное getFile.
+LOCAL_API_MOUNT = Path(os.getenv("BOT_API_DATA_MOUNT", "/app/bot-api-data"))
+
+
+def resolve_local_file_size(file_path: str | None) -> int | None:
+    """Размер файла на диске local-bot-api через проброшенный volume.
+
+    getFile() при --local возвращает путь внутри контейнера local-bot-api
+    (/var/lib/telegram-bot-api/...). Перепролируем его в точку монтирования
+    volume в контейнере bot. Возвращает None, если volume не примонтирован.
+    """
+    if not file_path:
+        return None
+    rel = file_path.lstrip("/")
+    candidates = [
+        LOCAL_API_MOUNT / rel,
+        LOCAL_API_MOUNT / rel.removeprefix("var/lib/telegram-bot-api/"),
+    ]
+    for c in candidates:
+        try:
+            if c.is_file():
+                return c.stat().st_size
+        except OSError:
+            continue
+    return None

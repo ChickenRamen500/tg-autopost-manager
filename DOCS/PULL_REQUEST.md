@@ -1,3 +1,6 @@
+> 📁 **Исторический документ** — описание PR #1 (Фаза 1), смерженного в main.
+> Актуальный статус fixes: PR #2–#9 смержены; все проверки запускаются через `docker compose exec bot ...` (см. PHASE1_GUIDE.md).
+
 # Pull Request: Фаза 1 — Фундамент (Local Bot API Server + каркас проекта)
 
 **Branch:** `feature/phase1-foundation` → **Base:** `main`
