@@ -14,6 +14,13 @@ services:
       - bot-api-data:/var/lib/telegram-bot-api
     ports:
       - "8081:8081"
+    healthcheck:
+      # getMe с пустым токеном вернёт JSON-ответ — сервер жив
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8081/getMe || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # Основной бот
   bot:
