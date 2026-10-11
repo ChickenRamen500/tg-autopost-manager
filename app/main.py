@@ -40,6 +40,9 @@ async def _bot_polling() -> None:
         log.warning("BOT_TOKEN не задан — polling бота пропущен (можно тестировать API/БД без бота)")
         return
     bot = get_bot()
+    # Регистрируем bot в runtime, чтобы scheduler/handlers могли его получить
+    from app.bot.runtime import set_bot
+    set_bot(bot)
     dp = get_dispatcher()
     me = await get_me()
     if me:

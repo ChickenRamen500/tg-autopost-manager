@@ -19,7 +19,6 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.bot import get_bot
 from app.config.settings import settings
 from app.repositories import (
     channels as channels_repo,
@@ -50,6 +49,8 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any]) -> None:
 
     Поднимает исключение при ошибке API (вызывающий код считает попытки).
     """
+    from app.bot.runtime import get_bot  # ленивый импорт — разрывает цикл bot↔scheduler
+
     bot = get_bot()
     chat_id = channel["tg_chat_id"]
     caption = post.get("processed_caption") or post.get("original_caption")
