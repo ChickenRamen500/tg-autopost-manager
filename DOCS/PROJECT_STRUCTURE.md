@@ -62,11 +62,14 @@ tg-media-queue-bot/
 
 ## Соответствие фазам реализации (ТЗ §13)
 
-| Фаза | Что заполняется |
-|------|-----------------|
-| 1. Фундамент | `docker/`, `docker-compose.yml`, `.env.example`, `app/config/` |
-| 2. Ядро | `app/db/models/`, `app/repositories/`, `app/bot/handlers/`, `app/scheduler/` |
-| 3. Worker + источники | `app/worker/`, `app/services/parsers/`, `app/services/dedup/` |
-| 4. API + расширение | `app/api/routes/`, `chrome-extension/` |
-| 5. Обработка + веб | `app/services/caption/`, `app/services/media/`, `app/web/` |
-| 6. Полировка | `scripts/` (автоочистка downloads), `tests/` |
+| Фаза | Статус | Что заполняется |
+|------|--------|-----------------|
+| 1. Фундамент | ✅ готово | `docker/`, `docker-compose.yml`, `.env.example`, `app/config/`, `app/utils/local_bot_api.py`, `scripts/check_phase1.py` |
+| 2. Ядро | ✅ готово | `app/db/{schema.sql,database.py}`, `app/repositories/*`, `app/bot/{middleware,handlers}/*`, `app/scheduler/`, `app/services/routing/`, `app/services/parsers/gelbooru/` (миграция gbooru_tg), `scripts/{init_db,check_phase2,populate_tags}.py`, `tests/unit/{test_routing,test_repositories,test_scheduler}.py` |
+| 3. Worker + источники | ⬜ план | `app/worker/` (task_queue готов в репозитории), доп. парсеры `app/services/parsers/{xcom,pikabu,pixiv,danbooru}/`, `app/services/dedup/` (репозиторий `duplicates.py` готов) |
+| 4. API + расширение | ⬜ план | `app/api/routes/`, `chrome-extension/` |
+| 5. Обработка + веб | ⬜ план | `app/services/caption/`, `app/services/media/` (кроп ffmpeg), `app/web/` (Jinja2+Bootstrap) |
+| 6. Полировка | ⬜ план | `scripts/` (автоочистка downloads), доп. `tests/`, retry/уведомления |
+
+> **Фаза 2 реализована** — см. `DOCS/PHASE2_GUIDE.md`. 22 юнит-теста проходят, ruff: 0 ошибок.
+> Готовая инфраструктура для Фазы 3: персистентная `task_queue` (`take_next` через UPDATE…RETURNING), репозиторий дубликатов с расстоянием Хэмминга для pHash, `subscriptions.list_due_subscriptions()` для автопарсинга.

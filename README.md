@@ -60,6 +60,7 @@
 
 - [`ТЗ_TechnicalDoc_v5_2026-10-11.docx`](./DOCS/ТЗ_TechnicalDoc_v5_2026-10-11.docx) — Полное техническое задание (архитектура, БД, API, сценарии).
 - [`DOCS/PHASE1_GUIDE.md`](./DOCS/PHASE1_GUIDE.md) — Пошаговый запуск Фазы 1 (Local Bot API Server, миграция, тест 300 МБ). ✅ актуально
+- [`DOCS/PHASE2_GUIDE.md`](./DOCS/PHASE2_GUIDE.md) — Пошаговый запуск Фазы 2 (БД §5, приём медиа из ЛС, маршрутизация, планировщик, RBAC, миграция gbooru_tg). ✅ актуально
 - [`DOCS/PROJECT_STRUCTURE.md`](./DOCS/PROJECT_STRUCTURE.md) — Структура проекта и соответствие фазам ТЗ §13. ✅ актуально
 - [`DOCS/my_telegram_org_troubleshooting.md`](./DOCS/my_telegram_org_troubleshooting.md) — Решение `ERROR` при создании приложения на my.telegram.org. ✅ актуально
 - `API_Reference.md`, `Chrome_Extension_Guide.md`, `Deployment.md` — будут добавлены на Фазах 3–4 (пока не существуют).
