@@ -4,7 +4,12 @@ services:
   # Local Bot API Server (снимает лимиты 50 МБ upload / 20 МБ download) — ТЗ §3.2
   local-bot-api:
     image: aiogram/telegram-bot-api:latest
+    container_name: tg-lba          # короткое имя для `docker logs tg-lba` (гайд PHASE1_GUIDE.md)
     restart: always
+    environment:
+      # сервер читает эти переменные сам — надёжнее, чем подстановка в command
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
     command: >
       --api-id=${TELEGRAM_API_ID}
       --api-hash=${TELEGRAM_API_HASH}
