@@ -32,7 +32,20 @@ import sys
 from pathlib import Path
 
 # чтобы `import app...` работал при запуске из любого места
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+# Подстраховка: если скрипт запускается внутри Docker-контейнера, а TEST_CHAT_ID
+# не проброшен через compose — подтянуть его напрямую из .env на хосте
+# (обычно C:\tg-autopost-manager\.env), смонтированном как /app.
+try:
+    from dotenv import load_dotenv
+
+    for _candidate in (BASE_DIR / ".env", Path("/host_env/.env")):
+        if _candidate.is_file():
+            load_dotenv(_candidate, override=False)
+except ImportError:  # pragma: no cover
+    pass
 
 from app.config.settings import settings  # noqa: E402
 from app.utils.local_bot_api import (  # noqa: E402
@@ -75,7 +88,12 @@ async def check_big_test(size_mb: int | None) -> int:
     chat_id = int(os.getenv("TEST_CHAT_ID", "0") or 0)
     if not chat_id:
         print("[FAIL] Задайте TEST_CHAT_ID в .env (id вашего ЛС-чата с ботом или тестового канала).")
+        print("       Внутри контейнера проверьте проброс: docker compose exec bot printenv TEST_CHAT_ID")
         return 1
+    if chat_id > 0 and chat_id < 1_000_000_000:
+        # user-id из @userinfobot — скорее всего это НЕ id чата (см. вывод getUpdates)
+        print(f"[WARN] TEST_CHAT_ID={chat_id} выглядит как user-id, а не chat-id.")
+        print("       Для ЛС с ботом chat_id обычно совпадает с вашим user-id — пробуем отправить...")
     size = size_mb or 300
     print(f"Отправка документа {size} МБ в чат {chat_id} через {settings.bot_api_url} ...")
     try:
