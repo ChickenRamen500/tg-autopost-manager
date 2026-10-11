@@ -187,11 +187,18 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         status="pending",
     )
 
+    # Альбом: Telegram присылает каждое фото отдельным сообщением с одинаковым media_group_id.
+    # Каждый файл = отдельный пост (ТЗ §2.1.1: «каждый файл как отдельный пост или групповой пост»).
+    # Сокращаем уведомление, чтобы не спамить при альбомах из N файлов.
+    is_album = bool(getattr(message, "media_group_id", None))
+
     if queue_id is None:
-        await message.answer(
-            f"📥 Пост #{post_id} добавлен во «Входящие».\n"
-            "Правило маршрутизации не найдено — назначь очередь вручную через веб-интерфейс."
-        )
+        msg = f"📥 Пост #{post_id} → Входящие"
+        if is_album:
+            msg += " (альбом — каждый файл отдельным постом)"
+        else:
+            msg += "\nПравило маршрутизации не найдено. /menu → 🔀 Маршрутизация"
+        await message.answer(msg)
     else:
         from app.repositories import queues as queues_repo
 
@@ -199,10 +206,9 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         qname = queue["name"] if queue else f"#{queue_id}"
         pending_count = await queues_repo.count_pending(queue_id)
         await message.answer(
-            f"✓ Пост #{post_id} добавлен в очередь «{qname}».\n"
-            f"Позиция в очереди (pending): ~{pending_count}."
+            f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})"
         )
-    logger.info("Принят пост #%s: type=%s source=%s queue=%s", post_id, media["file_type"], source["source_type"], queue_id)
+    logger.info("Принят пост #%s: type=%s source=%s queue=%s album=%s", post_id, media["file_type"], source["source_type"], queue_id, is_album)
 
 
 @router.message(F.text)
