@@ -49,7 +49,7 @@ services:
       - .env
     volumes:
       - ./data:/app/data
-      - D:\Media:/app/media   # Путь к диску с медиа
+      - E:\Media:/app/media   # Путь к диску с медиа
       # Прямой доступ к файлам local-bot-api (файлы >20МБ нельзя скачать через облачное getFile)
       - bot-api-data:/app/bot-api-data:ro
     ports:
