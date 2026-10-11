@@ -216,7 +216,24 @@ async def cmd_add_channel(message: Message, command: CommandObject, user_role: s
         return
     name = args[1]
     username = args[2].lstrip("@") if len(args) > 2 else None
-    cid = await channels_repo.create_channel(tg_chat_id, name, username)
+
+    # Проверяем дубликат tg_chat_id ДО вставки (UNIQUE constraint, ТЗ §5.1 channels)
+    existing = await channels_repo.get_channel_by_chat_id(tg_chat_id)
+    if existing:
+        await message.answer(
+            f"⚠️ Канал с tg_chat_id={tg_chat_id} уже существует: "
+            f"#{existing['id']} «{existing['name']}»"
+            + (f" @{existing['username']}" if existing.get("username") else "")
+            + ".\nУдалите его (/remove_channel) или используйте другой chat_id."
+        )
+        return
+
+    try:
+        cid = await channels_repo.create_channel(tg_chat_id, name, username)
+    except channels_repo.DuplicateChannelError:
+        # Race condition: канал создан между нашей проверкой и вставкой
+        await message.answer(f"⚠️ Канал с tg_chat_id={tg_chat_id} уже существует (создан параллельно).")
+        return
     await message.answer(f"✓ Канал «{name}» добавлен (id={cid}, chat_id={tg_chat_id}).")
 
 

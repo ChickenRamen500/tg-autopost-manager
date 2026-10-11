@@ -1,17 +1,35 @@
 """Репозиторий каналов (ТЗ §5.1 channels)."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+import aiosqlite
+
 from app.db import get_db
+
+log = logging.getLogger("repositories.channels")
+
+
+class DuplicateChannelError(Exception):
+    """Канал с таким tg_chat_id уже существует (UNIQUE constraint, ТЗ §5.1)."""
+
+    def __init__(self, tg_chat_id: int) -> None:
+        self.tg_chat_id = tg_chat_id
+        super().__init__(f"Канал с tg_chat_id={tg_chat_id} уже существует")
 
 
 async def create_channel(tg_chat_id: int, name: str, username: str | None = None, is_active: bool = True) -> int:
     db = get_db()
-    cur = await db.execute(
-        "INSERT INTO channels (tg_chat_id, name, username, is_active) VALUES (?, ?, ?, ?)",
-        (tg_chat_id, name, username.lstrip("@") if username else None, 1 if is_active else 0),
-    )
+    try:
+        cur = await db.execute(
+            "INSERT INTO channels (tg_chat_id, name, username, is_active) VALUES (?, ?, ?, ?)",
+            (tg_chat_id, name, username.lstrip("@") if username else None, 1 if is_active else 0),
+        )
+    except aiosqlite.IntegrityError as e:
+        # UNIQUE constraint failed: channels.tg_chat_id — race condition (проверка + вставка не атомарны)
+        log.warning("Дубликат канала tg_chat_id=%s: %s", tg_chat_id, e)
+        raise DuplicateChannelError(tg_chat_id) from e
     await db.commit()
     rid = cur.lastrowid
     await cur.close()

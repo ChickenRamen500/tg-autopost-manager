@@ -110,7 +110,8 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         return
 
     source = _extract_source(message)
-    caption = message.caption or message.caption_raw or None
+    # aiogram 3.x: message.caption — текст подписи (str | None); caption_raw убран в 3.x.
+    caption = message.caption or None
     tags: list[str] = []  # теги из captions — Фаза 5 (caption-конвейер)
 
     # Дедупликация по file_unique_id (ТЗ §2.4.3 — точный уровень)

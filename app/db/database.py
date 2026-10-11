@@ -39,8 +39,19 @@ async def init_db() -> aiosqlite.Connection:
 
     _db = await aiosqlite.connect(str(settings.db_path))
     _db.row_factory = aiosqlite.Row
-    # WAL — параллельное чтение, быстрее запись; foreign_keys — каскадная целостность
-    await _db.execute("PRAGMA journal_mode=WAL")
+
+    # busy_timeout: ждать блокировки до 5 сек вместо мгновенного "database is locked"
+    # (параллельный доступ CLI-скриптов к БД, которую держит uvicorn-процесс бота)
+    await _db.execute("PRAGMA busy_timeout=5000")
+
+    # WAL — параллельное чтение, быстрее запись. На Windows + Docker volume
+    # файл -shm может быть залочен другим процессом: тогда PRAGMA падает
+    # "unable to open database file". Это не критично — fallback на default journal.
+    try:
+        await _db.execute("PRAGMA journal_mode=WAL")
+    except aiosqlite.OperationalError as e:
+        log.warning("Не удалось включить WAL-режим (%s) — работаю на default journal (DELETE).", e)
+
     await _db.execute("PRAGMA foreign_keys=ON")
     await _db.execute("PRAGMA synchronous=NORMAL")  # баланс надёжности/скорости (§3.1 слабое железо)
 

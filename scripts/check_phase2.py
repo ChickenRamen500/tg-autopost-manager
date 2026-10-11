@@ -75,44 +75,52 @@ async def check_db() -> int:
 
 
 async def check_routing() -> int:
-    log.info("== Проверка маршрутизации ==")
-    await init_db()
+    """Демо-маршрутизация на ИЗОЛИРОВАННОЙ временной БД.
 
-    # Создаём демо-канал + очередь + правила (если ещё нет)
-    ch = await channels_repo.get_channel_by_chat_id(-100111000111)
-    if not ch:
+    Использует временную БД (tmp_path), чтобы:
+    - не конфликтовать с реальной bot.db, которую держит работающий бот
+      (на Windows + Docker volume падает "unable to open database file" на WAL);
+    - не засорять продакшн-БД демо-каналами/очередями/правилами.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from app.config.settings import settings
+    from app.db import database
+
+    log.info("== Проверка маршрутизации (временная БД) ==")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="phase2_routing_"))
+    # Подменяем пути на временные (frozen dataclass — через object.__setattr__)
+    object.__setattr__(settings, "data_dir", tmp_dir)
+    object.__setattr__(settings, "db_path", tmp_dir / "routing_demo.db")
+
+    await database.init_db()
+    try:
+        # Демо-канал + очередь + правила (ТЗ §5.2 примеры)
         ch_id = await channels_repo.create_channel(-100111000111, "Demo Channel", "demo_channel")
-    else:
-        ch_id = ch["id"]
-
-    existing = await queues_repo.list_queues(active_only=False)
-    demo_q = next((x for x in existing if x["name"] == "Demo Queue"), None)
-    if demo_q:
-        qid = demo_q["id"]
-    else:
         qid = await queues_repo.create_queue(ch_id, "Demo Queue", interval_minutes=120)
-
-    # Точное правило + regex-правило + правило any (ТЗ §5.2 примеры)
-    rules = await routing_repo.list_rules(active_only=False)
-    if not any(r["source_pattern"] == "@anime_channel" for r in rules):
         await routing_repo.create_rule("telegram_channel", "@anime_channel", qid, priority=10)
-    if not any(r["source_pattern"] == r".*rating:safe.*" for r in rules):
         await routing_repo.create_rule("gelbooru", r".*rating:safe.*", qid, priority=5)
 
-    # Тест 1: точное совпадение telegram_channel
-    res = await route_post("telegram_channel", "@anime_channel")
-    assert res == qid, f"ожидали очередь {qid}, получили {res}"
-    log.info("[OK] Точное совпадение telegram_channel/@anime_channel → queue %s", res)
+        # Тест 1: точное совпадение telegram_channel
+        res = await route_post("telegram_channel", "@anime_channel")
+        assert res == qid, f"ожидали очередь {qid}, получили {res}"
+        log.info("[OK] Точное совпадение telegram_channel/@anime_channel → queue %s", res)
 
-    # Тест 2: regex по тегам gelbooru
-    res2 = await route_post("gelbooru", "12345", tags=["1girl", "rating:safe", "smile"])
-    assert res2 == qid, f"ожидали очередь {qid} по тегу rating:safe, получили {res2}"
-    log.info("[OK] Regex по тегам gelbooru (.*rating:safe.*) → queue %s", res2)
+        # Тест 2: regex по тегам gelbooru
+        res2 = await route_post("gelbooru", "12345", tags=["1girl", "rating:safe", "smile"])
+        assert res2 == qid, f"ожидали очередь {qid} по тегу rating:safe, получили {res2}"
+        log.info("[OK] Regex по тегам gelbooru (.*rating:safe.*) → queue %s", res2)
 
-    # Тест 3: нет правила → Входящие (None)
-    res3 = await route_post("x.com", "https://x.com/unknown")
-    assert res3 is None, f"ожидали None (Входящие), получили {res3}"
-    log.info("[OK] Нет правила для x.com → Входящие (None)")
+        # Тест 3: нет правила → Входящие (None)
+        res3 = await route_post("x.com", "https://x.com/unknown")
+        assert res3 is None, f"ожидали None (Входящие), получили {res3}"
+        log.info("[OK] Нет правила для x.com → Входящие (None)")
+    finally:
+        await database.close_db()
+        # Подчищаем временные файлы (best-effort)
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return 0
 
 
