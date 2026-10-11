@@ -27,7 +27,7 @@
 | **База данных** | SQLite (`aiosqlite`) |
 | **Планировщик** | APScheduler (`AsyncIOScheduler`) |
 | **Обработка медиа** | `ffmpeg` (кроп, транскодирование), `Pillow` + `imagehash` (pHash) |
-| **Парсинг** | `aiohttp`, `yt-dlp` (для X.com и сложных видео), опционально `pixivy` |
+| **Парсинг** | `aiohttp`, `yt-dlp` (для X.com и сложных видео), опционально `pixivy` (устанавливается отдельно: `pip install pixivy`; в базовом образе отсутствует на PyPI — см. requirements.txt) |
 | **Frontend** | Jinja2 + Bootstrap 5 + Vanilla JavaScript (без тяжелых фреймворков) |
 | **Инфраструктура** | Docker Compose (контейнеры `bot` и `local-bot-api`) |
 | **Расширение** | Chrome Extension (Manifest V3) |
