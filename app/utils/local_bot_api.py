@@ -33,10 +33,23 @@ DOWNLOAD_LIMIT_CLOUD_MB = 20    # getFile через облако
 UPLOAD_LIMIT_LOCAL_MB = 2000    # local-bot-api с --local (ТЗ §3.3)
 
 
-def create_bot() -> Bot:
-    """Bot, подключённый к Local Bot API Server (код из ТЗ §3.3)."""
+# Таймауты по умолчанию в aiogram — 60с; загрузка файла 200-300 МБ на хосте
+# дольше 60с даёт TelegramNetworkError("Request timeout error"), хотя файл
+# физически доходит до чата. Для big-test поднимаем таймауты.
+BIG_UPLOAD_TIMEOUT_S = float(os.getenv("BOT_API_UPLOAD_TIMEOUT", "600"))
+
+
+def create_bot(timeout_s: float | None = None) -> Bot:
+    """Bot, подключённый к Local Bot API Server (код из ТЗ §3.3).
+
+    timeout_s — таймаут HTTP-запросов (по умолчанию aiogram 60с; для отправки
+    больших файлов передавайте больше, см. BIG_UPLOAD_TIMEOUT_S).
+    """
+    kwargs = {}
+    if timeout_s:
+        kwargs = {"timeout": timeout_s}
     session = AiohttpSession(
-        api=TelegramAPIServer.from_base(settings.bot_api_url)
+        api=TelegramAPIServer.from_base(settings.bot_api_url), **kwargs
     )
     return Bot(token=settings.bot_token, session=session)
 
@@ -94,7 +107,10 @@ async def test_big_upload_download(chat_id: int, size_mb: int = 300) -> bool:
     tmp = make_test_file(size_mb, settings.downloads_dir)
     ok = False
     try:
-        bot = create_bot()
+        # Таймаут 60с по умолчанию не выдерживает upload 200-300 МБ на хосте —
+        # aiogram отдаёт TelegramNetworkError("Request timeout error"), хотя
+        # файл доходит до чата. Поднимаем до BIG_UPLOAD_TIMEOUT_S (default 600с).
+        bot = create_bot(timeout_s=BIG_UPLOAD_TIMEOUT_S)
         async with bot:
             # aiogram 3.x принимает в InputFile только объект BufferedInputFile/FSInputFile,
             # "голый" open("rb") (BufferedReader) не проходит валидацию pydantic.
@@ -139,9 +155,12 @@ LOCAL_API_MOUNT = Path(os.getenv("BOT_API_DATA_MOUNT", "/app/bot-api-data"))
 def resolve_local_file_size(file_path: str | None) -> int | None:
     """Размер файла на диске local-bot-api через проброшенный volume.
 
-    getFile() при --local возвращает путь внутри контейнера local-bot-api
-    (/var/lib/telegram-bot-api/...). Перепролируем его в точку монтирования
-    volume в контейнере bot. Возвращает None, если volume не примонтирован.
+    getFile() при --local возвращает путь внутри контейнера local-bot-api.
+    Формат пути зависит от версии сервера: старые — /var/lib/... (абсолютный),
+    новые — documents/file_0.bin (относительный от корня dir). Перепролируем
+    оба варианта в точку монтирования volume в контейнере bot, включая прямые
+    попытки чтения по исходному пути (на случай других mount'ов).
+    Возвращает None, если файл не найден (volume не примонтирован и т.п.).
     """
     if not file_path:
         return None
@@ -149,7 +168,12 @@ def resolve_local_file_size(file_path: str | None) -> int | None:
     candidates = [
         LOCAL_API_MOUNT / rel,
         LOCAL_API_MOUNT / rel.removeprefix("var/lib/telegram-bot-api/"),
+        Path(file_path),  # прямой путь (если скрипт запускается вне Docker)
     ]
+    # новый формат относительного пути: "documents/file_0.bin" может лежать
+    # и в подкаталоге с именем бота: "<bot_id>-<name>/documents/..."
+    if LOCAL_API_MOUNT.is_dir():
+        candidates += sorted(LOCAL_API_MOUNT.glob(f"*/{rel}"))
     for c in candidates:
         try:
             if c.is_file():

@@ -44,6 +44,7 @@ services:
       - DATABASE_URL=sqlite:///./data/bot.db
       # TEST_CHAT_ID берётся из .env (строкой ниже) — иначе скрипты внутри контейнера его не видят
       - TEST_CHAT_ID=${TEST_CHAT_ID}
+      - BOT_API_DATA_MOUNT=/app/bot-api-data
     env_file:
       - .env
     volumes:
