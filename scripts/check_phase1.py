@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Скрипт проверки Фазы 1 (ТЗ §13): Local Bot API Server + миграция.
 
 Запуск на хосте (Windows/Linux) при поднятом контейнере local-bot-api:
@@ -47,9 +46,8 @@ try:
 except ImportError:  # pragma: no cover
     pass
 
-from app.config.settings import settings  # noqa: E402
-from app.utils.local_bot_api import (  # noqa: E402
-    create_bot,
+from app.config.settings import settings
+from app.utils.local_bot_api import (
     get_me,
     logout_from_cloud,
     test_big_upload_download,
@@ -99,7 +97,7 @@ async def check_big_test(size_mb: int | None) -> int:
     print("       (загрузка большого файла может занять несколько минут — ждём до 10 мин)")
     try:
         ok = await test_big_upload_download(chat_id, size_mb=size)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — широкий catch для CLI-скрипта проверки
         msg = str(e)
         # Файл мог физически уйти в чат, но ответ сервера не успел вернуться,
         # либо getFile упёрся в облачный лимит 20 МБ — это НЕ провал --local.

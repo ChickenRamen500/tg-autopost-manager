@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Инфраструктура Local Bot API Server (ТЗ §3.3).
 
 Содержит:
@@ -12,7 +11,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import secrets
@@ -78,7 +76,7 @@ async def get_me() -> dict | None:
                 return data["result"]
             log.error("getMe вернул ошибку: %s", data)
             return None
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+    except (TimeoutError, aiohttp.ClientError) as e:
         log.error("Local Bot API недоступен по %s: %s", settings.bot_api_url, e)
         return None
 
@@ -89,8 +87,7 @@ def make_test_file(size_mb: int, dest_dir: Path) -> Path:
     path = dest_dir / f"test_{size_mb}mb_{secrets.token_hex(4)}.bin"
     chunk = 1024 * 1024
     with open(path, "wb") as f:
-        for _ in range(size_mb):
-            f.write(secrets.token_bytes(chunk))
+        f.writelines(secrets.token_bytes(chunk) for _ in range(size_mb))
     return path
 
 

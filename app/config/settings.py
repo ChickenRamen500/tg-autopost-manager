@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Настройки приложения (ТЗ §3.2, §3.3).
 
 Все значения читаются из переменных окружения / .env-файла.
@@ -39,6 +38,23 @@ class Settings:
     # --- База данных (ТЗ §5) ---
     database_url: str = field(default_factory=lambda: _get("DATABASE_URL", "sqlite:///./data/bot.db"))
 
+    # --- Фаза 2: первичный admin (bootstrap RBAC, ТЗ §2.6) ---
+    # tg_id владельца-админа. На первом /start он автоматически становится admin в БД,
+    # иначе нельзя добавить пользователей (команда /add_user требует прав admin).
+    admin_tg_id: int = field(default_factory=lambda: int(_get("ADMIN_TG_ID", "0") or 0))
+
+    # --- Фаза 2: миграция кода gbooru_tg (ТЗ §10) ---
+    # Опциональные ключи Gelbooru API (нужны для автопарсинга подписок — Фаза 3).
+    # На Фазе 2 GelbooruClient переносится как библиотека, ключи не обязательны для импорта.
+    gelbooru_api_key: str = field(default_factory=lambda: _get("GELBOORU_API_KEY", ""))
+    gelbooru_user_id: str = field(default_factory=lambda: _get("GELBOORU_USER_ID", ""))
+
+    # --- Фаза 2: планировщик (ТЗ §2.5) ---
+    # Минимальная пауза между отправками в одну очередь (защита от 429, ТЗ §2.5.2 п.3)
+    send_throttle_seconds: float = field(default_factory=lambda: float(_get("SEND_THROTTLE_SECONDS", "1.1") or 1.1))
+    # Лимит попыток отправки поста до перевода в failed (ТЗ §2.5.2 п.4)
+    max_send_attempts: int = field(default_factory=lambda: int(_get("MAX_SEND_ATTEMPTS", "3") or 3))
+
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: int(_get("WEB_PORT", "8000") or 8000))
 
@@ -60,6 +76,11 @@ class Settings:
             )
         if not self.secret_token:
             problems.append("SECRET_TOKEN не задан — REST API и Chrome-расширение будут недоступны (Фаза 4)")
+        if not self.admin_tg_id:
+            problems.append(
+                "ADMIN_TG_ID не задан — никто не сможет стать admin при первом /start "
+                "(управление пользователями/каналами/очередями будет недоступно, ТЗ §2.6)"
+            )
         return problems
 
 
