@@ -132,17 +132,18 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 22 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 25 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 22 passed
+# 25 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
 #   test_scheduler.py      (4)  — стратегия file_id/файл, попытки, порядок pending
+#   test_regression.py     (3)  — caption_raw, дубликат канала, lookup канала
 ruff check app/ scripts/ tests/ conftest.py   # All checks passed!
 ```
 
@@ -213,3 +214,21 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 - **`/health/scheduler` → пустой список:** нет активных очередей. Создайте канал + очередь (`/add_channel`, `/add_queue`), затем `docker compose restart bot`.
 - **Новая очередь не публикует:** планировщик регистрирует job'ы только при старте. После `/add_queue` — `docker compose restart bot`.
 - **`populate_tags.py` висит:** без `GELBOORU_API_KEY`/`GELBOORU_USER_ID` публичный endpoint работает, но медленнее. Ключи опциональны для Фазы 2.
+
+## Исправления post-release (runtime-логи)
+
+После запуска Фазы 2 в реальном окружении обнаружены и исправлены 3 ошибки:
+
+| # | Симптом в логе | Причина | Фикс |
+|---|---|---|---|
+| 1 | `AttributeError: 'Message' object has no attribute 'caption_raw'` при приёме любого медиа | `media.py` обращался к `message.caption_raw` — этого атрибута **нет в aiogram 3.x** (был в 2.x). Каждый приём медиа падал. | `app/bot/handlers/media.py`: оставлен только `message.caption or None`. |
+| 2 | `sqlite3.IntegrityError: UNIQUE constraint failed: channels.tg_chat_id` при повторном `/add_channel` | `/add_channel` с уже существующим `tg_chat_id` падал без обработки. | `app/repositories/channels.py`: введён `DuplicateChannelError`; `app/bot/handlers/admin.py`: проверка `get_channel_by_chat_id` до вставки + catch `DuplicateChannelError` (race condition). |
+| 3 | `sqlite3.OperationalError: unable to open database file` в `check_phase2.py --routing` при запущенном боте | `--routing` открывал **реальную** `bot.db`, которую уже держал uvicorn-процесс бота. На Windows + Docker volume `PRAGMA journal_mode=WAL` падала (файл `-shm` залочен). Плюс скрипт засорял БД демо-данными. | (а) `scripts/check_phase2.py --routing` переписан на **изолированную временную БД** (`tempfile.mkdtemp`) — не трогает реальную БД, работает всегда. (б) `app/db/database.py`: `PRAGMA busy_timeout=5000` + try/except вокруг `journal_mode=WAL` (fallback на default journal, если WAL не доступен). |
+
+Проверка фиксов:
+```bash
+pytest tests/unit -q                              # 25 passed (3 новых в test_regression.py)
+ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
+docker compose exec bot python scripts/check_phase2.py --routing
+# теперь работает даже при запущенном боте (временная БД)
+```
