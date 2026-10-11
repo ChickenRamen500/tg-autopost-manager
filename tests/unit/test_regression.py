@@ -216,3 +216,98 @@ def test_extract_source_direct_message():
     assert source["source_type"] == "telegram_direct"
     assert source["source_id"] == "479924833"
     assert source["source_channel"] is None
+
+
+def test_cmd_cancel_registered_before_fsm_handlers():
+    """Регрессия FSM-ловушки: cmd_cancel должен быть зарегистрирован ПЕРВЫМ в menu-роутере.
+
+    Без этого /cancel перехватывался FSM-хендлером (который ждёт текст) —
+    пользователь застревал в состоянии, не мог выйти даже /cancel.
+    """
+    from app.bot.handlers.menu import router
+
+    # Собираем имена callback-хендлеров message-наблюдателя в порядке регистрации
+    handler_names = []
+    for observer in router.observers.values():
+        if observer.event_name != "message":
+            continue
+        for h in observer.handlers:
+            # У каждого хендлера есть callback; берём его имя
+            cb = h.callback
+            handler_names.append(cb.__name__)
+    assert handler_names, "Не нашли message-хендлеры в menu-роутере"
+
+    # cmd_cancel должен быть первым (до FSM-хендлеров)
+    assert handler_names[0] == "cmd_cancel", (
+        f"cmd_cancel должен быть первым, иначе /cancel перехватывается FSM. "
+        f"Первый хендлер: {handler_names[0]}"
+    )
+
+    # Также проверим, что есть catch-all для не-текста в FSM
+    assert "fsm_non_text_in_state" in handler_names, "Нет catch-all для не-текстовых сообщений в FSM"
+
+
+def test_routing_rule_crud(tmp_path):
+    """CRUD правил маршрутизации (ТЗ §2.2.2)."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import channels as channels_repo
+        from app.repositories import queues as queues_repo
+        from app.repositories import routing as routing_repo
+        from app.services.routing import route_post
+
+        ch_id = await channels_repo.create_channel(-1000000000033, "RuleCh")
+        qid = await queues_repo.create_queue(ch_id, "RuleQ")
+
+        # Создаём правило: telegram_channel с паттерном @anime → очередь
+        rid = await routing_repo.create_rule(
+            source_type="telegram_channel",
+            source_pattern="@anime_channel",
+            target_queue_id=qid,
+            priority=10,
+        )
+        assert rid > 0
+
+        # Проверяем, что route_post находит правило
+        result = await route_post("telegram_channel", "@anime_channel")
+        assert result == qid
+
+        # Проверяем list_rules
+        rules = await routing_repo.list_rules(active_only=False)
+        assert len(rules) == 1
+        assert rules[0]["source_pattern"] == "@anime_channel"
+
+        # Удаляем правило
+        ok = await routing_repo.remove_rule(rid)
+        assert ok is True
+        rules = await routing_repo.list_rules(active_only=False)
+        assert len(rules) == 0
+
+    run_with_db(tmp_path, body)
+
+
+def test_keyboards_build_routing():
+    """Клавиатуры для routing rules строятся без ошибок."""
+    from app.bot.keyboards import builder as kb
+
+    st = kb.source_type_picker()
+    assert st is not None
+    assert len(st.inline_keyboard) > 0
+
+    qpk = kb.rule_pick_queue([{"id": 1, "name": "Test"}])
+    assert qpk is not None
+
+    rl = kb.rules_list(
+        [{"id": 1, "source_type": "any", "source_pattern": ".*", "target_queue_id": 1, "priority": 0, "is_active": 1}],
+        {1: "Test"},
+    )
+    assert rl is not None
+
+    ra = kb.rule_actions(1)
+    assert ra is not None
+
+    # add_menu должен содержать кнопку «🔀 Правило»
+    am = kb.add_menu()
+    buttons_text = [b.text for row in am.inline_keyboard for b in row]
+    assert any("🔀" in t for t in buttons_text), f"Нет кнопки Маршрутизация в add_menu: {buttons_text}"

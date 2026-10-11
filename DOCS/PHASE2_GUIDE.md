@@ -148,6 +148,33 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 3. В карточке поста нажми кнопку нужной очереди (➡ «Имя» #N)
 4. ✓ Пост в очереди, опубликуется по расписанию
 
+### Как создать правило маршрутизации (автоматическая сортировка)
+
+Чтобы посты автоматически попадали в нужную очередь (без ручного «Входящие → очередь»):
+
+1. `/menu` → **➕ Добавить** → **🔀 Правило**
+2. Шаг 1: выбери тип источника кнопкой:
+   - 📢 Telegram-канал (для пересланных из каналов)
+   - 💬 ЛС (прямой)
+   - 👤 Telegram-юзер
+   - 📁 Локальная папка
+   - 🖼 Gelbooru
+   - ⭐ Любой (по умолчанию)
+3. Шаг 2: пришли паттерн для source_id:
+   - Точное совпадение: `-1002257882757` или `@anime_channel`
+   - Regex (со спецсимволами): `.*rating:safe.*`
+   - Любой: `.*`
+4. Шаг 3: выбери целевую очередь кнопкой
+5. Шаг 4: приоритет (целое число, выше = важнее)
+
+**Пример:** правило `telegram_channel / @anime_channel → очередь #1 (priority 10)` — все пересланные из `@anime_channel` посты автоматически пойдут в очередь #1.
+
+> Управлять правилами: `/menu` → **🔀 Маршрутизация** (список с кнопками удаления).
+
+### Альбомы
+
+При отправке альбома (несколько фото/видео) каждый файл создаётся **отдельным постом** (ТЗ §2.1.1). Уведомление сокращено, чтобы не спамить: «📥 Пост #N → Входящие (альбом — каждый файл отдельным постом)».
+
 ### Команды (fallback, текстом)
 
 Текстовые команды работают параллельно с кнопками для совместимости:
@@ -235,18 +262,18 @@ VALUES ('telegram_channel', '@anime_channel', 1, 10);
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 29 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 32 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 29 passed
+# 32 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
 #   test_scheduler.py      (4)  — стратегия file_id/файл, попытки, порядок pending
-#   test_regression.py     (7)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
+#   test_regression.py    (10)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
 ruff check app/ scripts/ tests/ conftest.py   # All checks passed!
 ```
 
@@ -343,7 +370,7 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 
 Проверка фиксов:
 ```bash
-pytest tests/unit -q                              # 29 passed (7 в test_regression.py)
+pytest tests/unit -q                              # 32 passed (10 в test_regression.py)
 ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 # /add_queue → "Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен."
 ```
@@ -378,7 +405,25 @@ ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 29 passed
+pytest tests/unit -q   # 32 passed
 ruff check             # All checks passed!
 # /menu → главное меню с кнопками
+```
+
+### Раунд 4 — FSM-ловушка, routing rules UI, альбомы
+
+**Проблема (логи 6-7):** пользователь начал «Добавить очередь», затем отправил фото (без подписи) — бот выдал «Название не может быть пустым» × 3. Команда `/cancel` не работала — перехватывалась FSM-хендлером, который ждал текст. Пользователь застрял в состоянии, не мог выйти.
+
+| # | Симптом | Причина | Фикс |
+|---|---|---|---|
+| 10 | Фото во время FSM → «Название не может быть пустым» × N | FSM-хендлеры регистрировались раньше `cmd_cancel` и не фильтровали `F.text` → фото попадало в хендлер, `message.text=None` → «пустое» | `app/bot/handlers/menu.py`: (а) `cmd_cancel` зарегистрирован ПЕРВЫМ (без фильтра состояния — перехватывает /cancel всегда); (б) FSM-хендлеры получили фильтр `F.text`; (в) добавлен `fsm_non_text_in_state` — catch-all для фото/видео в FSM: «✏️ Я жду текст, /cancel для отмены» |
+| 11 | `/cancel` не работал в FSM — перехватывался | `cmd_cancel` стоял после FSM-хендлеров в порядке регистрации → FSM-хендлер срабатывал первым | `cmd_cancel` перемещён в начало файла (первый хендлер роутера) |
+| 12 | Нет UI для правил маршрутизации — только SQL | Правила можно было добавить только `INSERT INTO routing_rules` вручную | Добавлен UI: `/menu` → **🔀 Маршрутизация** (список + удаление) и **➕ Добавить** → **🔀 Правило** (FSM 4 шага: тип источника → паттерн → очередь → приоритет) |
+| 13 | Альбом из N файлов → N длинных сообщений «Правило не найдено — назначь очередь через веб-интерфейс» | Каждое фото альбома = отдельный пост с длинным уведомлением | `app/bot/handlers/media.py`: уведомление сокращено до «📥 Пост #N → Входящие», добавлена пометка «(альбом)» при `media_group_id` |
+
+Проверка:
+```bash
+pytest tests/unit -q   # 32 passed (10 в test_regression.py)
+ruff check             # All checks passed!
+# регрессионный тест: cmd_cancel зарегистрирован первым (test_cmd_cancel_registered_before_fsm_handlers)
 ```

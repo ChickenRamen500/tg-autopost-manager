@@ -34,8 +34,9 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     if is_admin:
         kb.button(text="📢 Каналы", callback_data="menu:channels")
         kb.button(text="👥 Пользователи", callback_data="menu:users")
+        kb.button(text="🔀 Маршрутизация", callback_data="menu:rules")
         kb.button(text="➕ Добавить", callback_data="menu:add")
-    kb.adjust(2, 1, 2)
+    kb.adjust(2, 1, 2, 1)
     return kb.as_markup()
 
 
@@ -144,9 +145,10 @@ def add_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📢 Канал", callback_data="menu:add_channel")
     kb.button(text="📋 Очередь", callback_data="menu:add_queue")
+    kb.button(text="🔀 Правило", callback_data="menu:add_rule")
     kb.button(text="👤 Пользователя", callback_data="menu:add_user")
     kb.button(text="🔙 Назад", callback_data="menu:main")
-    kb.adjust(2, 1)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -162,5 +164,68 @@ def user_actions(user_id: int, is_self: bool) -> InlineKeyboardMarkup:
         kb.button(text="⬇ Понижение/повышение роли", callback_data=f"menu:user:{user_id}:toggle")
         kb.button(text="🗑 Удалить", callback_data=f"menu:user:{user_id}:del")
     kb.button(text="🔙 Назад", callback_data="menu:users")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+# ---------------------------------------------------------------------------
+# Правила маршрутизации (ТЗ §2.2.2)
+# ---------------------------------------------------------------------------
+
+# Типы источников для правила маршрутизации (ТЗ §2.2.1)
+ROUTING_SOURCE_TYPES = [
+    ("telegram_channel", "📢 Telegram-канал"),
+    ("telegram_direct", "💬 ЛС (прямой)"),
+    ("telegram_user", "👤 Telegram-юзер"),
+    ("local_folder", "📁 Локальная папка"),
+    ("gelbooru", "🖼 Gelbooru"),
+    ("any", "⭐ Любой (по умолчанию)"),
+]
+
+
+def source_type_picker() -> InlineKeyboardMarkup:
+    """Выбор типа источника для правила маршрутизации."""
+    kb = InlineKeyboardBuilder()
+    for value, label in ROUTING_SOURCE_TYPES:
+        kb.button(text=label, callback_data=f"menu:rule:stype:{value}")
+    kb.button(text="🔙 Отмена", callback_data="menu:add")
+    kb.adjust(2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def rule_pick_queue(queues: list[dict]) -> InlineKeyboardMarkup:
+    """Выбор целевой очереди для правила маршрутизации."""
+    kb = InlineKeyboardBuilder()
+    for q in queues:
+        kb.button(
+            text=f"📋 «{q['name']}» (#{q['id']})",
+            callback_data=f"menu:rule:queue:{q['id']}",
+        )
+    kb.button(text="🔙 Отмена", callback_data="menu:add")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def rules_list(rules: list[dict], queues_map: dict[int, str]) -> InlineKeyboardMarkup:
+    """Список правил маршрутизации с кнопками удаления."""
+    kb = InlineKeyboardBuilder()
+    for r in rules:
+        active = "✅" if r.get("is_active") else "⏸"
+        qname = queues_map.get(r["target_queue_id"], f"#{r['target_queue_id']}")
+        pattern = r["source_pattern"][:25]
+        kb.button(
+            text=f"{active} #{r['id']} {r['source_type']} «{pattern}» → «{qname}» (p={r['priority']})",
+            callback_data=f"menu:rule:{r['id']}",
+        )
+    kb.button(text="🔙 Назад", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def rule_actions(rule_id: int) -> InlineKeyboardMarkup:
+    """Действия с правилом: удалить, вкл/выкл."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить", callback_data=f"menu:rule:{rule_id}:del")
+    kb.button(text="🔙 К правилам", callback_data="menu:rules")
     kb.adjust(1)
     return kb.as_markup()

@@ -1,14 +1,20 @@
-"""Inline-меню (ТЗ §8.3) — главное взаимодействие через кнопки.
+"""Inline-меню (ТЗ §8.3) — главное взаимодействие через кнопками.
 
-Замена текстовым командам: всё через callback-кнопки. FSM используется для
-ввода данных при добавлении канала/очереди/пользователя.
+Ключевые принципы (исправление FSM-ловушки из логов 6-7):
+1. cmd_cancel — ПЕРВЫЙ хендлер, перехватывает /cancel В ЛЮБОМ состоянии
+   (без фильтра StateFilter). Без этого /cancel перехватывался FSM-хендлером.
+2. cmd_menu/cmd_start — тоже первыми (очищают состояние, показывают меню).
+3. FSM message-хендлеры — с фильтром F.text (только текстовые сообщения),
+   чтобы фото/видео НЕ триггерили «Название не может быть пустым».
+4. Catch-all для не-текстовых сообщений в FSM — «Я жду текст, /cancel для отмены».
+   Фото/видео в FSM НЕ создают посты (предотвращает путаницу).
 """
 from __future__ import annotations
 
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -24,6 +30,9 @@ from app.repositories import (
     queues as queues_repo,
 )
 from app.repositories import (
+    routing as routing_repo,
+)
+from app.repositories import (
     users as users_repo,
 )
 from app.scheduler import reload_scheduler
@@ -33,28 +42,45 @@ logger = logging.getLogger("handlers.menu")
 router = Router(name="menu")
 
 
-# Все FSM-состояния определяем ВНАЧАЛЕ файла — до декораторов, которые их используют.
+# Все FSM-состояния определяем ВНАЧАЛЕ файла — до декораторов.
 class AddStates(StatesGroup):
     """FSM состояния для добавления сущностей."""
     # Пользователь
     add_user_tg_id = State()
     add_user_role = State()
-    # Канал
-    add_channel_name = State()    # chat_id уже сохранён в data при старте FSM
-    add_channel_username = State()
+    # Канал (3 шага через единый flow)
+    add_channel_flow = State()
     # Очередь
     add_queue_pick_channel = State()
     add_queue_name = State()
     add_queue_interval = State()
+    # Правило маршрутизации
+    add_rule_pattern = State()
+    add_rule_pick_queue = State()
+    add_rule_priority = State()
 
 
-# ---------------------------------------------------------------------------
-# Главное меню
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# ПРИОРИТЕТНЫЕ ХЕНДЛЕРЫ (перехватывают /cancel, /menu, /start в любом состоянии)
+# Должны быть зарегистрированы ПЕРВЫМИ, иначе FSM-хендлеры их перехватят.
+# ===========================================================================
+
+@router.message(F.text == "/cancel")
+async def cmd_cancel(message: Message, state: FSMContext, user_role: str | None = None) -> None:
+    """Отмена любого FSM-действия. Перехватывает /cancel В ЛЮБОМ состоянии."""
+    current = await state.get_state()
+    await state.clear()
+    if current is not None:
+        await message.answer("❌ Действие отменено.", reply_markup=kb.main_menu(user_role == "admin"))
+    else:
+        await message.answer("🏠 Главное меню.", reply_markup=kb.main_menu(user_role == "admin"))
+
 
 @router.message(Command("menu"))
 @router.message(Command("start"))
-async def cmd_menu(message: Message, user: dict | None = None, user_role: str | None = None) -> None:
+async def cmd_menu(message: Message, state: FSMContext, user: dict | None = None, user_role: str | None = None) -> None:
+    """Открывает главное inline-меню. Очищает FSM-состояние если было."""
+    await state.clear()
     is_admin = user_role == "admin"
     await message.answer(
         "🏠 **Главное меню**\n\nИспользуй кнопки ниже. Пришли фото/видео/GIF — поставлю в очередь.",
@@ -63,7 +89,8 @@ async def cmd_menu(message: Message, user: dict | None = None, user_role: str | 
 
 
 @router.callback_query(F.data == "menu:main")
-async def cb_main(call: CallbackQuery, user_role: str | None = None) -> None:
+async def cb_main(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
+    await state.clear()
     is_admin = user_role == "admin"
     await call.message.edit_text(
         "🏠 **Главное меню**\n\nИспользуй кнопки ниже.",
@@ -77,9 +104,28 @@ async def cb_noop(call: CallbackQuery) -> None:
     await call.answer()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# ВСПОМОГАТЕЛЬНЫЙ: catch не-текстовых сообщений в FSM-состоянии
+# Фото/видео/документ, отправленные во время FSM (добавление очереди/канала/...),
+# НЕ создают посты и НЕ триггерят «название пустое» — выводим подсказку.
+# ===========================================================================
+
+@router.message(StateFilter(AddStates), ~F.text)
+async def fsm_non_text_in_state(message: Message) -> None:
+    """Перехватывает фото/видео/документ/голосовое в любом FSM-состоянии.
+
+    Без этого фото попадало в FSM-хендлер → «Название не может быть пустым».
+    Теперь пользователь видит понятную подсказку: жду текст, /cancel для отмены.
+    """
+    await message.answer(
+        "✏️ Я жду текстовый ответ (не медиа).\n"
+        "Отправь текст или нажми /cancel для отмены."
+    )
+
+
+# ===========================================================================
 # Очереди
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:queues")
 async def cb_queues(call: CallbackQuery) -> None:
@@ -112,9 +158,9 @@ async def cb_queue(call: CallbackQuery) -> None:
     await call.answer()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Входящие
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:inbox")
 async def cb_inbox(call: CallbackQuery) -> None:
@@ -124,20 +170,17 @@ async def cb_inbox(call: CallbackQuery) -> None:
     await call.answer()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Карточка поста + действия
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @router.callback_query(F.data.startswith("menu:post:"))
 async def cb_post(call: CallbackQuery) -> None:
-    """Карточка поста: menu:post:<id> или menu:post:<id>:<action>[:arg]."""
     parts = call.data.split(":")
     post_id = int(parts[2])
     action = parts[3] if len(parts) > 3 else None
 
-    # Действия над постом
     if action == "toq":
-        # menu:post:<id>:toq:<qid> — поставить в очередь
         queue_id = int(parts[4])
         post = await posts_repo.get_post(post_id)
         if not post:
@@ -178,7 +221,6 @@ async def cb_post(call: CallbackQuery) -> None:
         await _render_post_card(call, post, queues)
         return
 
-    # Просто показать карточку
     post = await posts_repo.get_post(post_id)
     if not post:
         await call.answer("Пост не найден", show_alert=True)
@@ -188,7 +230,6 @@ async def cb_post(call: CallbackQuery) -> None:
 
 
 async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict]) -> None:
-    """Отрисовать карточку поста (общий хелпер)."""
     text = (
         f"🖼 **Пост #{post['id']}**\n"
         f"Тип: {post['file_type']}\n"
@@ -203,9 +244,9 @@ async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict])
     await call.message.edit_text(text, reply_markup=kb.post_card(post, queues))
 
 
-# ---------------------------------------------------------------------------
-# Каналы
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Каналы (FSM через единый flow)
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:channels")
 async def cb_channels(call: CallbackQuery, user_role: str | None = None) -> None:
@@ -226,8 +267,7 @@ async def cb_add_channel(call: CallbackQuery, state: FSMContext, user_role: str 
     if user_role != "admin":
         await call.answer("Только admin", show_alert=True)
         return
-    # Первое состояние — вводим chat_id прямо в cb_add_channel_chat_id через message
-    await state.set_state(AddStates.add_channel_name)
+    await state.set_state(AddStates.add_channel_flow)
     await state.update_data(step="chat_id")
     await call.message.edit_text(
         "📢 **Добавление канала**\n\n"
@@ -241,15 +281,15 @@ async def cb_add_channel(call: CallbackQuery, state: FSMContext, user_role: str 
     await call.answer()
 
 
-@router.message(AddStates.add_channel_name)
+@router.message(AddStates.add_channel_flow, F.text)
 async def add_channel_flow(message: Message, state: FSMContext, user_role: str | None = None) -> None:
-    """Единый обработчик для всех 3 шагов добавления канала."""
+    """Единый обработчик для всех 3 шагов добавления канала (только текст)."""
     if user_role != "admin":
         await state.clear()
         return
     data = await state.get_data()
     step = data.get("step", "chat_id")
-    text = message.text.strip() if message.text else ""
+    text = (message.text or "").strip()
 
     if step == "chat_id":
         try:
@@ -296,9 +336,9 @@ async def add_channel_flow(message: Message, state: FSMContext, user_role: str |
         await state.clear()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Очередь (FSM)
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:add_queue")
 async def cb_add_queue(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
@@ -333,29 +373,29 @@ async def add_queue_pick_channel(call: CallbackQuery, state: FSMContext) -> None
     await call.answer()
 
 
-@router.message(AddStates.add_queue_name)
+@router.message(AddStates.add_queue_name, F.text)
 async def add_queue_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip() if message.text else ""
+    name = (message.text or "").strip()
     if not name:
-        await message.answer("Название не может быть пустым. Попробуй ещё раз или /cancel")
+        await message.answer("Название не может быть пустым. Введи ещё раз или /cancel")
         return
     await state.update_data(name=name)
     await state.set_state(AddStates.add_queue_interval)
     await message.answer("Шаг 3/3: Пришли интервал публикации в минутах (например 60)", reply_markup=kb.confirm_cancel())
 
 
-@router.message(AddStates.add_queue_interval)
+@router.message(AddStates.add_queue_interval, F.text)
 async def add_queue_interval(message: Message, state: FSMContext, user_role: str | None = None) -> None:
     if user_role != "admin":
         await state.clear()
         return
-    text = message.text.strip() if message.text else ""
+    text = (message.text or "").strip()
     try:
         interval = int(text)
         if interval < 1:
             raise ValueError
     except ValueError:
-        await message.answer("Нужно целое число минут (≥1). Попробуй ещё раз или /cancel")
+        await message.answer("Нужно целое число минут (≥1). Введи ещё раз или /cancel")
         return
     data = await state.get_data()
     ch_id = data["channel_id"]
@@ -370,9 +410,162 @@ async def add_queue_interval(message: Message, state: FSMContext, user_role: str
     await state.clear()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Правила маршрутизации (ТЗ §2.2.2) — НОВОЕ
+# ===========================================================================
+
+@router.callback_query(F.data == "menu:rules")
+async def cb_rules(call: CallbackQuery, user_role: str | None = None) -> None:
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    rules = await routing_repo.list_rules(active_only=False)
+    queues = await queues_repo.list_queues(active_only=False)
+    queues_map = {q["id"]: q["name"] for q in queues}
+    if not rules:
+        await call.message.edit_text(
+            "🔀 **Правила маршрутизации**\n\n"
+            "Правил пока нет. Посты без правила идут во «Входящие».\n\n"
+            "Добавь правило кнопкой «➕ Добавить» → «🔀 Правило».",
+            reply_markup=kb.back_button(),
+        )
+        await call.answer()
+        return
+    await call.message.edit_text("🔀 **Правила маршрутизации** (нажми для удаления):", reply_markup=kb.rules_list(rules, queues_map))
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:add_rule")
+async def cb_add_rule(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    await state.set_state(AddStates.add_rule_pattern)
+    await state.update_data(step="source_type")
+    await call.message.edit_text(
+        "🔀 **Добавление правила маршрутизации**\n\n"
+        "Шаг 1/4: Выбери тип источника:",
+        reply_markup=kb.source_type_picker(),
+    )
+    await call.answer()
+
+
+@router.callback_query(AddStates.add_rule_pattern, F.data.startswith("menu:rule:stype:"))
+async def add_rule_pick_source(call: CallbackQuery, state: FSMContext) -> None:
+    source_type = call.data.split(":")[3]
+    await state.update_data(source_type=source_type)
+    await call.message.edit_text(
+        f"Тип: **{source_type}**\n\n"
+        "Шаг 2/4: Пришли паттерн для source_id.\n\n"
+        "Примеры:\n"
+        "• Для канала: `-1002257882757` (точное совпадение) или `@anime_channel`\n"
+        "• Regex (если есть спецсимволы `.*[]()`): `.*rating:safe.*`\n"
+        "• Любой: `.*`\n\n"
+        "Или /cancel для отмены.",
+        reply_markup=kb.confirm_cancel(),
+    )
+    await call.answer()
+
+
+@router.message(AddStates.add_rule_pattern, F.text)
+async def add_rule_pattern(message: Message, state: FSMContext) -> None:
+    pattern = (message.text or "").strip()
+    if not pattern:
+        await message.answer("Паттерн не может быть пустым. Введи ещё раз или /cancel")
+        return
+    await state.update_data(source_pattern=pattern)
+    await state.set_state(AddStates.add_rule_pick_queue)
+    queues = await queues_repo.list_queues(active_only=False)
+    if not queues:
+        await message.answer("⚠️ Нет очередей. Сначала добавь очередь.", reply_markup=kb.back_button())
+        await state.clear()
+        return
+    await message.answer("Шаг 3/4: Выбери целевую очередь:", reply_markup=kb.rule_pick_queue(queues))
+
+
+@router.callback_query(AddStates.add_rule_pick_queue, F.data.startswith("menu:rule:queue:"))
+async def add_rule_pick_queue(call: CallbackQuery, state: FSMContext) -> None:
+    qid = int(call.data.split(":")[3])
+    await state.update_data(target_queue_id=qid)
+    await state.set_state(AddStates.add_rule_priority)
+    await call.message.edit_text(
+        f"Очередь #{qid} выбрана.\n"
+        "Шаг 4/4: Пришли приоритет (целое число, выше = важнее, например 10).\n"
+        "Или 0 для правила по умолчанию.",
+        reply_markup=kb.confirm_cancel(),
+    )
+    await call.answer()
+
+
+@router.message(AddStates.add_rule_priority, F.text)
+async def add_rule_priority(message: Message, state: FSMContext, user_role: str | None = None) -> None:
+    if user_role != "admin":
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    try:
+        priority = int(text)
+    except ValueError:
+        await message.answer("Нужно целое число (например 10). Введи ещё раз или /cancel")
+        return
+    data = await state.get_data()
+    rid = await routing_repo.create_rule(
+        source_type=data["source_type"],
+        source_pattern=data["source_pattern"],
+        target_queue_id=data["target_queue_id"],
+        priority=priority,
+    )
+    await message.answer(
+        f"✓ Правило #{rid} создано.\n"
+        f"  {data['source_type']} «{data['source_pattern']}» → очередь #{data['target_queue_id']} (приоритет {priority})",
+        reply_markup=kb.main_menu(is_admin=True),
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("menu:rule:"))
+async def cb_rule_actions(call: CallbackQuery, user_role: str | None = None) -> None:
+    """Действия с правилом: menu:rule:<id> (карточка) или menu:rule:<id>:del."""
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    parts = call.data.split(":")
+    rid = int(parts[2])
+    action = parts[3] if len(parts) > 3 else None
+
+    if action == "del":
+        await routing_repo.remove_rule(rid)
+        await call.answer(f"Правило #{rid} удалено", show_alert=True)
+        rules = await routing_repo.list_rules(active_only=False)
+        queues = await queues_repo.list_queues(active_only=False)
+        queues_map = {q["id"]: q["name"] for q in queues}
+        await call.message.edit_text(
+            "🔀 **Правила маршрутизации**:" if rules else "🔀 Правил нет.",
+            reply_markup=kb.rules_list(rules, queues_map) if rules else kb.back_button(),
+        )
+        return
+
+    rule = await routing_repo.get_rule(rid)
+    if not rule:
+        await call.answer("Не найдено", show_alert=True)
+        return
+    queues = await queues_repo.list_queues(active_only=False)
+    qname = next((q["name"] for q in queues if q["id"] == rule["target_queue_id"]), f"#{rule['target_queue_id']}")
+    text = (
+        f"🔀 **Правило #{rule['id']}**\n"
+        f"Тип источника: {rule['source_type']}\n"
+        f"Паттерн: `{rule['source_pattern']}`\n"
+        f"Очередь: «{qname}» (#{rule['target_queue_id']})\n"
+        f"Приоритет: {rule['priority']}\n"
+        f"Активно: {'да' if rule['is_active'] else 'нет'}"
+    )
+    await call.message.edit_text(text, reply_markup=kb.rule_actions(rule["id"]))
+    await call.answer()
+
+
+# ===========================================================================
 # Пользователи (FSM)
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:add_user")
 async def cb_add_user(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
@@ -394,21 +587,23 @@ async def cb_add_user(call: CallbackQuery, state: FSMContext, user_role: str | N
 
 @router.message(AddStates.add_user_tg_id)
 async def add_user_tg_id(message: Message, state: FSMContext) -> None:
+    """Принимает И текст (tg_id), И пересланное сообщение (forward)."""
     tg_id = None
     username = None
-    # Пытаемся извлечь из пересланного сообщения
     if message.forward_origin is not None:
         sender = getattr(message.forward_origin, "sender_user", None)
         if sender is not None:
             tg_id = sender.id
             username = getattr(sender, "username", None)
-    if tg_id is None:
-        text = message.text.strip() if message.text else ""
+    if tg_id is None and message.text:
         try:
-            tg_id = int(text)
+            tg_id = int(message.text.strip())
         except ValueError:
             await message.answer("Нужно число (tg_id) или пересланное сообщение. Попробуй ещё раз или /cancel")
             return
+    if tg_id is None:
+        await message.answer("Не понял. Пришли числовой tg_id или перешли сообщение. Или /cancel")
+        return
     await state.update_data(tg_id=tg_id, username=username)
     await state.set_state(AddStates.add_user_role)
     await message.answer(
@@ -417,14 +612,14 @@ async def add_user_tg_id(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(AddStates.add_user_role)
+@router.message(AddStates.add_user_role, F.text)
 async def add_user_role(message: Message, state: FSMContext, user_role: str | None = None) -> None:
     if user_role != "admin":
         await state.clear()
         return
-    role = (message.text.strip().lower() if message.text else "")
+    role = (message.text or "").strip().lower()
     if role not in ("admin", "moderator"):
-        await message.answer("Нужно 'admin' или 'moderator'. Попробуй ещё раз или /cancel")
+        await message.answer("Нужно 'admin' или 'moderator'. Введи ещё раз или /cancel")
         return
     data = await state.get_data()
     tg_id = data["tg_id"]
@@ -485,9 +680,9 @@ async def cb_user_actions(call: CallbackQuery, user_role: str | None = None) -> 
     await call.answer()
 
 
-# ---------------------------------------------------------------------------
-# Добавить (подменю)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Подменю «Добавить»
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:add")
 async def cb_add(call: CallbackQuery, user_role: str | None = None) -> None:
@@ -498,9 +693,9 @@ async def cb_add(call: CallbackQuery, user_role: str | None = None) -> None:
     await call.answer()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Статистика
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @router.callback_query(F.data == "menu:stats")
 async def cb_stats(call: CallbackQuery) -> None:
@@ -511,6 +706,7 @@ async def cb_stats(call: CallbackQuery) -> None:
     inbox = len(await posts_repo.list_inbox(limit=100))
     queues = await queues_repo.list_queues(active_only=True)
     users = await users_repo.list_users()
+    rules = await routing_repo.list_rules(active_only=True)
     text = (
         "📊 **Статистика**\n"
         f"Постов всего: {total}\n"
@@ -519,21 +715,8 @@ async def cb_stats(call: CallbackQuery) -> None:
         f"  • failed: {failed}\n"
         f"  • во Входящих: {inbox}\n"
         f"Активных очередей: {len(queues)}\n"
+        f"Правил маршрутизации: {len(rules)}\n"
         f"Пользователей: {len(users)}"
     )
     await call.message.edit_text(text, reply_markup=kb.back_button())
     await call.answer()
-
-
-# ---------------------------------------------------------------------------
-# Отмена FSM
-# ---------------------------------------------------------------------------
-
-@router.message(F.text == "/cancel")
-async def cmd_cancel(message: Message, state: FSMContext, user_role: str | None = None) -> None:
-    current = await state.get_state()
-    await state.clear()
-    if current is not None:
-        await message.answer("❌ Действие отменено.", reply_markup=kb.main_menu(user_role == "admin"))
-    else:
-        await message.answer("🏠 Главное меню.", reply_markup=kb.main_menu(user_role == "admin"))
