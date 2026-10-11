@@ -2,30 +2,28 @@
 
 Создаёт Bot (через Local Bot API Server, ТЗ §3.3) и Dispatcher с:
 - AccessMiddleware (RBAC, ТЗ §2.6)
-- роутерами handlers: start, media, admin
+- роутерами handlers: menu (inline-кнопки), media, admin (текстовые команды-совместимость)
+- MemoryStorage для FSM (многошаговое добавление канала/очереди/пользователя)
 """
 from __future__ import annotations
 
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.bot.handlers import admin, media, start
+from app.bot import runtime
+from app.bot.handlers import admin, media, menu, start
 from app.bot.middleware.access import AccessMiddleware
-from app.utils.local_bot_api import create_bot
 
 log = logging.getLogger("bot")
 
-_bot: Bot | None = None
 _dp: Dispatcher | None = None
 
 
 def get_bot() -> Bot:
-    global _bot
-    if _bot is None:
-        # create_bot подключает сессию к Local Bot API Server (ТЗ §3.3)
-        _bot = create_bot()
-    return _bot
+    """Возвращает singleton Bot (через runtime, разрывает циклический импорт)."""
+    return runtime.get_bot()
 
 
 def get_dispatcher() -> Dispatcher:
@@ -33,24 +31,22 @@ def get_dispatcher() -> Dispatcher:
     if _dp is not None:
         return _dp
 
-    dp = Dispatcher()
-    # RBAC: проверка доступа по роли перед каждым хендлером (ТЗ §2.6)
+    dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
 
-    # Порядок важен: media ловит контентные сообщения, start — команды /start /help,
-    # admin — остальные команды. Регистрируем admin первым, чтобы команды перехватывались
-    # раньше общего media-хендлера (у media фильтр по content_types, не команды —
-    # но для надёжности ставим admin + start первыми).
-    dp.include_router(start.router)
-    dp.include_router(admin.router)
+    # Порядок роутеров важен:
+    # 1. menu — inline-кнопки + FSM (основной интерфейс)
+    # 2. media — приём медиа из ЛС (file_id, маршрутизация)
+    # 3. admin — текстовые команды (обратная совместимость)
+    # 4. start — /help (fallback)
+    dp.include_router(menu.router)
     dp.include_router(media.router)
+    dp.include_router(admin.router)
+    dp.include_router(start.router)
     _dp = dp
     return dp
 
 
 async def close_bot() -> None:
-    global _bot
-    if _bot is not None:
-        await _bot.session.close()
-        _bot = None
+    await runtime.close_bot()
