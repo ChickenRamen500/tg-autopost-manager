@@ -54,6 +54,7 @@ class AddStates(StatesGroup):
     add_queue_pick_channel = State()
     add_queue_name = State()
     add_queue_interval = State()
+    add_queue_group_albums = State()
     # Правило маршрутизации
     add_rule_pattern = State()
     add_rule_pick_queue = State()
@@ -147,10 +148,12 @@ async def cb_queue(call: CallbackQuery) -> None:
         await call.answer("Очередь не найдена", show_alert=True)
         return
     pending = await queues_repo.count_pending(qid)
+    group_label = "да (send_media_group)" if queue.get("group_albums") else "нет (по одному)"
     text = (
         f"📋 **Очередь #{qid} «{queue['name']}»**\n"
         f"Канал: #{queue['channel_id']}\n"
         f"Интервал: каждые {queue['interval_minutes']} мин\n"
+        f"Альбомы группой: {group_label}\n"
         f"pending постов: {pending}\n\n"
         f"Последние посты ({len(posts)}):"
     )
@@ -221,6 +224,32 @@ async def cb_post(call: CallbackQuery) -> None:
         await _render_post_card(call, post, queues)
         return
 
+    if action == "del":
+        # Удаление поста (для очистки дубликатов из Входящих)
+        post = await posts_repo.get_post(post_id)
+        if not post:
+            await call.answer("Пост не найден", show_alert=True)
+            return
+        await posts_repo.delete_post(post_id)
+        await call.answer(f"Пост #{post_id} удалён", show_alert=True)
+        # Возврат туда, откуда пришли: Входящие или очередь
+        if post.get("queue_id") is None:
+            posts = await posts_repo.list_inbox(limit=15)
+            await call.message.edit_text(
+                "📥 **Входящие** (посты без очереди)" if posts else "📥 Входящие пусты",
+                reply_markup=kb.inbox_posts(posts),
+            )
+        else:
+            qid = post["queue_id"]
+            posts = await posts_repo.list_queue_posts(qid, limit=15)
+            queue = await queues_repo.get_queue(qid)
+            qname = queue["name"] if queue else f"#{qid}"
+            await call.message.edit_text(
+                f"📋 Очередь #{qid} «{qname}» (постов: {len(posts)})",
+                reply_markup=kb.queue_posts(qid, posts),
+            )
+        return
+
     post = await posts_repo.get_post(post_id)
     if not post:
         await call.answer("Пост не найден", show_alert=True)
@@ -241,6 +270,8 @@ async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict])
         text += f"Подпись: {post['original_caption'][:100]}\n"
     if post.get("tg_file_id"):
         text += f"file_id: {post['tg_file_id'][:20]}...\n"
+    if post.get("media_group_id"):
+        text += f"📸 Альбом: {post['media_group_id'][:20]}...\n"
     await call.message.edit_text(text, reply_markup=kb.post_card(post, queues))
 
 
@@ -355,7 +386,7 @@ async def cb_add_queue(call: CallbackQuery, state: FSMContext, user_role: str | 
         return
     await state.set_state(AddStates.add_queue_pick_channel)
     await call.message.edit_text(
-        "📋 **Добавление очереди**\nШаг 1/3: Нажми на канал-получатель:",
+        "📋 **Добавление очереди**\nШаг 1/4: Нажми на канал-получатель:",
         reply_markup=kb.channels_list(channels),
     )
     await call.answer()
@@ -367,7 +398,7 @@ async def add_queue_pick_channel(call: CallbackQuery, state: FSMContext) -> None
     await state.update_data(channel_id=ch_id)
     await state.set_state(AddStates.add_queue_name)
     await call.message.edit_text(
-        f"Канал #{ch_id} выбран.\nШаг 2/3: Пришли название очереди (например: Утренние посты)",
+        f"Канал #{ch_id} выбран.\nШаг 2/4: Пришли название очереди (например: Утренние посты)",
         reply_markup=kb.confirm_cancel(),
     )
     await call.answer()
@@ -381,14 +412,11 @@ async def add_queue_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(name=name)
     await state.set_state(AddStates.add_queue_interval)
-    await message.answer("Шаг 3/3: Пришли интервал публикации в минутах (например 60)", reply_markup=kb.confirm_cancel())
+    await message.answer("Шаг 3/4: Пришли интервал публикации в минутах (например 60)", reply_markup=kb.confirm_cancel())
 
 
 @router.message(AddStates.add_queue_interval, F.text)
-async def add_queue_interval(message: Message, state: FSMContext, user_role: str | None = None) -> None:
-    if user_role != "admin":
-        await state.clear()
-        return
+async def add_queue_interval(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     try:
         interval = int(text)
@@ -397,13 +425,39 @@ async def add_queue_interval(message: Message, state: FSMContext, user_role: str
     except ValueError:
         await message.answer("Нужно целое число минут (≥1). Введи ещё раз или /cancel")
         return
+    await state.update_data(interval=interval)
+    await state.set_state(AddStates.add_queue_group_albums)
+    await message.answer(
+        "Шаг 4/4: Группировать альбомы при отправке?\n\n"
+        "• 'да' — альбом из N фото отправится в канал одним сообщением (send_media_group)\n"
+        "• 'нет' — каждое фото отдельным сообщением\n\n"
+        "Пришли 'да' или 'нет'.",
+        reply_markup=kb.confirm_cancel(),
+    )
+
+
+@router.message(AddStates.add_queue_group_albums, F.text)
+async def add_queue_group_albums(message: Message, state: FSMContext, user_role: str | None = None) -> None:
+    if user_role != "admin":
+        await state.clear()
+        return
+    text = (message.text or "").strip().lower()
+    if text in ("да", "yes", "1", "true", "д"):
+        group_albums = True
+    elif text in ("нет", "no", "0", "false", "н"):
+        group_albums = False
+    else:
+        await message.answer("Пришли 'да' или 'нет'. Введи ещё раз или /cancel")
+        return
     data = await state.get_data()
     ch_id = data["channel_id"]
     name = data["name"]
-    qid = await queues_repo.create_queue(ch_id, name, interval_minutes=interval)
+    interval = data["interval"]
+    qid = await queues_repo.create_queue(ch_id, name, interval_minutes=interval, group_albums=group_albums)
     n = await reload_scheduler()
+    group_label = "альбомы группой" if group_albums else "по одному"
     await message.answer(
-        f"✓ Очередь «{name}» добавлена (id={qid}, каждые {interval} мин).\n"
+        f"✓ Очередь «{name}» добавлена (id={qid}, каждые {interval} мин, {group_label}).\n"
         f"✓ Планировщик: активных очередей {n}.",
         reply_markup=kb.main_menu(is_admin=True),
     )

@@ -51,6 +51,7 @@ async def create_post(
     tags: list[str] | None = None,
     status: str = "pending",
     was_processed: bool = False,
+    media_group_id: str | None = None,
 ) -> int:
     """Создаёт пост. По умолчанию статус 'pending' (готов к публикации).
 
@@ -68,8 +69,8 @@ async def create_post(
         INSERT INTO posts (
             queue_id, source_type, source_id, source_url, source_channel,
             file_path, file_type, tg_file_id, file_unique_id, file_size, mime_type,
-            was_processed, original_caption, processed_caption, tags, status, scheduled_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            was_processed, original_caption, processed_caption, tags, status, scheduled_time, media_group_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             queue_id,
@@ -89,12 +90,44 @@ async def create_post(
             _tags_to_json(tags),
             status,
             None,
+            media_group_id,
         ),
     )
     await db.commit()
     rid = cur.lastrowid
     await cur.close()
     return rid
+
+
+async def delete_post(post_id: int) -> bool:
+    """Удаляет пост (для ручной очистки дубликатов из Входящих)."""
+    db = get_db()
+    cur = await db.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
+async def find_album_posts(queue_id: int, media_group_id: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Все pending-посты альбома (с одинаковым media_group_id) в очереди.
+
+    Для групповой отправки через send_media_group (ТЗ §2.1.1).
+    Возвращает посты в порядке создания.
+    """
+    db = get_db()
+    cur = await db.execute(
+        """
+        SELECT * FROM posts
+        WHERE queue_id = ? AND media_group_id = ? AND status = 'pending'
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+        """,
+        (queue_id, media_group_id, limit),
+    )
+    rows = await cur.fetchall()
+    await cur.close()
+    return [_row_to_post(r) for r in rows]
 
 
 async def get_post(post_id: int) -> dict[str, Any] | None:

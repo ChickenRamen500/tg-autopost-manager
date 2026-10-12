@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS queues (
     crop_video         INTEGER NOT NULL DEFAULT 0,
     signature_template TEXT,
     shuffle_enabled    INTEGER NOT NULL DEFAULT 1,
+    -- Группировать альбомы при отправке (ТЗ §2.1.1: «каждый файл как отдельный пост или групповой пост»):
+    -- TRUE → посты с одинаковым media_group_id отправляются одним сообщением через send_media_group
+    group_albums       INTEGER NOT NULL DEFAULT 0,
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (channel_id) REFERENCES channels(id)
 );
@@ -59,6 +62,8 @@ CREATE TABLE IF NOT EXISTS posts (
     status             TEXT NOT NULL CHECK(status IN ('new', 'downloading', 'pending', 'sent',
                                                        'failed', 'duplicate', 'possible_duplicate')),
     phash              TEXT,                           -- perceptual hash для поиска дубликатов
+    -- ID группы альбома (ТЗ §2.1.1): посты с одинаковым media_group_id — один альбом
+    media_group_id     TEXT,
     scheduled_time     DATETIME,
     sent_at            DATETIME,
     -- Расширение Фазы 2 для реализации §2.5.2 (учёт попыток отправки):
@@ -131,6 +136,7 @@ CREATE TABLE IF NOT EXISTS task_queue (
 CREATE INDEX IF NOT EXISTS idx_posts_queue_status ON posts(queue_id, status);
 CREATE INDEX IF NOT EXISTS idx_posts_file_unique  ON posts(file_unique_id);
 CREATE INDEX IF NOT EXISTS idx_posts_source       ON posts(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_posts_media_group  ON posts(media_group_id);
 CREATE INDEX IF NOT EXISTS idx_routing_active      ON routing_rules(is_active, priority);
 CREATE INDEX IF NOT EXISTS idx_dup_hash_value      ON duplicate_hashes(hash_type, hash_value);
 CREATE INDEX IF NOT EXISTS idx_task_queue_status   ON task_queue(status);

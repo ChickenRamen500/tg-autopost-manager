@@ -14,13 +14,14 @@ async def create_queue(
     signature_template: str | None = None,
     shuffle_enabled: bool = True,
     is_active: bool = True,
+    group_albums: bool = False,
 ) -> int:
     db = get_db()
     cur = await db.execute(
         """
         INSERT INTO queues
-            (channel_id, name, interval_minutes, is_active, crop_video, signature_template, shuffle_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (channel_id, name, interval_minutes, is_active, crop_video, signature_template, shuffle_enabled, group_albums)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             channel_id,
@@ -30,6 +31,7 @@ async def create_queue(
             1 if crop_video else 0,
             signature_template,
             1 if shuffle_enabled else 0,
+            1 if group_albums else 0,
         ),
     )
     await db.commit()
@@ -96,3 +98,16 @@ async def count_pending(queue_id: int) -> int:
     row = await cur.fetchone()
     await cur.close()
     return row["c"] if row else 0
+
+
+async def set_group_albums(queue_id: int, group_albums: bool) -> bool:
+    """Включить/выключить групповую отправку альбомов для очереди (ТЗ §2.1.1)."""
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE queues SET group_albums = ? WHERE id = ?",
+        (1 if group_albums else 0, queue_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
