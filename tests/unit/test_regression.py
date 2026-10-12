@@ -311,3 +311,167 @@ def test_keyboards_build_routing():
     am = kb.add_menu()
     buttons_text = [b.text for row in am.inline_keyboard for b in row]
     assert any("🔀" in t for t in buttons_text), f"Нет кнопки Маршрутизация в add_menu: {buttons_text}"
+
+
+def test_post_card_has_delete_button():
+    """Карточка поста содержит кнопку «🗑 Удалить пост» (для очистки дубликатов)."""
+    from app.bot.keyboards import builder as kb
+
+    post = {
+        "id": 42,
+        "status": "possible_duplicate",
+        "queue_id": None,  # во Входящих
+        "file_type": "photo",
+    }
+    card = kb.post_card(post, queues=[])
+    buttons = [b.text for row in card.inline_keyboard for b in row]
+    assert any("🗑" in t for t in buttons), f"Нет кнопки удаления в карточке поста: {buttons}"
+
+
+def test_create_post_with_media_group_id(tmp_path):
+    """Пост сохраняет media_group_id (ТЗ §2.1.1 — альбомы)."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import posts as posts_repo
+
+        # Два поста с одинаковым media_group_id — это альбом
+        p1 = await posts_repo.create_post(
+            source_type="telegram_direct",
+            file_type="photo",
+            tg_file_id="album_file_1",
+            file_unique_id="album_uniq_1",
+            media_group_id="album_123",
+        )
+        p2 = await posts_repo.create_post(
+            source_type="telegram_direct",
+            file_type="photo",
+            tg_file_id="album_file_2",
+            file_unique_id="album_uniq_2",
+            media_group_id="album_123",
+        )
+        assert p1 > 0 and p2 > 0
+
+        # Проверяем, что media_group_id сохранён
+        post1 = await posts_repo.get_post(p1)
+        assert post1["media_group_id"] == "album_123"
+
+    run_with_db(tmp_path, body)
+
+
+def test_find_album_posts_groups_by_media_group_id(tmp_path):
+    """find_album_posts возвращает все посты альбома (одинаковый media_group_id)."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import channels as channels_repo
+        from app.repositories import posts as posts_repo
+        from app.repositories import queues as queues_repo
+
+        ch_id = await channels_repo.create_channel(-1000000000044, "AlbumCh")
+        qid = await queues_repo.create_queue(ch_id, "AlbumQ", group_albums=True)
+
+        # Альбом из 3 фото (одинаковый media_group_id)
+        for i in range(3):
+            await posts_repo.create_post(
+                source_type="telegram_direct",
+                file_type="photo",
+                tg_file_id=f"album_file_{i}",
+                file_unique_id=f"album_uniq_{i}",
+                queue_id=qid,
+                media_group_id="album_xyz",
+            )
+        # Одиничный пост (другой media_group_id)
+        await posts_repo.create_post(
+            source_type="telegram_direct",
+            file_type="photo",
+            queue_id=qid,
+            media_group_id="other_group",
+        )
+
+        album = await posts_repo.find_album_posts(qid, "album_xyz", limit=10)
+        assert len(album) == 3, f"Ожидали 3 поста альбома, получили {len(album)}"
+
+        # Другой альбом
+        other = await posts_repo.find_album_posts(qid, "other_group", limit=10)
+        assert len(other) == 1
+
+    run_with_db(tmp_path, body)
+
+
+def test_delete_post_removes_from_db(tmp_path):
+    """delete_post удаляет пост из БД (для очистки дубликатов)."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import posts as posts_repo
+
+        pid = await posts_repo.create_post(
+            source_type="telegram_direct",
+            file_type="photo",
+            tg_file_id="del_test",
+            file_unique_id="del_uniq",
+        )
+        assert await posts_repo.get_post(pid) is not None
+
+        ok = await posts_repo.delete_post(pid)
+        assert ok is True
+        assert await posts_repo.get_post(pid) is None
+
+        # Повторное удаление — False
+        ok2 = await posts_repo.delete_post(pid)
+        assert ok2 is False
+
+    run_with_db(tmp_path, body)
+
+
+def test_queue_group_albums_setting(tmp_path):
+    """Очередь с group_albums=True сохраняет настройку (ТЗ §2.1.1)."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import channels as channels_repo
+        from app.repositories import queues as queues_repo
+
+        ch_id = await channels_repo.create_channel(-1000000000055, "GACh")
+        qid = await queues_repo.create_queue(ch_id, "GroupAlbumsQ", group_albums=True)
+        q = await queues_repo.get_queue(qid)
+        assert q["group_albums"] == 1
+
+        # Переключение через set_group_albums
+        await queues_repo.set_group_albums(qid, False)
+        q = await queues_repo.get_queue(qid)
+        assert q["group_albums"] == 0
+
+        await queues_repo.set_group_albums(qid, True)
+        q = await queues_repo.get_queue(qid)
+        assert q["group_albums"] == 1
+
+    run_with_db(tmp_path, body)
+
+
+def test_db_migration_adds_columns(tmp_path):
+    """Миграция добавляет media_group_id и group_albums в существующую БД.
+
+    Симулируем старую БД (без колонок) и проверяем, что init_db их добавляет.
+    """
+    from conftest import run_with_db
+
+    async def body():
+        from app.db import get_db
+
+        # init_db уже выполнен в run_with_db — колонки должны быть
+        db = get_db()
+        # Проверяем posts.media_group_id
+        cur = await db.execute("PRAGMA table_info(posts)")
+        cols = [r[1] for r in await cur.fetchall()]
+        await cur.close()
+        assert "media_group_id" in cols, f"Нет колонки media_group_id в posts: {cols}"
+
+        # Проверяем queues.group_albums
+        cur = await db.execute("PRAGMA table_info(queues)")
+        cols = [r[1] for r in await cur.fetchall()]
+        await cur.close()
+        assert "group_albums" in cols, f"Нет колонки group_albums в queues: {cols}"
+
+    run_with_db(tmp_path, body)

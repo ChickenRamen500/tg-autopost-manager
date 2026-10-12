@@ -141,6 +141,9 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     # aiogram 3.x: message.caption — текст подписи (str | None); caption_raw убран в 3.x.
     caption = message.caption or None
     tags: list[str] = []  # теги из captions — Фаза 5 (caption-конвейер)
+    # media_group_id: если сообщение часть альбома, Telegram присылает одинаковый ID
+    # для всех файлов альбома (ТЗ §2.1.1). Сохраняем для групповой отправки.
+    media_group_id = getattr(message, "media_group_id", None)
 
     # Дедупликация по file_unique_id (ТЗ §2.4.3 — точный уровень)
     if media.get("file_unique_id"):
@@ -165,6 +168,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
                 tags=tags,
                 queue_id=None,
                 status="possible_duplicate",
+                media_group_id=media_group_id,
             )
             logger.info("Дубликат #%s (file_unique_id) — possible_duplicate", post_id)
             return
@@ -185,6 +189,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         tags=tags,
         queue_id=queue_id,
         status="pending",
+        media_group_id=media_group_id,
     )
 
     # Альбом: Telegram присылает каждое фото отдельным сообщением с одинаковым media_group_id.

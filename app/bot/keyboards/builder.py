@@ -91,7 +91,7 @@ def inbox_posts(posts: list[dict]) -> InlineKeyboardMarkup:
 
 
 def post_card(post: dict, queues: list[dict]) -> InlineKeyboardMarkup:
-    """Карточка поста: выбрать очередь, удалить из очереди."""
+    """Карточка поста: выбрать очередь, удалить из очереди, удалить пост."""
     kb = InlineKeyboardBuilder()
     status = post["status"]
     if status == "possible_duplicate":
@@ -106,6 +106,7 @@ def post_card(post: dict, queues: list[dict]) -> InlineKeyboardMarkup:
     else:
         kb.button(text="📤 В Входящие", callback_data=f"menu:post:{post['id']}:unqueue")
         kb.button(text="🔄 Повторить отправку", callback_data=f"menu:post:{post['id']}:retry")
+    kb.button(text="🗑 Удалить пост", callback_data=f"menu:post:{post['id']}:del")
     kb.button(text="🔙 Назад", callback_data="menu:inbox" if post.get("queue_id") is None else f"menu:queue:{post['queue_id']}")
     kb.adjust(1)
     return kb.as_markup()

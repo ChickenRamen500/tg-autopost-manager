@@ -171,9 +171,20 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 
 > Управлять правилами: `/menu` → **🔀 Маршрутизация** (список с кнопками удаления).
 
-### Альбомы
+### Альбомы (групповая отправка)
 
-При отправке альбома (несколько фото/видео) каждый файл создаётся **отдельным постом** (ТЗ §2.1.1). Уведомление сокращено, чтобы не спамить: «📥 Пост #N → Входящие (альбом — каждый файл отдельным постом)».
+По ТЗ §2.1.1 альбомы можно отправлять **по одному** (каждый файл отдельным сообщением) или **группой** (одним сообщением через `send_media_group`). Настройка задаётся при создании очереди:
+
+1. `/menu` → **➕ Добавить** → **📋 Очередь**
+2. На шаге 4/4 «Группировать альбомы?» ответь:
+   - **«да»** — альбом из N фото отправится в канал одним сообщением (как в Telegram)
+   - **«нет»** — каждое фото отдельным сообщением
+
+В карточке очереди видно текущую настройку: «Альбомы группой: да (send_media_group)» или «нет (по одному)».
+
+При приёме бот сохраняет `media_group_id` для каждого файла альбома. Если у очереди `group_albums=True`, scheduler собирает все посты с одинаковым `media_group_id` и отправляет их одним вызовом `send_media_group`. Если `False` — каждый пост отправляется отдельно по `file_id`.
+
+Уведомление при приёме альбома сокращено: «📥 Пост #N → Входящие (альбом)».
 
 ### Команды (fallback, текстом)
 
@@ -262,18 +273,18 @@ VALUES ('telegram_channel', '@anime_channel', 1, 10);
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 32 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 38 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 32 passed
+# 38 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
 #   test_scheduler.py      (4)  — стратегия file_id/файл, попытки, порядок pending
-#   test_regression.py    (10)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
+#   test_regression.py    (16)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
 ruff check app/ scripts/ tests/ conftest.py   # All checks passed!
 ```
 
@@ -370,7 +381,7 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 
 Проверка фиксов:
 ```bash
-pytest tests/unit -q                              # 32 passed (10 в test_regression.py)
+pytest tests/unit -q                              # 38 passed (16 в test_regression.py)
 ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 # /add_queue → "Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен."
 ```
@@ -405,7 +416,7 @@ ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 32 passed
+pytest tests/unit -q   # 38 passed
 ruff check             # All checks passed!
 # /menu → главное меню с кнопками
 ```
@@ -423,7 +434,26 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 32 passed (10 в test_regression.py)
+pytest tests/unit -q   # 38 passed (16 в test_regression.py)
 ruff check             # All checks passed!
 # регрессионный тест: cmd_cancel зарегистрирован первым (test_cmd_cancel_registered_before_fsm_handlers)
+```
+
+### Раунд 5 — групповая отправка альбомов + кнопка «Удалить пост»
+
+**Проблема (фидбек):** альбомы отправлялись в канал по одному файлу (каждое фото отдельным сообщением), без возможности групповой отправки. Дубликаты во Входящих нельзя было удалить кнопкой.
+
+| # | Симптом | Причина | Фикс |
+|---|---|---|---|
+| 14 | Альбом из N файлов → N отдельных сообщений в канале | Не было настройки `group_albums` — все очереди отправляли по одному | (а) `app/db/schema.sql`: колонка `group_albums` в `queues` (0/1); (б) `app/db/database.py`: миграция `_run_migrations` добавляет колонку в существующие БД через `ALTER TABLE` (с проверкой `PRAGMA table_info`); (в) `app/scheduler/__init__.py`: `_send_album_group` — собирает посты с одинаковым `media_group_id` и отправляет через `bot.send_media_group`; (г) FSM создания очереди: шаг 4/4 «Группировать альбомы? да/нет» |
+| 15 | Нельзя удалить дубликат из Входящих кнопкой | В карточке поста не было кнопки удаления | (а) `app/repositories/posts.py`: `delete_post(post_id)`; (б) `app/bot/keyboards/builder.py`: кнопка «🗑 Удалить пост» в `post_card`; (в) `app/bot/handlers/menu.py`: callback `menu:post:<id>:del` — удаляет пост и возвращается к списку (Входящие/очередь) |
+| 16 | Альбомы не сохраняли `media_group_id` | В таблице `posts` не было поля | `app/db/schema.sql`: колонка `media_group_id TEXT` в `posts` + индекс `idx_posts_media_group`; миграция в `database.py`; `media.py` сохраняет `message.media_group_id`; `posts_repo.create_post` принимает `media_group_id` |
+
+Проверка:
+```bash
+pytest tests/unit -q   # 38 passed (16 в test_regression.py)
+ruff check             # All checks passed!
+# новые тесты: test_create_post_with_media_group_id, test_find_album_posts_groups_by_media_group_id,
+#              test_delete_post_removes_from_db, test_queue_group_albums_setting,
+#              test_db_migration_adds_columns, test_post_card_has_delete_button
 ```

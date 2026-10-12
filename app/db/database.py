@@ -57,10 +57,41 @@ async def init_db() -> aiosqlite.Connection:
 
     schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
     await _db.executescript(schema_sql)
+    # Миграции для существующих БД: добавляем колонки, если их ещё нет.
+    # SQLite не поддерживает ALTER TABLE ADD COLUMN IF NOT EXISTS, поэтому проверяем через PRAGMA.
+    await _run_migrations(_db)
     await _db.commit()
 
     log.info("БД инициализирована: %s (схема применена)", settings.db_path)
     return _db
+
+
+async def _run_migrations(db: aiosqlite.Connection) -> None:
+    """Добавляет колонки в существующие таблицы (для БД, созданных до этого фикса).
+
+    SQLite не поддерживает ALTER TABLE ... ADD COLUMN IF NOT EXISTS, поэтому
+    проверяем наличие колонки через PRAGMA table_info и добавляем только если нет.
+    """
+    # Карта: (таблица, колонка, DDL-добавление)
+    migrations = [
+        ("posts", "media_group_id", "ALTER TABLE posts ADD COLUMN media_group_id TEXT"),
+        ("queues", "group_albums", "ALTER TABLE queues ADD COLUMN group_albums INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for table, column, ddl in migrations:
+        if not await _column_exists(db, table, column):
+            try:
+                await db.execute(ddl)
+                log.info("Миграция: добавлена колонка %s.%s", table, column)
+            except aiosqlite.OperationalError as e:
+                # Кто-то добавил параллельно — не критично
+                log.debug("Колонка %s.%s уже существует: %s", table, column, e)
+
+
+async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
+    cur = await db.execute(f"PRAGMA table_info({table})")
+    rows = await cur.fetchall()
+    await cur.close()
+    return any(row[1] == column for row in rows)
 
 
 async def close_db() -> None:

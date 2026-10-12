@@ -98,8 +98,48 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any]) -> None:
     log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
 
 
+async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]) -> None:
+    """Отправляет альбом (несколько постов) одним сообщением через send_media_group (ТЗ §2.1.1).
+
+    Все посты должны иметь одинаковый media_group_id и быть в одной очереди.
+    Caption берётся из первого поста (Telegram показывает подпись только для первого).
+    """
+    from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+
+    from app.bot.runtime import get_bot
+
+    bot = get_bot()
+    chat_id = channel["tg_chat_id"]
+
+    media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument] = []
+    for i, p in enumerate(posts):
+        # Caption только для первого элемента альбома (ограничение Telegram)
+        caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
+        ft = p["file_type"]
+        fid = p.get("tg_file_id")
+        if not fid:
+            log.warning("Пост #%s альбома без tg_file_id — пропускаем групповую отправку", p["id"])
+            raise RuntimeError(f"Пост #{p['id']}: альбом требует tg_file_id для всех файлов")
+        if ft == "photo":
+            media.append(InputMediaPhoto(media=fid, caption=caption))
+        elif ft == "video":
+            media.append(InputMediaVideo(media=fid, caption=caption))
+        else:
+            media.append(InputMediaDocument(media=fid, caption=caption))
+
+    if len(media) == 1:
+        await _send_one_post(posts[0], channel)
+        return
+
+    await bot.send_media_group(chat_id=chat_id, media=media)
+    log.info("Альбом (%d постов, media_group_id=%s) отправлен в канал %s", len(posts), posts[0].get("media_group_id"), chat_id)
+
+
 async def send_post_from_queue(queue_id: int) -> None:
     """Отправляет следующий pending-пост из очереди (ТЗ §2.5.1).
+
+    Если у очереди включена групповая отправка альбомов (group_albums=True) и у поста
+    есть media_group_id, собирает все посты альбома и отправляет через send_media_group.
 
     Троттлинг: минимум settings.send_throttle_seconds между отправками в одну очередь.
     """
@@ -120,6 +160,50 @@ async def send_post_from_queue(queue_id: int) -> None:
     wait = settings.send_throttle_seconds - (now - last)
     if wait > 0:
         await asyncio.sleep(wait)
+
+    # Групповая отправка альбомов (ТЗ §2.1.1, §2.5.1):
+    # если у очереди group_albums=True и у поста есть media_group_id,
+    # собираем все pending-посты с тем же media_group_id и отправляем одним сообщением.
+    group_albums = bool(queue.get("group_albums", 0))
+    mgid = post.get("media_group_id")
+    album_posts: list[dict[str, Any]] = []
+    if group_albums and mgid:
+        album_posts = await posts_repo.find_album_posts(queue_id, mgid, limit=10)
+        if len(album_posts) > 1:
+            # Отправляем весь альбом одним вызовом
+            sent_ids: list[int] = []
+            max_attempts = settings.max_send_attempts
+            last_error: str | None = None
+            for _attempt in range(1, max_attempts + 1):
+                try:
+                    await _send_album_group(album_posts, channel)
+                    _last_send[queue_id] = asyncio.get_event_loop().time()
+                    # Помечаем все посты альбома как sent
+                    for p in album_posts:
+                        await posts_repo.mark_sent(p["id"])
+                        sent_ids.append(p["id"])
+                    log.info("Альбом отправлен: посты %s", sent_ids)
+                    return
+                except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
+                    last_error = str(e)
+                    # Инкрементим попытки для всех постов альбома
+                    for p in album_posts:
+                        await posts_repo.increment_attempt(p["id"])
+                    retry_after = getattr(e, "retry_after", None)
+                    if retry_after:
+                        log.warning("429 rate limit на альбом %s: ждём %s сек", mgid, retry_after)
+                        await asyncio.sleep(float(retry_after))
+                        continue
+                    log.warning("Ошибка отправки альбома %s (попытка %d/%d): %s", mgid, _attempt, max_attempts, e)
+                    if _attempt >= max_attempts:
+                        for p in album_posts:
+                            await posts_repo.mark_failed(p["id"], last_error)
+                        log.error("Альбом %s переведён в failed после %d попыток", mgid, max_attempts)
+                        return
+                    await asyncio.sleep(2.0)
+            _last_send[queue_id] = asyncio.get_event_loop().time()
+            return
+        # Альбом из 1 поста или не найден — отправляем как обычный пост
 
     max_attempts = settings.max_send_attempts
     last_error: str | None = None
