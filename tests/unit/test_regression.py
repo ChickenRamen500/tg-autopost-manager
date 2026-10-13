@@ -538,3 +538,107 @@ def test_list_queues_with_channel_and_orphan(tmp_path):
         assert names["Orphan"] is None
 
     run_with_db(tmp_path, body)
+
+
+def test_keyboards_need_queue_menu():
+    """Клавиатура «Нет очередей» для правил маршрутизации содержит кнопку создания очереди."""
+    from app.bot.keyboards import builder as kb
+
+    menu = kb.need_queue_menu()
+    buttons = [b.text for row in menu.inline_keyboard for b in row]
+    assert any("Создать очередь" in t for t in buttons), f"Нет кнопки создания очереди: {buttons}"
+    assert any("Назад" in t for t in buttons), f"Нет кнопки Назад: {buttons}"
+
+
+def test_add_rule_blocks_when_no_queues(tmp_path):
+    """cb_add_rule проверяет очереди ДО начала flow правила (UX-фикс).
+
+    Раньше бот просил ввести паттерн, а «Нет очередей» выдавал только после.
+    Теперь блокирует сразу с кнопкой «Создать очередь».
+    """
+    from conftest import run_with_db
+
+    async def body():
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        from app.bot.handlers.menu import cb_add_rule
+
+        # БД пустая — нет очередей и каналов
+        storage = MemoryStorage()
+        key = type("K", (), {"chat_id": 1, "user_id": 1, "business_id": None, "thread_id": None})()
+        ctx = FSMContext(storage=storage, key=key)
+
+        class FakeCall:
+            class message:
+                edited_text = None
+                edited_markup = None
+
+                @classmethod
+                async def edit_text(cls, text, reply_markup=None):
+                    cls.edited_text = text
+                    cls.edited_markup = reply_markup
+
+            @staticmethod
+            async def answer(text=None, show_alert=False):
+                pass
+
+        call = FakeCall()
+        await cb_add_rule(call, ctx, user_role="admin")
+
+        # Проверяем, что показано сообщение про очередь
+        assert "очередь" in FakeCall.message.edited_text.lower()
+        assert "создай очередь" in FakeCall.message.edited_text.lower() or "создать" in FakeCall.message.edited_text.lower()
+        # Состояние НЕ должно установиться (flow не начат)
+        state = await ctx.get_state()
+        assert state is None, f"FSM не должно начаться, но state={state}"
+        # Клавиатура должна содержать кнопку создания очереди
+        markup_text = [b.text for row in FakeCall.message.edited_markup.inline_keyboard for b in row]
+        assert any("Создать очередь" in t for t in markup_text)
+
+    run_with_db(tmp_path, body)
+
+
+def test_add_rule_starts_flow_when_queues_exist(tmp_path):
+    """cb_add_rule начинает flow правила, если очереди есть."""
+    from conftest import run_with_db
+
+    async def body():
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        from app.bot.handlers.menu import AddStates, cb_add_rule
+        from app.repositories import channels as channels_repo
+        from app.repositories import queues as queues_repo
+
+        # Создаём канал + очередь
+        ch_id = await channels_repo.create_channel(-1000000000077, "ChForRule")
+        await queues_repo.create_queue(ch_id, "QForRule", interval_minutes=60)
+
+        storage = MemoryStorage()
+        key = type("K", (), {"chat_id": 1, "user_id": 1, "business_id": None, "thread_id": None})()
+        ctx = FSMContext(storage=storage, key=key)
+
+        class FakeCall:
+            class message:
+                edited_text = None
+                edited_markup = None
+
+                @classmethod
+                async def edit_text(cls, text, reply_markup=None):
+                    cls.edited_text = text
+                    cls.edited_markup = reply_markup
+
+            @staticmethod
+            async def answer(text=None, show_alert=False):
+                pass
+
+        call = FakeCall()
+        await cb_add_rule(call, ctx, user_role="admin")
+
+        # Проверяем, что flow начался
+        state = await ctx.get_state()
+        assert state == AddStates.add_rule_pattern, f"Ожидали add_rule_pattern, получили {state}"
+        assert "Шаг 1/4" in FakeCall.message.edited_text
+
+    run_with_db(tmp_path, body)

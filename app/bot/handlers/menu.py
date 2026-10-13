@@ -477,6 +477,18 @@ async def cb_rules(call: CallbackQuery, user_role: str | None = None) -> None:
     queues = await queues_repo.list_queues(active_only=False)
     queues_map = {q["id"]: q["name"] for q in queues}
     if not rules:
+        # Если очередей тоже нет — подсказываем создать очередь (правило без очереди не нужно)
+        if not queues:
+            await call.message.edit_text(
+                "🔀 **Правила маршрутизации**\n\n"
+                "Правил пока нет. Посты без правила идут во «Входящие».\n\n"
+                "⚠️ Чтобы создать правило, нужна хотя бы одна очередь —\n"
+                "правило указывает, в КАКУЮ очередь направлять посты.\n\n"
+                "Сначала создай очередь.",
+                reply_markup=kb.need_queue_menu(),
+            )
+            await call.answer()
+            return
         await call.message.edit_text(
             "🔀 **Правила маршрутизации**\n\n"
             "Правил пока нет. Посты без правила идут во «Входящие».\n\n"
@@ -493,6 +505,21 @@ async def cb_rules(call: CallbackQuery, user_role: str | None = None) -> None:
 async def cb_add_rule(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
     if user_role != "admin":
         await call.answer("Только admin", show_alert=True)
+        return
+    # Проверяем наличие очередей ДО начала flow правила маршрутизации.
+    # Правило БЕЗ целевой очереди не имеет смысла — лучше сразу направить
+    # пользователя создать очередь, чем позволить заполнить шаги и потом
+    # выдать «Нет очередей» (плохой UX из фидбека пользователя).
+    queues = await queues_repo.list_queues(active_only=False)
+    if not queues:
+        await call.message.edit_text(
+            "🔀 **Добавление правила маршрутизации**\n\n"
+            "⚠️ Чтобы создать правило, нужна хотя бы одна очередь —\n"
+            "правило указывает, в КАКУЮ очередь направлять посты.\n\n"
+            "Сначала создай очередь, затем вернись к правилам.",
+            reply_markup=kb.need_queue_menu(),
+        )
+        await call.answer()
         return
     await state.set_state(AddStates.add_rule_pattern)
     await state.update_data(step="source_type")
