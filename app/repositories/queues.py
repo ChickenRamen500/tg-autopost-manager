@@ -49,12 +49,17 @@ async def get_queue(queue_id: int) -> dict[str, Any] | None:
 
 
 async def list_queues(active_only: bool = False) -> list[dict[str, Any]]:
-    """Список очередей с каналом (для показа /list_queues и планировщика)."""
+    """Список очередей с каналом (для показа /list_queues, правил маршрутизации и планировщика).
+
+    Использует LEFT JOIN: если канал удалён/недоступен, очередь всё равно видна
+    (channel_name=None) — иначе INNER JOIN «прячет» такие очереди и пользователь
+    получает ложное «Нет очередей» при создании правила (баг из фидбека).
+    """
     db = get_db()
     base_sql = """
         SELECT q.*, c.name AS channel_name, c.tg_chat_id, c.username AS channel_username
         FROM queues q
-        JOIN channels c ON c.id = q.channel_id
+        LEFT JOIN channels c ON c.id = q.channel_id
     """
     if active_only:
         base_sql += " WHERE q.is_active = 1 AND c.is_active = 1"

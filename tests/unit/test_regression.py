@@ -475,3 +475,66 @@ def test_db_migration_adds_columns(tmp_path):
         assert "group_albums" in cols, f"Нет колонки group_albums в queues: {cols}"
 
     run_with_db(tmp_path, body)
+
+
+def test_list_queues_returns_orphan_queues(tmp_path):
+    """Регрессия бага «Нет очередей» при создании правила маршрутизации.
+
+    list_queues использовал INNER JOIN — очередь без канала (orphan) «пряталась»,
+    и пользователь получал ложное «Нет очередей» при создании правила, хотя
+    очередь существовала. Фикс: LEFT JOIN.
+    """
+    from conftest import run_with_db
+
+    async def body():
+        from app.db import get_db
+        from app.repositories import queues as queues_repo
+
+        db = get_db()
+        # Вставляем очередь с channel_id=999 (канал не существует).
+        # FK отключаем на время вставки — симулируем старую/перенесённую БД.
+        await db.execute("PRAGMA foreign_keys=OFF")
+        await db.execute(
+            "INSERT INTO queues (channel_id, name, interval_minutes) VALUES (999, 'Orphan', 60)"
+        )
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.commit()
+
+        # LEFT JOIN: orphan-очередь видна, channel_name=None
+        q = await queues_repo.list_queues(active_only=False)
+        assert len(q) == 1, f"Ожидали 1 orphan-очередь, получили {len(q)} (INNER JOIN баг?)"
+        assert q[0]["name"] == "Orphan"
+        assert q[0]["channel_name"] is None, f"channel_name должен быть None: {q[0].get('channel_name')}"
+
+    run_with_db(tmp_path, body)
+
+
+def test_list_queues_with_channel_and_orphan(tmp_path):
+    """Смесь: очередь с каналом + orphan-очередь — обе видны через LEFT JOIN."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.db import get_db
+        from app.repositories import channels as channels_repo
+        from app.repositories import queues as queues_repo
+
+        # Очередь с реальным каналом
+        ch_id = await channels_repo.create_channel(-1000000000066, "RealCh")
+        await queues_repo.create_queue(ch_id, "WithChannel", interval_minutes=60)
+
+        # Orphan-очередь (без канала)
+        db = get_db()
+        await db.execute("PRAGMA foreign_keys=OFF")
+        await db.execute(
+            "INSERT INTO queues (channel_id, name, interval_minutes) VALUES (888, 'Orphan', 30)"
+        )
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.commit()
+
+        q = await queues_repo.list_queues(active_only=False)
+        assert len(q) == 2, f"Ожидали 2 очереди, получили {len(q)}"
+        names = {x["name"]: x.get("channel_name") for x in q}
+        assert names["WithChannel"] == "RealCh"
+        assert names["Orphan"] is None
+
+    run_with_db(tmp_path, body)

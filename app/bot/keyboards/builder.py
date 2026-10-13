@@ -47,12 +47,13 @@ def back_button() -> InlineKeyboardMarkup:
 
 
 def queues_list(queues: list[dict]) -> InlineKeyboardMarkup:
-    """Список очередей кнопками."""
+    """Список очередей кнопками. Помечает очереди без канала «(без канала)»."""
     kb = InlineKeyboardBuilder()
     for q in queues:
         active = "✅" if q.get("is_active") else "⏸"
+        chan = q.get("channel_name") or "(без канала)"
         kb.button(
-            text=f"{active} #{q['id']} «{q['name']}» ({q['interval_minutes']}мин)",
+            text=f"{active} #{q['id']} «{q['name']}» → {chan} ({q['interval_minutes']}мин)",
             callback_data=f"menu:queue:{q['id']}",
         )
     kb.button(text="🔙 Назад", callback_data="menu:main")
@@ -198,8 +199,9 @@ def rule_pick_queue(queues: list[dict]) -> InlineKeyboardMarkup:
     """Выбор целевой очереди для правила маршрутизации."""
     kb = InlineKeyboardBuilder()
     for q in queues:
+        chan = q.get("channel_name") or "(без канала)"
         kb.button(
-            text=f"📋 «{q['name']}» (#{q['id']})",
+            text=f"📋 «{q['name']}» (#{q['id']}) → {chan}",
             callback_data=f"menu:rule:queue:{q['id']}",
         )
     kb.button(text="🔙 Отмена", callback_data="menu:add")
