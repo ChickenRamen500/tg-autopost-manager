@@ -531,7 +531,11 @@ async def add_rule_pattern(message: Message, state: FSMContext) -> None:
     await state.set_state(AddStates.add_rule_pick_queue)
     queues = await queues_repo.list_queues(active_only=False)
     if not queues:
-        await message.answer("⚠️ Нет очередей. Сначала добавь очередь.", reply_markup=kb.back_button())
+        await message.answer(
+            "⚠️ Нет очередей. Сначала создай очередь:\n"
+            "/menu → ➕ Добавить → 📋 Очередь",
+            reply_markup=kb.back_button(),
+        )
         await state.clear()
         return
     await message.answer("Шаг 3/4: Выбери целевую очередь:", reply_markup=kb.rule_pick_queue(queues))
