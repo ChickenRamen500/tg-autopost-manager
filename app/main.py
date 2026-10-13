@@ -60,6 +60,16 @@ async def _bot_polling() -> None:
         log.info("Бот @%s запущен (polling через Local Bot API)", me.get("username"))
     else:
         log.warning("getMe не прошёл — проверьте logOut (Фаза 1) и доступность local-bot-api:8081")
+    # Смена хоста: на старом сервере polling мог оставить зарегистрированный
+    # webhook (или «зависший» long-polling-слот) — тогда getUpdates возвращает
+    # пустой список и бот молчит. Снимаем webhook перед стартом, если он есть.
+    try:
+        wh = await bot.get_webhook_info()
+        if wh.url:
+            log.warning("Обнаружен webhook %s — удаляем перед polling", wh.url)
+            await bot.delete_webhook(drop_pending_updates=False)
+    except Exception as e:  # noqa: BLE001 — не роняем старт из-за этой проверки
+        log.warning("get_webhook_info/delete_webhook не прошли: %r (продолжаем)", e)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except asyncio.CancelledError:

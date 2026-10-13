@@ -101,6 +101,30 @@ docker compose exec bot python scripts/check_phase2.py --db
 - **Веб-интерфейс**: http://localhost:8000 (или `http://<IP-машины>:8000` из локальной сети) — HTTP Basic Auth.
 - **Telegram-бот**: откройте диалог с ботом и отправьте `/start` (первый пользователь с `ADMIN_TG_ID` станет admin).
 
+⚠ **Важно при переносе на новую машину**: пока старый хост запущен и делает polling,
+Telegram отдаёт обновления только одному клиенту — на новой машине бот будет молчать.
+Остановите стек на старом хосте (`docker compose down`) перед запуском на новом.
+Перед поллингом бот теперь сам проверяет и снимает «висячий» webhook (`getWebhookInfo` → `deleteWebhook`).
+
+### Быстрая диагностика (PowerShell — используйте `curl.exe`, а не `curl`!)
+
+```powershell
+# 1. Жив ли local-bot-api (ответ должен прийти за <1 c):
+curl.exe -s "http://localhost:8081/bot$((Get-Content .env | Select-String '^BOT_TOKEN=' ) -replace 'BOT_TOKEN=','')/getMe"
+# или проще — внутри контейнера бота:
+docker compose exec bot python -c "import asyncio; from app.utils.local_bot_api import get_me; print(asyncio.run(get_me()))"
+
+# 2. Есть ли незабранные обновления (если result[] непустой, а бот молчит — был webhook):
+docker compose exec bot python -c "import os,urllib.request,json;t=os.environ['BOT_TOKEN'];print(json.load(urllib.request.urlopen('http://local-bot-api:8081/bot'+t+'/getUpdates')))"
+
+# 3. Снятие «висячего» webhook вручную (если не хотите пересобирать образ):
+docker compose exec bot python -c "import os,urllib.request;t=os.environ['BOT_TOKEN'];print(urllib.request.urlopen('http://local-bot-api:8081/bot'+t+'/deleteWebhook').read())"
+
+# 4. Перезапуск с новым кодом (снимет webhook автоматически):
+docker compose up -d --build bot
+docker compose logs --since 2m bot | Select-String "polling|webhook|getMe"
+```
+
 ## Полезные команды
 
 | Команда | Описание |
@@ -114,10 +138,11 @@ docker compose exec bot python scripts/check_phase2.py --db
 ## Частые проблемы
 
 1. **`401 Unauthorized` от local-bot-api** → вы не выполнили `logOut` (Шаг 5). Выполните и перезапустите контейнеры.
-2. **Бот не отвечает на `/start`** → проверьте `docker compose logs bot`; убедитесь, что `BOT_TOKEN` верный и `BOT_API_URL=http://local-bot-api:8081`.
-3. **Нет доступа к веб-интерфейсу** → проверьте, что контейнер `bot` запущен и порт 8000 не занят (`docker compose ps`, `ss -ltn` / `netstat -ano`).
-4. **Ошибка монтирования `E:\Media` (Windows)** → расшарьте диск в Docker Desktop или измените путь volume в `docker-compose.yml`.
-5. **Форма my.telegram.org отвечает `ERROR`** → см. [`my_telegram_org_troubleshooting.md`](./my_telegram_org_troubleshooting.md).
+2. **Бот не отвечает на `/start` (особенно после переноса на новую машину)** → самая частая причина: старый хост всё ещё запущен и «забирает» все обновления себе (Telegram отдаёт getUpdates только одному клиенту) — остановите стек на старой машине (`docker compose down`). Вторая причина: «висячий» webhook, зарегистрированный ранее — свежие версии бота снимают его автоматически при старте; вручную: `docker compose exec bot python -c "import os,urllib.request;t=os.environ['BOT_TOKEN'];print(urllib.request.urlopen('http://local-bot-api:8081/bot'+t+'/deleteWebhook').read())"`. Также проверьте `docker compose logs bot` (строки polling/webhook), `BOT_TOKEN` и `BOT_API_URL=http://local-bot-api:8081`.
+3. **`check_phase1.py --health` зависает** → local-bot-api ещё синхронизирует датацентры (первые 1-2 минуты после первого запуска — норма) или недоступен из контейнера бота. Проверьте `docker logs tg-lba` и `docker compose exec bot python scripts/check_phase1.py --config`. Флаг `--upload` в скрипте называется `--big-test`.
+4. **Нет доступа к веб-интерфейсу** → проверьте, что контейнер `bot` запущен и порт 8000 не занят (`docker compose ps`, `ss -ltn` / `netstat -ano`).
+5. **Ошибка монтирования `E:\Media` (Windows)** → расшарьте диск в Docker Desktop или измените путь volume в `docker-compose.yml`.
+6. **Форма my.telegram.org отвечает `ERROR`** → см. [`my_telegram_org_troubleshooting.md`](./my_telegram_org_troubleshooting.md).
 
 ---
 *Инструкция актуальна для ТЗ v5. Полные детали архитектуры — в [`ТЗ_TechnicalDoc_v5_2026-10-11.docx`](./ТЗ_TechnicalDoc_v5_2026-10-11.docx).*
