@@ -46,6 +46,15 @@ def back_button() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def need_queue_menu() -> InlineKeyboardMarkup:
+    """Экран «Нет очередей» для правил маршрутизации: создать очередь или назад."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Создать очередь", callback_data="menu:add_queue")
+    kb.button(text="🔙 Назад", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def queues_list(queues: list[dict]) -> InlineKeyboardMarkup:
     """Список очередей кнопками. Помечает очереди без канала «(без канала)»."""
     kb = InlineKeyboardBuilder()
