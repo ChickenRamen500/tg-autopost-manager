@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Local Bot API Server (снимает лимиты 50 МБ upload / 20 МБ download) — ТЗ §3.2
   local-bot-api:
@@ -20,8 +18,9 @@ services:
     ports:
       - "8081:8081"
     healthcheck:
-      # getMe с пустым токеном вернёт JSON-ответ — сервер жив
-      test: ["CMD-SHELL", "curl -fs http://localhost:8081/getMe || exit 1"]
+      # корневой GET возвращает HTTP 403 (сервер жив); /getMe без токена не отвечает
+      # и подвешивает коннект — старый тест вешал docker healthcheck и запросы из контейнера
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/ || [ $? -eq 22 ] || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5

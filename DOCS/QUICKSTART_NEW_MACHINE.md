@@ -69,7 +69,14 @@ docker logs -f tg-lba           # Ctrl+C когда лог перестанет 
 curl -s "https://api.telegram.org/bot<BOT_TOKEN>/logOut"
 # ожидаемый ответ: {"ok":true,"result":true}
 ```
+В PowerShell `curl` — это алиас `Invoke-WebRequest`, используйте `curl.exe`:
+```powershell
+curl.exe -s "https://api.telegram.org/bot<BOT_TOKEN>/logOut"
+# или просто: docker compose exec bot python scripts/check_phase1.py --logout
+```
 Старые `file_id` останутся валидными.
+
+> **Если переносите папку со старой машины (копия `data/bot.db`):** бот при первом старте сам домигрирует схему БД (добавит недостающие колонки через ALTER TABLE). Данные сохранятся. В логах будет строка `Схема применена частично (...) — запускаю миграции и повтор схемы` — это нормально. Убедитесь, что на новой машине контейнер `local-bot-api` поднят с флагами `--api-id/--api-hash/--local` (`docker logs tg-lba`), иначе getMe/поллинг работать не будут.
 
 ## Шаг 6. Соберите и запустите бота
 
@@ -88,7 +95,7 @@ docker compose up -d --build bot
 # Фаза 1: конфиг, здоровье local-bot-api, тест загрузки 300 МБ
 docker compose exec bot python scripts/check_phase1.py --config
 docker compose exec bot python scripts/check_phase1.py --health
-docker compose exec bot python scripts/check_phase1.py --upload
+docker compose exec bot python scripts/check_phase1.py --big-test
 
 # Фаза 2: БД, RBAC, маршрутизация, очередь
 docker compose exec bot python scripts/check_phase2.py --db

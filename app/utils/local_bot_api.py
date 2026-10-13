@@ -70,7 +70,10 @@ async def get_me() -> dict | None:
     """GET /getMe на локальном сервере — базовый healthcheck."""
     url = f"{settings.bot_api_url}/bot{settings.bot_token}/getMe"
     try:
-        async with aiohttp.ClientSession() as s, s.get(url) as r:
+        # таймаут 15с: если local-bot-api ещё не готов (или токен отклонён),
+        # запрос должен завершиться ошибкой, а не висеть бесконечно
+        to = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=to) as s, s.get(url) as r:
             data = await r.json()
             if data.get("ok"):
                 return data["result"]
