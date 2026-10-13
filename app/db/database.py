@@ -56,10 +56,27 @@ async def init_db() -> aiosqlite.Connection:
     await _db.execute("PRAGMA synchronous=NORMAL")  # баланс надёжности/скорости (§3.1 слабое железо)
 
     schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    await _db.executescript(schema_sql)
-    # Миграции для существующих БД: добавляем колонки, если их ещё нет.
-    # SQLite не поддерживает ALTER TABLE ADD COLUMN IF NOT EXISTS, поэтому проверяем через PRAGMA.
-    await _run_migrations(_db)
+    try:
+        await _db.executescript(schema_sql)
+    except aiosqlite.OperationalError as e:
+        # Типичный случай: перенос старой БД (например, копия папки со старой
+        # машины) — executescript падает на CREATE INDEX по колонке, которой в
+        # старой таблице ещё нет ("no such column: media_group_id").
+        # SQLite не откатывает уже выполненную часть скрипта, поэтому сначала
+        # накатываем миграции (ALTER TABLE ... ADD COLUMN), потом повторяем схему.
+        log.warning("Схема применена частично (%s) — запускаю миграции и повтор схемы", e)
+        await _run_migrations(_db)
+        try:
+            await _db.executescript(schema_sql)
+        except aiosqlite.OperationalError as e2:
+            raise RuntimeError(
+                f"Не удалось применить схему БД даже после миграций: {e2}. "
+                "Проверьте, что версия schema.sql соответствует вашей базе."
+            ) from e2
+    else:
+        # Обычный путь: схема легла целиком — миграции добирают колонки для
+        # таблиц, которые IF NOT EXISTS не тронул (существующие старые БД).
+        await _run_migrations(_db)
     await _db.commit()
 
     log.info("БД инициализирована: %s (схема применена)", settings.db_path)
@@ -75,7 +92,17 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
     # Карта: (таблица, колонка, DDL-добавление)
     migrations = [
         ("posts", "media_group_id", "ALTER TABLE posts ADD COLUMN media_group_id TEXT"),
+        ("posts", "file_unique_id", "ALTER TABLE posts ADD COLUMN file_unique_id TEXT"),
+        ("posts", "tg_file_id", "ALTER TABLE posts ADD COLUMN tg_file_id TEXT"),
+        ("posts", "file_size", "ALTER TABLE posts ADD COLUMN file_size INTEGER"),
+        ("posts", "mime_type", "ALTER TABLE posts ADD COLUMN mime_type TEXT"),
+        ("posts", "was_processed", "ALTER TABLE posts ADD COLUMN was_processed INTEGER NOT NULL DEFAULT 0"),
+        ("posts", "send_attempts", "ALTER TABLE posts ADD COLUMN send_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("posts", "last_error", "ALTER TABLE posts ADD COLUMN last_error TEXT"),
         ("queues", "group_albums", "ALTER TABLE queues ADD COLUMN group_albums INTEGER NOT NULL DEFAULT 0"),
+        ("queues", "crop_video", "ALTER TABLE queues ADD COLUMN crop_video INTEGER NOT NULL DEFAULT 0"),
+        ("queues", "signature_template", "ALTER TABLE queues ADD COLUMN signature_template TEXT"),
+        ("queues", "shuffle_enabled", "ALTER TABLE queues ADD COLUMN shuffle_enabled INTEGER NOT NULL DEFAULT 1"),
     ]
     for table, column, ddl in migrations:
         if not await _column_exists(db, table, column):
