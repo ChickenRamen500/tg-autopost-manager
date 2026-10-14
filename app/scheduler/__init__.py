@@ -45,9 +45,10 @@ def get_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
-async def _send_one_post(post: dict[str, Any], channel: dict[str, Any]) -> None:
+async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: dict | None = None) -> None:
     """Отправляет один пост в канал по стратегии file_id → файл (ТЗ §2.5.1).
 
+    queue — словарь очереди (для strip_caption / signature_template). Если None — настройки не применяются.
     Поднимает исключение при ошибке API (вызывающий код считает попытки).
     """
     from app.bot.runtime import get_bot  # ленивый импорт — разрывает цикл bot↔scheduler
@@ -55,6 +56,14 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any]) -> None:
     bot = get_bot()
     chat_id = channel["tg_chat_id"]
     caption = post.get("processed_caption") or post.get("original_caption")
+
+    # Настройки очереди: strip_caption (убирать подпись), signature_template (добавить свою)
+    if queue:
+        if queue.get("strip_caption"):
+            caption = None
+        sig = queue.get("signature_template")
+        if sig:
+            caption = f"{sig}\n{caption}" if caption else sig
 
     file_type = post["file_type"]
     tg_file_id = post.get("tg_file_id")
@@ -224,31 +233,54 @@ async def send_post_from_queue(queue_id: int) -> None:
     last_error: str | None = None
     for _attempt in range(1, max_attempts + 1):
         try:
-            await _send_one_post(post, channel)
+            await _send_one_post(post, channel, queue)
             _last_send[queue_id] = asyncio.get_event_loop().time()
             await posts_repo.mark_sent(post["id"])
+            # Уведомления (блок C): проверяем остаток очереди
+            await _check_queue_notifications(queue, channel)
             return
         except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
             last_error = str(e)
             attempts_done = await posts_repo.increment_attempt(post["id"])
-            # 429 Too Many Requests — ждём retry_after и повторяем (ТЗ §2.5.2 п.1)
             retry_after = getattr(e, "retry_after", None)
             if retry_after:
                 log.warning("429 rate limit на пост #%s: ждём %s сек", post["id"], retry_after)
                 await asyncio.sleep(float(retry_after))
                 continue
-            # Сетевая ошибка — пост остаётся pending, повтор в этом же цикле
             log.warning("Ошибка отправки поста #%s (попытка %d/%d): %s", post["id"], attempts_done, max_attempts, e)
             if attempts_done >= max_attempts:
                 await posts_repo.mark_failed(post["id"], last_error)
-                log.error(
-                    "Пост #%s переведён в failed после %d попыток: %s", post["id"], max_attempts, last_error
-                )
-                # TODO Фаза 6: уведомление админа
+                log.error("Пост #%s переведён в failed после %d попыток: %s", post["id"], max_attempts, last_error)
+                # Уведомление об ошибке (блок C)
+                from app.services.notifications import notify_send_error
+
+                await notify_send_error(queue_id, queue["name"], post["id"], last_error)
                 return
             await asyncio.sleep(2.0)
 
     _last_send[queue_id] = asyncio.get_event_loop().time()
+
+
+async def _check_queue_notifications(queue: dict, channel: dict) -> None:
+    """Проверяет остаток очереди и шлёт уведомления (блок C).
+
+    - «Скоро закончится»: pending ≤ threshold (по умолчанию 5)
+    - «Закончилась»: pending == 0 (последний пост отправлен)
+    """
+    try:
+        from app.services.notifications import (
+            notify_queue_almost_empty,
+            notify_queue_finished,
+        )
+
+        pending = await posts_repo.count_pending(queue["id"])
+        channel_name = channel.get("name") or f"#{channel['id']}"
+        if pending == 0:
+            await notify_queue_finished(queue["id"], queue["name"], channel_name)
+        else:
+            await notify_queue_almost_empty(queue["id"], queue["name"], channel_name, pending)
+    except Exception as e:  # noqa: BLE001 — уведомления не критичны
+        log.warning("Не удалось отправить уведомление по очереди: %s", e)
 
 
 def setup_scheduler(scheduler: AsyncIOScheduler | None = None) -> AsyncIOScheduler:

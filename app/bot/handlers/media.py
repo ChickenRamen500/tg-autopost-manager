@@ -196,6 +196,26 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     # Каждый файл = отдельный пост (ТЗ §2.1.1: «каждый файл как отдельный пост или групповой пост»).
     is_album = bool(getattr(message, "media_group_id", None))
 
+    # Архивация в служебный канал (блок D) — от имени бота, через file_id.
+    # Теги: #from_<source> #to_<channel> #<type>
+    try:
+        from app.services.archive import archive_post
+
+        post_dict = await posts_repo.get_post(post_id)
+        target_ch = 0
+        if queue_id is not None:
+            from app.repositories import channels as channels_repo
+            from app.repositories import queues as queues_repo
+            q = await queues_repo.get_queue(queue_id)
+            if q:
+                ch = await channels_repo.get_channel(q["channel_id"])
+                if ch:
+                    target_ch = ch["tg_chat_id"]
+        if post_dict:
+            await archive_post(post_dict, target_ch, [media["file_type"]])
+    except Exception as e:  # noqa: BLE001 — архив не критичен
+        logger.warning("Архивация поста #%s не удалась: %s", post_id, e)
+
     if queue_id is None:
         # Пост во Входящих. Если источник — ЛС (telegram_direct/telegram_user),
         # показываем интерактивный выбор очереди (блок A): кнопки каналов → очереди.

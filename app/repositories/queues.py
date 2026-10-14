@@ -20,14 +20,16 @@ async def create_queue(
     daily_window_start: str | None = None,
     daily_window_end: str | None = None,
     end_strategy: str = "continue_next_day",
+    strip_caption: bool = False,
 ) -> int:
     db = get_db()
     cur = await db.execute(
         """
         INSERT INTO queues
             (channel_id, name, interval_minutes, is_active, crop_video, signature_template,
-             shuffle_enabled, group_albums, start_at, end_at, daily_window_start, daily_window_end, end_strategy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             shuffle_enabled, group_albums, start_at, end_at, daily_window_start, daily_window_end,
+             end_strategy, strip_caption)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             channel_id,
@@ -43,6 +45,7 @@ async def create_queue(
             daily_window_start,
             daily_window_end,
             end_strategy,
+            1 if strip_caption else 0,
         ),
     )
     await db.commit()
