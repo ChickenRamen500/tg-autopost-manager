@@ -133,7 +133,36 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 2. Шаг 1: нажми кнопку канала-получателя
 3. Шаг 2: название очереди
 4. Шаг 3: интервал в минутах (например `60`)
-5. ✓ Планировщик перерегистрируется автоматически (hot-reload, без restart)
+5. Шаг 4: группировать альбомы? (да/нет)
+6. Шаг 5: время начала и конца очереди (например `14.10.26 06:00 - 16.10.26 22:00`, или `-`)
+7. Шаг 6: ежедневное окно отправки (например `06:00 - 22:00`, или `-`)
+8. Шаг 7: стратегия завершения (1-4)
+9. ✓ Планировщик перерегистрируется автоматически (hot-reload, без restart)
+
+#### Время очереди (блок B)
+
+Очередь может работать:
+- **Без ограничений** (шаги 5-7 = `-`) — посты сразу, в любое время
+- **С абсолютными датами** (шаг 5): `start_at` / `end_at` — когда очередь активна
+- **С ежедневным окном** (шаг 6): `daily_window` — часы работы каждый день (локальное время)
+- **Комбинация**: абсолютные даты + ежедневное окно внутри
+
+Пример: очередь с 14.10.26 до 16.10.26, окно 6:00–22:00, каждые 30 мин:
+- 14.10 06:00 — первый пост
+- до 14.10 22:00 — 32 поста
+- пауза на ночь
+- 15.10 06:00 — продолжение
+- 16.10 22:00 — последний пост (если постов больше, сработает стратегия)
+
+#### Стратегии завершения (шаг 7)
+
+Когда `end_at` достигнут, а pending посты ещё есть:
+1. **continue_next_day** (по умолчанию) — продолжить в следующем `daily_window`
+2. **continue_after_end** — игнорировать `end_at`, шлём по интервалу
+3. **move_to_inbox** — все pending → Входящие (queue_id=NULL)
+4. **delete** — удалить pending посты
+
+В карточке очереди видно текущие настройки: «Время: старт: ... | конец: ... | окно: ... | стратегия: ...»
 
 ### Как добавить пользователя
 
@@ -280,13 +309,13 @@ VALUES ('telegram_channel', '@anime_channel', 1, 10);
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 46 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 58 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 46 passed
+# 58 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
@@ -388,7 +417,7 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 
 Проверка фиксов:
 ```bash
-pytest tests/unit -q                              # 46 passed (16 в test_regression.py)
+pytest tests/unit -q                              # 58 passed (25 в test_regression.py)
 ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 # /add_queue → "Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен."
 ```
@@ -423,7 +452,7 @@ ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 46 passed
+pytest tests/unit -q   # 58 passed
 ruff check             # All checks passed!
 # /menu → главное меню с кнопками
 ```
@@ -441,7 +470,7 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 46 passed (16 в test_regression.py)
+pytest tests/unit -q   # 58 passed (25 в test_regression.py)
 ruff check             # All checks passed!
 # регрессионный тест: cmd_cancel зарегистрирован первым (test_cmd_cancel_registered_before_fsm_handlers)
 ```
@@ -458,7 +487,7 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 46 passed (16 в test_regression.py)
+pytest tests/unit -q   # 58 passed (25 в test_regression.py)
 ruff check             # All checks passed!
 # новые тесты: test_create_post_with_media_group_id, test_find_album_posts_groups_by_media_group_id,
 #              test_delete_post_removes_from_db, test_queue_group_albums_setting,

@@ -4,6 +4,8 @@
 2. Дубликат tg_chat_id в /add_channel — DuplicateChannelError вместо IntegrityError.
 3. check_phase2.py --routing изолирован от занятой БД.
 """
+from datetime import UTC
+
 from app.repositories.channels import DuplicateChannelError
 
 
@@ -694,3 +696,193 @@ def test_routing_source_types_no_direct_user():
     assert "telegram_direct" not in source_types, "telegram_direct должен быть убран из правил"
     assert "telegram_user" not in source_types, "telegram_user должен быть убран из правил"
     assert "any" in source_types
+
+
+def test_is_in_time_window_no_restrictions():
+    """Очередь без ограничений — всегда в окне."""
+    from app.services.queue_time import is_in_time_window
+
+    queue = {"id": 1, "start_at": None, "end_at": None, "daily_window_start": None, "daily_window_end": None}
+    assert is_in_time_window(queue) is True
+
+
+def test_is_in_time_window_start_in_future():
+    """start_at в будущем — не в окне."""
+    from datetime import datetime, timedelta
+
+    from app.services.queue_time import is_in_time_window
+
+    future = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    queue = {"id": 1, "start_at": future, "end_at": None, "daily_window_start": None, "daily_window_end": None}
+    assert is_in_time_window(queue) is False
+
+
+def test_is_in_time_window_start_in_past():
+    """start_at в прошлом — в окне (нет других ограничений)."""
+    from datetime import datetime, timedelta
+
+    from app.services.queue_time import is_in_time_window
+
+    past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    queue = {"id": 1, "start_at": past, "end_at": None, "daily_window_start": None, "daily_window_end": None}
+    assert is_in_time_window(queue) is True
+
+
+def test_is_in_time_window_end_passed_continue_after_end():
+    """end_at прошёл, strategy=continue_after_end — в окне (продолжаем)."""
+    from datetime import datetime, timedelta
+
+    from app.services.queue_time import is_in_time_window
+
+    past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    queue = {
+        "id": 1, "start_at": None, "end_at": past,
+        "daily_window_start": None, "daily_window_end": None,
+        "end_strategy": "continue_after_end",
+    }
+    assert is_in_time_window(queue) is True
+
+
+def test_is_in_time_window_end_passed_continue_next_day():
+    """end_at прошёл, strategy=continue_next_day — не в окне (ждём)."""
+    from datetime import datetime, timedelta
+
+    from app.services.queue_time import is_in_time_window
+
+    past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    queue = {
+        "id": 1, "start_at": None, "end_at": past,
+        "daily_window_start": None, "daily_window_end": None,
+        "end_strategy": "continue_next_day",
+    }
+    assert is_in_time_window(queue) is False
+
+
+def test_handle_end_strategy_move_to_inbox(tmp_path):
+    """end_strategy=move_to_inbox — все pending посты → Входящие."""
+    from conftest import run_with_db
+
+    async def body():
+        from datetime import datetime, timedelta
+
+        from app.repositories import channels as channels_repo
+        from app.repositories import posts as posts_repo
+        from app.repositories import queues as queues_repo
+        from app.services.queue_time import handle_end_strategy
+
+        ch_id = await channels_repo.create_channel(-1000000000088, "EndCh")
+        qid = await queues_repo.create_queue(ch_id, "EndQ")
+        # 3 pending поста
+        for i in range(3):
+            await posts_repo.create_post(
+                source_type="telegram_direct", file_type="photo", queue_id=qid,
+                tg_file_id=f"f{i}", file_unique_id=f"u{i}",
+            )
+        past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        queue = await queues_repo.get_queue(qid)
+        queue["end_at"] = past
+        queue["end_strategy"] = "move_to_inbox"
+
+        result = await handle_end_strategy(queue)
+        assert result is True
+        # Все посты должны быть во Входящих (queue_id=None)
+        inbox = await posts_repo.list_inbox(limit=100)
+        assert len(inbox) == 3, f"Ожидали 3 поста во Входящих, получили {len(inbox)}"
+
+    run_with_db(tmp_path, body)
+
+
+def test_handle_end_strategy_delete(tmp_path):
+    """end_strategy=delete — все pending посты удалены."""
+    from conftest import run_with_db
+
+    async def body():
+        from datetime import datetime, timedelta
+
+        from app.repositories import channels as channels_repo
+        from app.repositories import posts as posts_repo
+        from app.repositories import queues as queues_repo
+        from app.services.queue_time import handle_end_strategy
+
+        ch_id = await channels_repo.create_channel(-1000000000099, "DelCh")
+        qid = await queues_repo.create_queue(ch_id, "DelQ")
+        for i in range(3):
+            await posts_repo.create_post(
+                source_type="telegram_direct", file_type="photo", queue_id=qid,
+                tg_file_id=f"df{i}", file_unique_id=f"du{i}",
+            )
+        past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        queue = await queues_repo.get_queue(qid)
+        queue["end_at"] = past
+        queue["end_strategy"] = "delete"
+
+        result = await handle_end_strategy(queue)
+        assert result is True
+        # Все посты удалены
+        total = await posts_repo.total_count()
+        assert total == 0, f"Ожидали 0 постов, получили {total}"
+
+    run_with_db(tmp_path, body)
+
+
+def test_parse_start_end_dash():
+    """Парсинг '-' → (None, None) — без ограничений."""
+    from app.bot.handlers.menu import _parse_start_end
+
+    result = _parse_start_end("-")
+    assert result == (None, None)
+
+
+def test_parse_start_end_valid():
+    """Парсинг '14.10.26 06:00 - 16.10.26 22:00' → (start_utc, end_utc)."""
+    from app.bot.handlers.menu import _parse_start_end
+
+    result = _parse_start_end("14.10.26 06:00 - 16.10.26 22:00")
+    assert result is not None
+    assert result[0] is not None
+    assert result[1] is not None
+    # Проверяем, что это ISO-строки
+    assert "2026-10-14" in result[0]
+    assert "2026-10-16" in result[1]
+
+
+def test_parse_start_end_invalid():
+    """Парсинг невалидной строки → None."""
+    from app.bot.handlers.menu import _parse_start_end
+
+    assert _parse_start_end("неправильный формат") is None
+
+
+def test_format_queue_time_info():
+    """Человекочитаемое описание временных настроек очереди."""
+    from app.services.queue_time import format_queue_time_info
+
+    queue = {
+        "start_at": "2026-10-14 06:00:00",
+        "end_at": "2026-10-16 22:00:00",
+        "daily_window_start": "06:00",
+        "daily_window_end": "22:00",
+        "end_strategy": "continue_next_day",
+    }
+    info = format_queue_time_info(queue)
+    assert "старт" in info
+    assert "конец" in info
+    assert "окно" in info
+    assert "продолжить на следующий день" in info
+
+
+def test_db_migration_adds_time_columns(tmp_path):
+    """Миграция добавляет start_at, end_at, daily_window, end_strategy в существующую БД."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.db import get_db
+
+        db = get_db()
+        cur = await db.execute("PRAGMA table_info(queues)")
+        cols = [r[1] for r in await cur.fetchall()]
+        await cur.close()
+        for col in ("start_at", "end_at", "daily_window_start", "daily_window_end", "end_strategy"):
+            assert col in cols, f"Нет колонки {col} в queues: {cols}"
+
+    run_with_db(tmp_path, body)

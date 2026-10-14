@@ -37,6 +37,20 @@ CREATE TABLE IF NOT EXISTS queues (
     -- Группировать альбомы при отправке (ТЗ §2.1.1: «каждый файл как отдельный пост или групповой пост»):
     -- TRUE → посты с одинаковым media_group_id отправляются одним сообщением через send_media_group
     group_albums       INTEGER NOT NULL DEFAULT 0,
+    -- Время работы очереди (блок B — полировка Фазы 2):
+    -- start_at/end_at: абсолютные даты начала/конца (NULL = сразу/бесконечно)
+    -- daily_window_start/end: ежедневное окно в формате "HH:MM" (NULL = 00:00..23:59)
+    -- end_strategy: что делать с неотправленными постами при end_at:
+    --   'continue_next_day' (по умолчанию) — продолжить в следующем daily_window
+    --   'continue_after_end' — игнорировать end_at, шлём по интервалу
+    --   'move_to_inbox' — все pending → Входящие (queue_id=NULL)
+    --   'delete' — удалить pending посты
+    start_at           DATETIME,
+    end_at             DATETIME,
+    daily_window_start TEXT,   -- "HH:MM" (локальное время, TZ Asia/Yekaterinburg)
+    daily_window_end   TEXT,   -- "HH:MM"
+    end_strategy       TEXT NOT NULL DEFAULT 'continue_next_day'
+                              CHECK(end_strategy IN ('continue_next_day', 'continue_after_end', 'move_to_inbox', 'delete')),
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (channel_id) REFERENCES channels(id)
 );
