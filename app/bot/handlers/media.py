@@ -194,16 +194,31 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
 
     # Альбом: Telegram присылает каждое фото отдельным сообщением с одинаковым media_group_id.
     # Каждый файл = отдельный пост (ТЗ §2.1.1: «каждый файл как отдельный пост или групповой пост»).
-    # Сокращаем уведомление, чтобы не спамить при альбомах из N файлов.
     is_album = bool(getattr(message, "media_group_id", None))
 
     if queue_id is None:
-        msg = f"📥 Пост #{post_id} → Входящие"
-        if is_album:
-            msg += " (альбом — каждый файл отдельным постом)"
+        # Пост во Входящих. Если источник — ЛС (telegram_direct/telegram_user),
+        # показываем интерактивный выбор очереди (блок A): кнопки каналов → очереди.
+        from app.bot.keyboards import builder as kb
+        from app.repositories import channels as channels_repo
+
+        channels = await channels_repo.list_channels(active_only=True)
+        if source["source_type"] in ("telegram_direct", "telegram_user") and channels:
+            # Интерактивный выбор: «куда отправить?» с кнопками каналов
+            pick_kb = kb.pick_channel_for_post(post_id, channels)
+            msg = f"📥 Пост #{post_id} → Входящие. Куда отправить?"
+            if is_album:
+                msg += " (альбом — каждый файл отдельным постом)"
+            await message.answer(msg, reply_markup=pick_kb)
         else:
-            msg += "\nПравило маршрутизации не найдено. /menu → 🔀 Маршрутизация"
-        await message.answer(msg)
+            # Для пересылок из каналов (telegram_channel) — правило не найдено,
+            # просто информируем (правила создаются через UI маршрутизации)
+            msg = f"📥 Пост #{post_id} → Входящие"
+            if is_album:
+                msg += " (альбом)"
+            else:
+                msg += "\nПравило маршрутизации не найдено. /menu → 🔀 Маршрутизация"
+            await message.answer(msg)
     else:
         from app.repositories import queues as queues_repo
 

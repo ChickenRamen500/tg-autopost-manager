@@ -183,11 +183,12 @@ def user_actions(user_id: int, is_self: bool) -> InlineKeyboardMarkup:
 # Правила маршрутизации (ТЗ §2.2.2)
 # ---------------------------------------------------------------------------
 
-# Типы источников для правила маршрутизации (ТЗ §2.2.1)
+# Типы источников для правила маршрутизации (ТЗ §2.2.1).
+# telegram_direct и telegram_user убраны: посты из ЛС бота и пересылки от юзеров
+# НЕ маршрутизируются правилами — для них работает интерактивный выбор очереди
+# (блок A): бот отвечает сообщением с кнопками каналов → очередей.
 ROUTING_SOURCE_TYPES = [
     ("telegram_channel", "📢 Telegram-канал"),
-    ("telegram_direct", "💬 ЛС (прямой)"),
-    ("telegram_user", "👤 Telegram-юзер"),
     ("local_folder", "📁 Локальная папка"),
     ("gelbooru", "🖼 Gelbooru"),
     ("any", "⭐ Любой (по умолчанию)"),
@@ -239,5 +240,45 @@ def rule_actions(rule_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🗑 Удалить", callback_data=f"menu:rule:{rule_id}:del")
     kb.button(text="🔙 К правилам", callback_data="menu:rules")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+# ---------------------------------------------------------------------------
+# Интерактивный выбор очереди (при посте из ЛС — блок A)
+# ---------------------------------------------------------------------------
+
+def pick_channel_for_post(post_id: int, channels: list[dict]) -> InlineKeyboardMarkup:
+    """Выбор канала для поста из Входящих (после приёма из ЛС).
+
+    Кнопки каналов → затем покажет очереди выбранного канала.
+    """
+    kb = InlineKeyboardBuilder()
+    for c in channels[:8]:
+        kb.button(
+            text=f"📢 «{c['name']}» (@{c.get('username') or '—'})",
+            callback_data=f"menu:post:{post_id}:pickch:{c['id']}",
+        )
+    if not channels:
+        kb.button(text="📢 Каналов нет", callback_data="noop")
+    kb.button(text="➕ Создать канал", callback_data="menu:add_channel")
+    kb.button(text="📥 Оставить во Входящих", callback_data="noop")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def pick_queue_for_post(post_id: int, channel_id: int, queues: list[dict]) -> InlineKeyboardMarkup:
+    """Выбор очереди канала для поста (после выбора канала)."""
+    kb = InlineKeyboardBuilder()
+    for q in queues[:8]:
+        kb.button(
+            text=f"📋 «{q['name']}» (#{q['id']}, каждые {q['interval_minutes']}мин)",
+            callback_data=f"menu:post:{post_id}:toq:{q['id']}",
+        )
+    if not queues:
+        kb.button(text="📋 Очередей нет", callback_data="noop")
+    # Создать очередь для этого канала, затем вернуться к посту
+    kb.button(text="➕ Создать очередь", callback_data=f"menu:addq_forch:{channel_id}:{post_id}")
+    kb.button(text="🔙 К каналам", callback_data=f"menu:post:{post_id}:pickch_back")
     kb.adjust(1)
     return kb.as_markup()

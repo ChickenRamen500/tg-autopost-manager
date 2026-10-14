@@ -141,12 +141,19 @@ docker compose exec bot python scripts/check_phase2.py --scheduler
 2. Шаг 1: пришли числовой tg_id (пользователь узнаёт у `@userinfobot`) ИЛИ перешли сообщение от него
 3. Шаг 2: роль — `admin` или `moderator`
 
-### Как поставить пост в очередь (из Входящих)
+### Как поставить пост в очередь (интерактивный выбор)
 
-1. Пришли боту фото/видео/GIF → пост попадает во **Входящие** (если нет правила маршрутизации)
-2. `/menu` → **📥 Входящие** → нажми на пост
-3. В карточке поста нажми кнопку нужной очереди (➡ «Имя» #N)
-4. ✓ Пост в очереди, опубликуется по расписанию
+**Для постов из ЛС бота и пересылок от юзеров** (блок A — интерактивный выбор):
+
+1. Пришли боту фото/видео/GIF → пост **сразу попадает во Входящие**
+2. Бот в ответ присылает: «📥 Пост #13 → Входящие. Куда отправить?» + кнопки **каналов**
+3. Нажми канал → кнопки заменятся на **очереди этого канала**
+4. Если очередей нет → кнопка «➕ Создать очередь» (создаст и вернёт к выбору)
+5. Нажми очередь → пост перемещён, бот подтверждает
+
+**Для пересылок из каналов** (`telegram_channel`) — работают **правила маршрутизации** (автоматически). Если правила нет — пост во Входящих, можно назначить через `/menu` → **📥 Входящие** → карточка поста.
+
+> ℹ️ `telegram_direct` и `telegram_user` убраны из UI создания правил — посты из ЛС всегда идут через интерактивный выбор (гибче, чем одно правило на весь ЛС).
 
 ### Как создать правило маршрутизации (автоматическая сортировка)
 
@@ -273,18 +280,18 @@ VALUES ('telegram_channel', '@anime_channel', 1, 10);
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 38 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 46 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 38 passed
+# 46 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
 #   test_scheduler.py      (4)  — стратегия file_id/файл, попытки, порядок pending
-#   test_regression.py    (16)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
+#   test_regression.py    (19)  — caption_raw, дубликат канала, lookup, add_to_queue, hot-reload, forward_origin
 ruff check app/ scripts/ tests/ conftest.py   # All checks passed!
 ```
 
@@ -381,7 +388,7 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 
 Проверка фиксов:
 ```bash
-pytest tests/unit -q                              # 38 passed (16 в test_regression.py)
+pytest tests/unit -q                              # 46 passed (16 в test_regression.py)
 ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 # /add_queue → "Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен."
 ```
@@ -416,7 +423,7 @@ ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 38 passed
+pytest tests/unit -q   # 46 passed
 ruff check             # All checks passed!
 # /menu → главное меню с кнопками
 ```
@@ -434,7 +441,7 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 38 passed (16 в test_regression.py)
+pytest tests/unit -q   # 46 passed (16 в test_regression.py)
 ruff check             # All checks passed!
 # регрессионный тест: cmd_cancel зарегистрирован первым (test_cmd_cancel_registered_before_fsm_handlers)
 ```
@@ -451,7 +458,7 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 38 passed (16 в test_regression.py)
+pytest tests/unit -q   # 46 passed (16 в test_regression.py)
 ruff check             # All checks passed!
 # новые тесты: test_create_post_with_media_group_id, test_find_album_posts_groups_by_media_group_id,
 #              test_delete_post_removes_from_db, test_queue_group_albums_setting,

@@ -642,3 +642,55 @@ def test_add_rule_starts_flow_when_queues_exist(tmp_path):
         assert "Шаг 1/4" in FakeCall.message.edited_text
 
     run_with_db(tmp_path, body)
+
+
+def test_pick_channel_for_post_keyboard():
+    """Клавиатура выбора канала для поста (блок A — интерактивный выбор)."""
+    from app.bot.keyboards import builder as kb
+
+    channels = [
+        {"id": 1, "name": "AnimeCh", "username": "anime"},
+        {"id": 2, "name": "MemeCh", "username": None},
+    ]
+    markup = kb.pick_channel_for_post(42, channels)
+    buttons = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("AnimeCh" in t for t in buttons)
+    assert any("MemeCh" in t for t in buttons)
+    # Должна быть кнопка создания канала
+    assert any("Создать канал" in t for t in buttons)
+    # callback_data ведёт на pickch
+    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert any("menu:post:42:pickch:1" == c for c in callbacks), f"Нет callback pickch: {callbacks}"
+
+
+def test_pick_queue_for_post_keyboard():
+    """Клавиатура выбора очереди канала для поста."""
+    from app.bot.keyboards import builder as kb
+
+    queues = [
+        {"id": 1, "name": "AnimeQ", "interval_minutes": 60},
+        {"id": 2, "name": "MemeQ", "interval_minutes": 30},
+    ]
+    markup = kb.pick_queue_for_post(42, channel_id=1, queues=queues)
+    buttons = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("AnimeQ" in t for t in buttons)
+    assert any("MemeQ" in t for t in buttons)
+    # Должна быть кнопка создания очереди и возврата к каналам
+    assert any("Создать очередь" in t for t in buttons)
+    assert any("К каналам" in t for t in buttons)
+    # callback_data для toq (перемещение поста)
+    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert any("menu:post:42:toq:1" == c for c in callbacks), f"Нет callback toq: {callbacks}"
+    # callback для создания очереди с возвратом к посту
+    assert any("menu:addq_forch:1:42" == c for c in callbacks), f"Нет callback addq_forch: {callbacks}"
+
+
+def test_routing_source_types_no_direct_user():
+    """Из UI создания правил убраны telegram_direct и telegram_user (блок A)."""
+    from app.bot.keyboards import builder as kb
+
+    source_types = [v for v, _ in kb.ROUTING_SOURCE_TYPES]
+    assert "telegram_channel" in source_types
+    assert "telegram_direct" not in source_types, "telegram_direct должен быть убран из правил"
+    assert "telegram_user" not in source_types, "telegram_user должен быть убран из правил"
+    assert "any" in source_types

@@ -183,6 +183,53 @@ async def cb_post(call: CallbackQuery) -> None:
     post_id = int(parts[2])
     action = parts[3] if len(parts) > 3 else None
 
+    # Интерактивный выбор очереди (блок A): выбор канала → показ очередей канала
+    if action == "pickch":
+        channel_id = int(parts[4])
+        # Проверяем, что пост ещё существует и во Входящих
+        post = await posts_repo.get_post(post_id)
+        if not post:
+            await call.answer("Пост не найден (возможно, удалён)", show_alert=True)
+            return
+        if post.get("queue_id") is not None:
+            await call.answer("Пост уже в очереди", show_alert=True)
+            return
+        # Очереди выбранного канала
+        all_queues = await queues_repo.list_queues(active_only=False)
+        channel_queues = [q for q in all_queues if q["channel_id"] == channel_id]
+        channel = await channels_repo.get_channel(channel_id)
+        ch_name = channel["name"] if channel else f"#{channel_id}"
+        if not channel_queues:
+            await call.message.edit_text(
+                f"📢 Канал «{ch_name}» выбран.\n\n"
+                f"⚠️ В этом канале нет очередей. Создай очередь для него:",
+                reply_markup=kb.pick_queue_for_post(post_id, channel_id, []),
+            )
+        else:
+            await call.message.edit_text(
+                f"📢 Канал «{ch_name}». Выбери очередь:",
+                reply_markup=kb.pick_queue_for_post(post_id, channel_id, channel_queues),
+            )
+        await call.answer()
+        return
+
+    if action == "pickch_back":
+        # Назад к списку каналов (из выбора очереди)
+        post = await posts_repo.get_post(post_id)
+        if not post:
+            await call.answer("Пост не найден", show_alert=True)
+            return
+        if post.get("queue_id") is not None:
+            await call.answer("Пост уже в очереди", show_alert=True)
+            return
+        channels = await channels_repo.list_channels(active_only=True)
+        await call.message.edit_text(
+            f"📥 Пост #{post_id} → Входящие. Куда отправить?",
+            reply_markup=kb.pick_channel_for_post(post_id, channels),
+        )
+        await call.answer()
+        return
+
     if action == "toq":
         queue_id = int(parts[4])
         post = await posts_repo.get_post(post_id)
@@ -392,6 +439,35 @@ async def cb_add_queue(call: CallbackQuery, state: FSMContext, user_role: str | 
     await call.answer()
 
 
+@router.callback_query(F.data.startswith("menu:addq_forch:"))
+async def cb_add_queue_for_channel(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
+    """Создать очередь для выбранного канала (из интерактивного выбора поста).
+
+    Callback: menu:addq_forch:<channel_id>:<post_id>
+    Канал уже выбран — переходим сразу к шагу имени очереди.
+    После создания вернёмся к выбору очереди для поста (post_id сохраняем в FSM).
+    """
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    parts = call.data.split(":")
+    channel_id = int(parts[2])
+    post_id = int(parts[3])
+    # Проверяем канал
+    channel = await channels_repo.get_channel(channel_id)
+    if not channel:
+        await call.answer(f"Канал #{channel_id} не найден", show_alert=True)
+        return
+    await state.update_data(channel_id=channel_id, return_to_post=post_id)
+    await state.set_state(AddStates.add_queue_name)
+    await call.message.edit_text(
+        f"📋 **Добавление очереди** для канала «{channel['name']}»\n"
+        f"Шаг 2/4: Пришли название очереди (например: Утренние посты)",
+        reply_markup=kb.confirm_cancel(),
+    )
+    await call.answer()
+
+
 @router.callback_query(AddStates.add_queue_pick_channel, F.data.startswith("menu:channel:"))
 async def add_queue_pick_channel(call: CallbackQuery, state: FSMContext) -> None:
     ch_id = int(call.data.split(":")[2])
@@ -456,6 +532,23 @@ async def add_queue_group_albums(message: Message, state: FSMContext, user_role:
     qid = await queues_repo.create_queue(ch_id, name, interval_minutes=interval, group_albums=group_albums)
     n = await reload_scheduler()
     group_label = "альбомы группой" if group_albums else "по одному"
+
+    # Если очередь создана из интерактивного выбора поста — вернёмся к выбору очереди
+    return_to_post = data.get("return_to_post")
+    if return_to_post:
+        post = await posts_repo.get_post(return_to_post)
+        if post and post.get("queue_id") is None:
+            # Пост ещё во Входящих — показываем обновлённый список очередей канала
+            all_queues = await queues_repo.list_queues(active_only=False)
+            channel_queues = [q for q in all_queues if q["channel_id"] == ch_id]
+            await message.answer(
+                f"✓ Очередь «{name}» создана (#{qid}, каждые {interval} мин, {group_label}).\n"
+                f"Теперь выбери её для поста #{return_to_post}:",
+                reply_markup=kb.pick_queue_for_post(return_to_post, ch_id, channel_queues),
+            )
+            await state.clear()
+            return
+        # Пост уже в очереди или удалён — просто в главное меню
     await message.answer(
         f"✓ Очередь «{name}» добавлена (id={qid}, каждые {interval} мин, {group_label}).\n"
         f"✓ Планировщик: активных очередей {n}.",
