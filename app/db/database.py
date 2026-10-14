@@ -103,6 +103,16 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
         ("queues", "crop_video", "ALTER TABLE queues ADD COLUMN crop_video INTEGER NOT NULL DEFAULT 0"),
         ("queues", "signature_template", "ALTER TABLE queues ADD COLUMN signature_template TEXT"),
         ("queues", "shuffle_enabled", "ALTER TABLE queues ADD COLUMN shuffle_enabled INTEGER NOT NULL DEFAULT 1"),
+        # Блок B: время работы очереди (start_at, end_at, daily_window, end_strategy)
+        ("queues", "start_at", "ALTER TABLE queues ADD COLUMN start_at DATETIME"),
+        ("queues", "end_at", "ALTER TABLE queues ADD COLUMN end_at DATETIME"),
+        ("queues", "daily_window_start", "ALTER TABLE queues ADD COLUMN daily_window_start TEXT"),
+        ("queues", "daily_window_end", "ALTER TABLE queues ADD COLUMN daily_window_end TEXT"),
+        # end_strategy имеет DEFAULT + CHECK — ALTER TABLE ADD COLUMN с CHECK поддерживается SQLite ≥3.35
+        ("queues", "end_strategy", (
+            "ALTER TABLE queues ADD COLUMN end_strategy TEXT NOT NULL DEFAULT 'continue_next_day' "
+            "CHECK(end_strategy IN ('continue_next_day', 'continue_after_end', 'move_to_inbox', 'delete'))"
+        )),
     ]
     for table, column, ddl in migrations:
         if not await _column_exists(db, table, column):

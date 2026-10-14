@@ -54,6 +54,8 @@ class Settings:
     send_throttle_seconds: float = field(default_factory=lambda: float(_get("SEND_THROTTLE_SECONDS", "1.1") or 1.1))
     # Лимит попыток отправки поста до перевода в failed (ТЗ §2.5.2 п.4)
     max_send_attempts: int = field(default_factory=lambda: int(_get("MAX_SEND_ATTEMPTS", "3") or 3))
+    # Часовой пояс для daily_window очередей (Asia/Yekaterinburg — TZ пользователя)
+    timezone: str = field(default_factory=lambda: _get("TIMEZONE", "Asia/Yekaterinburg"))
 
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: int(_get("WEB_PORT", "8000") or 8000))

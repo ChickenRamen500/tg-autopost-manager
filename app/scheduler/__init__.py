@@ -29,6 +29,7 @@ from app.repositories import (
 from app.repositories import (
     queues as queues_repo,
 )
+from app.services.queue_time import handle_end_strategy, is_in_time_window
 
 log = logging.getLogger("scheduler")
 
@@ -141,6 +142,9 @@ async def send_post_from_queue(queue_id: int) -> None:
     Если у очереди включена групповая отправка альбомов (group_albums=True) и у поста
     есть media_group_id, собирает все посты альбома и отправляет через send_media_group.
 
+    Проверяет временное окно очереди (блок B): start_at/end_at/daily_window.
+    Если вне окна — пропускает тик. Если end_at прошёл — выполняет end_strategy.
+
     Троттлинг: минимум settings.send_throttle_seconds между отправками в одну очередь.
     """
     queue = await queues_repo.get_queue(queue_id)
@@ -149,6 +153,17 @@ async def send_post_from_queue(queue_id: int) -> None:
     channel = await channels_repo.get_channel(queue["channel_id"])
     if not channel or not channel["is_active"]:
         return
+
+    # Проверка временного окна очереди (блок B)
+    if not is_in_time_window(queue):
+        # Вне окна. Проверяем, не прошёл ли end_at со стратегией move_to_inbox/delete
+        from app.services.queue_time import _now_utc, _parse_iso_utc
+
+        end_at = _parse_iso_utc(queue.get("end_at"))
+        if end_at is not None and _now_utc() > end_at:
+            # end_at прошёл — обрабатываем стратегию завершения
+            await handle_end_strategy(queue)
+        return  # вне окна — пропускаем тик
 
     post = await posts_repo.get_next_pending(queue_id)
     if post is None:
