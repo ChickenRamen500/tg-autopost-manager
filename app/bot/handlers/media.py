@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -33,6 +34,50 @@ from app.services.routing import route_post
 logger = logging.getLogger("handlers.media")
 
 router = Router(name="media")
+
+# Debounce для групповой архивации альбомов в служебный канал.
+_album_archive_tasks: dict[str, asyncio.Task] = {}
+ALBUM_DEBOUNCE_SEC = 1.5
+
+
+def _schedule_album_archive(media_group_id: str, target_channel_id: int) -> None:
+    """Откладывает групповую архивацию альбома на ALBUM_DEBOUNCE_SEC.
+
+    Telegram присылает альбом как N сообщений с одинаковым media_group_id.
+    Каждое сообщение создаёт отдельный пост. Чтобы архивировать альбом как
+    группу (send_media_group), ждём пока все посты создадутся, затем
+    архивируем одним вызовом.
+    """
+    old_task = _album_archive_tasks.get(media_group_id)
+    if old_task is not None and not old_task.done():
+        old_task.cancel()
+
+    async def _do_archive() -> None:
+        try:
+            await asyncio.sleep(ALBUM_DEBOUNCE_SEC)
+        except asyncio.CancelledError:
+            return
+        _album_archive_tasks.pop(media_group_id, None)
+        try:
+            from app.db import get_db
+            from app.services.archive import archive_album
+
+            db = get_db()
+            cur = await db.execute(
+                "SELECT * FROM posts WHERE media_group_id = ? ORDER BY created_at ASC, id ASC LIMIT 10",
+                (media_group_id,),
+            )
+            rows = await cur.fetchall()
+            await cur.close()
+            posts = [dict(r) for r in rows]
+            if not posts:
+                return
+            await archive_album(posts, target_channel_id)
+            logger.info("Альбом %s архивирован группой (%d постов)", media_group_id, len(posts))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Групповая архивация альбома %s не удалась: %s", media_group_id, e)
+
+    _album_archive_tasks[media_group_id] = asyncio.create_task(_do_archive())
 
 
 def _pick_photo(photos: list[PhotoSize]) -> tuple[str, str | None, int | None]:
@@ -193,28 +238,34 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     )
 
     # Альбом: Telegram присылает каждое фото отдельным сообщением с одинаковым media_group_id.
-    # Каждый файл = отдельный пост (ТЗ §2.1.1: «каждый файл как отдельный пост или групповой пост»).
     is_album = bool(getattr(message, "media_group_id", None))
 
     # Архивация в служебный канал (блок D) — от имени бота, через file_id.
-    # Теги: #from_<source> #to_<channel> #<type>
-    try:
-        from app.services.archive import archive_post
+    # Для альбомов: debounce 1.5 сек → архивируем группой через send_media_group.
+    # Для одиночных медиа: сразу через archive_post.
+    target_ch = 0
+    if queue_id is not None:
+        from app.repositories import channels as channels_repo
+        from app.repositories import queues as queues_repo
+        q = await queues_repo.get_queue(queue_id)
+        if q:
+            ch = await channels_repo.get_channel(q["channel_id"])
+            if ch:
+                target_ch = ch["tg_chat_id"]
 
-        post_dict = await posts_repo.get_post(post_id)
-        target_ch = 0
-        if queue_id is not None:
-            from app.repositories import channels as channels_repo
-            from app.repositories import queues as queues_repo
-            q = await queues_repo.get_queue(queue_id)
-            if q:
-                ch = await channels_repo.get_channel(q["channel_id"])
-                if ch:
-                    target_ch = ch["tg_chat_id"]
-        if post_dict:
-            await archive_post(post_dict, target_ch, [media["file_type"]])
-    except Exception as e:  # noqa: BLE001 — архив не критичен
-        logger.warning("Архивация поста #%s не удалась: %s", post_id, e)
+    if is_album and media_group_id:
+        # Альбом: отложенная групповая архивация
+        _schedule_album_archive(media_group_id, target_ch)
+    else:
+        # Одиночное медиа — архивируем сразу
+        try:
+            from app.services.archive import archive_post
+
+            post_dict = await posts_repo.get_post(post_id)
+            if post_dict:
+                await archive_post(post_dict, target_ch, [media["file_type"]])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Архивация поста #%s не удалась: %s", post_id, e)
 
     if queue_id is None:
         # Пост во Входящих. Если источник — ЛС (telegram_direct/telegram_user),

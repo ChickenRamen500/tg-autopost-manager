@@ -189,6 +189,45 @@ async def cb_inbox(call: CallbackQuery) -> None:
 # Карточка поста + действия
 # ===========================================================================
 
+@router.callback_query(F.data.startswith("rule:create:"))
+async def cb_create_rule_from_post(call: CallbackQuery, user_role: str | None = None) -> None:
+    """Создаёт правило маршрутизации одной кнопкой (из предложения после выбора очереди).
+
+    Callback: rule:create:<post_id>:<queue_id>:<source_id>
+    """
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    parts = call.data.split(":")
+    queue_id = int(parts[3])
+    source_id = ":".join(parts[4:])
+
+    from app.repositories import routing as routing_repo
+    existing_rules = await routing_repo.list_rules(active_only=True)
+    has_rule = any(
+        r["source_type"] == "telegram_channel" and r["source_pattern"] == source_id
+        for r in existing_rules
+    )
+    if has_rule:
+        await call.answer("Правило уже существует", show_alert=True)
+        return
+
+    rid = await routing_repo.create_rule(
+        source_type="telegram_channel",
+        source_pattern=source_id,
+        target_queue_id=queue_id,
+        priority=10,
+    )
+    await call.answer(f"✓ Правило #{rid} создано", show_alert=True)
+    await call.message.edit_text(
+        f"✓ Правило #{rid} создано!\n"
+        f"Источник: telegram_channel `{source_id}`\n"
+        f"→ Очередь: #{queue_id} (priority 10)\n\n"
+        f"Будущие посты из этого канала будут автоматически идти в эту очередь.",
+        reply_markup=kb.main_menu(is_admin=True),
+    )
+
+
 @router.callback_query(F.data.startswith("menu:post:"))
 async def cb_post(call: CallbackQuery) -> None:
     parts = call.data.split(":")
@@ -254,6 +293,31 @@ async def cb_post(call: CallbackQuery) -> None:
         queue = await queues_repo.get_queue(queue_id)
         qname = queue["name"] if queue else f"#{queue_id}"
         await call.answer(f"✓ Пост #{post_id} → «{qname}»", show_alert=True)
+
+        # Вопрос «создать правило?» — если источник канала и правила для него нет
+        should_prompt_rule = (
+            post.get("source_type") == "telegram_channel" and post.get("source_id")
+        )
+        if should_prompt_rule:
+            from app.repositories import routing as routing_repo
+            existing_rules = await routing_repo.list_rules(active_only=True)
+            has_rule = any(
+                r["source_type"] == "telegram_channel" and r["source_pattern"] == post["source_id"]
+                for r in existing_rules
+            )
+            if not has_rule:
+                post = await posts_repo.get_post(post_id)
+                queues = await queues_repo.list_queues(active_only=True)
+                await _render_post_card(call, post, queues)
+                await call.message.answer(
+                    f"💡 Создать правило маршрутизации?\n"
+                    f"Источник: канал {post.get('source_id', '?')}\n"
+                    f"→ Очередь: «{qname}» (#{queue_id})\n\n"
+                    f"Будущие посты из этого канала будут автоматически идти в эту очередь.",
+                    reply_markup=kb.create_rule_prompt(post_id, queue_id, post["source_id"] or ""),
+                )
+                return
+
         post = await posts_repo.get_post(post_id)
         queues = await queues_repo.list_queues(active_only=True)
         await _render_post_card(call, post, queues)

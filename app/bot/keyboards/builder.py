@@ -335,3 +335,15 @@ def queue_settings_menu(
     kb.button(text="🔙 Отмена", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
+
+
+def create_rule_prompt(post_id: int, queue_id: int, source_id: str) -> InlineKeyboardMarkup:
+    """Предложение создать правило маршрутизации после выбора очереди для поста.
+
+    Кнопки: создать правило / нет.
+    """
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, создать правило", callback_data=f"rule:create:{post_id}:{queue_id}:{source_id}")
+    kb.button(text="❌ Нет", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
