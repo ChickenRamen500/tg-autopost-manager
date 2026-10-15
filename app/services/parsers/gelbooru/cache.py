@@ -37,7 +37,10 @@ def get(key: str) -> Any | None:
     if entry is None:
         return None
     value, expire_at = entry
-    if time.monotonic() > expire_at:
+    # PR-40 LOW-фикс: `>` → `>=` для консистентности с cleanup_expired()
+    # (там та же логика: `now > expire_at` помечает как expired — но в cleanup
+    # мы УЖЕ на грани истечения; в get надо тоже возвращать None на самой границе).
+    if time.monotonic() >= expire_at:
         _cache.pop(key, None)
         return None
     return value
