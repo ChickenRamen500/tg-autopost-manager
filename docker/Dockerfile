@@ -14,10 +14,9 @@ COPY app ./app
 COPY scripts ./scripts
 COPY data ./data
 
-ENV PYTHONUNBUFFERED=1 TZ=Europe/Moscow
+ENV PYTHONUNBUFFERED=1 TZ=Asia/Yekaterinburg
 
 EXPOSE 8000
 
-# Полноценный вход (FastAPI + aiogram polling) появится на Фазе 2;
-# на Фазе 1 контейнер может жить в режиме ожидания.
+# FastAPI + aiogram polling (Фаза 2 реализована)
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

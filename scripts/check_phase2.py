@@ -56,7 +56,7 @@ async def check_db() -> int:
     tables = [r[0] for r in await cur.fetchall()]
     await cur.close()
     expected = {"users", "channels", "queues", "posts", "routing_rules", "signatures",
-                "duplicate_hashes", "tag_subscriptions", "task_queue"}
+                "duplicate_hashes", "tag_subscriptions", "task_queue", "app_settings"}
     missing = expected - set(tables)
     if missing:
         log.error("[FAIL] Нет таблиц: %s", missing)

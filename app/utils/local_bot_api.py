@@ -43,13 +43,20 @@ def create_bot(timeout_s: float | None = None) -> Bot:
     timeout_s — таймаут HTTP-запросов (по умолчанию aiogram 60с; для отправки
     больших файлов передавайте больше, см. BIG_UPLOAD_TIMEOUT_S).
     """
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+
     kwargs = {}
     if timeout_s:
         kwargs = {"timeout": timeout_s}
     session = AiohttpSession(
         api=TelegramAPIServer.from_base(settings.bot_api_url), **kwargs
     )
-    return Bot(token=settings.bot_token, session=session)
+    return Bot(
+        token=settings.bot_token,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
 
 async def logout_from_cloud() -> bool:

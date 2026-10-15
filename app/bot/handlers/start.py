@@ -18,7 +18,7 @@ async def cmd_help(message: Message, user: dict | None = None, user_role: str | 
     """Короткая справка + кнопка главного меню."""
     is_admin = user_role == "admin"
     text = (
-        "📖 **Справка**\n\n"
+        "📖 <b>Справка</b>\n\n"
         "Всё управление — через кнопки главного меню (/menu или /start).\n\n"
         "Быстрые действия:\n"
         "• Пришли фото/видео/GIF — поставлю в очередь\n"
