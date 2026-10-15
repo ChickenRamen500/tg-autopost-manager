@@ -640,9 +640,10 @@ async def _render_queue_settings(message_or_call: Message | CallbackQuery, state
         shuffle=shuffle,
         has_signature=bool(sig),
     )
-    edit = getattr(message_or_call, "edit_text", None)
-    if edit:
-        await edit(text, reply_markup=markup)
+    # CallbackQuery → редактируем сообщение бота (call.message.edit_text).
+    # Message → отправляем новое сообщение (нельзя редактировать сообщение пользователя).
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.edit_text(text, reply_markup=markup)
     else:
         await message_or_call.answer(text, reply_markup=markup)
 
