@@ -1,8 +1,26 @@
-"""Тесты регрессии для ошибок, найденных в runtime-логах (Фаза 2 post-fix).
+"""Тесты реальных регрессий — ошибок, найденных в runtime-логах (Фаза 2 post-fix).
 
-1. caption_raw не существует в aiogram 3.x — receive_media не должен падать.
-2. Дубликат tg_chat_id в /add_channel — DuplicateChannelError вместо IntegrityError.
-3. check_phase2.py --routing изолирован от занятой БД.
+PR-40: файл был «свалкой» на 933 строки. Тесты keyboards/queue_time/archive
+перенесены в тематические файлы (test_keyboards.py, test_queue_time.py,
+test_archive.py). Здесь оставлены ТОЛЬКО реальные регрессии:
+
+  1. caption_raw не существует в aiogram 3.x — receive_media не должен падать.
+  2. Дубликат tg_chat_id в /add_channel — DuplicateChannelError вместо IntegrityError.
+  3. get_channel_by_chat_id — корректный lookup канала.
+  4. /add_to_queue — перенос поста из Входящих в очередь.
+  5. Hot-reload scheduler — новая очередь подхватывается без перезапуска.
+  6. _extract_source для форварда из канала — source_id не None.
+  7. _extract_source для ЛС — source_type=telegram_direct.
+  8. cmd_cancel зарегистрирован ПЕРВЫМ в menu-роутере (FSM-ловушка).
+  9. routing rule CRUD (create/route/list/remove).
+  10. media_group_id сохраняется и find_album_posts группирует по нему.
+  11. delete_post + queue_group_albums setting.
+  12. DB-миграции добавляют колонки (media_group_id, group_albums, time-window).
+  13. list_queues LEFT JOIN — orphan-очереди видны (регрессия INNER JOIN).
+  14. cb_add_rule — блокировка до flow если нет очередей + начало flow если есть.
+
+TODO (Phase 5): при росте файла дальше — разбить на test_regression_media.py,
+test_regression_routing.py, test_regression_db.py.
 """
 from datetime import UTC
 
@@ -12,8 +30,60 @@ from app.repositories.channels import DuplicateChannelError
 def test_caption_extraction_no_caption_raw_attr(tmp_path):
     """aiogram 3.x Message не имеет caption_raw — media.py использует только message.caption.
 
-    Проверяем, что логика извлечения caption не обращается к несуществующему атрибуту.
+    Реальная регрессия (PR-40 H-T5): раньше в коде был `message.caption_raw or message.caption`,
+    что падало AttributeError в aiogram 3.x (caption_raw убран). Тест проверяет ДВА аспекта:
+
+    1. В app/bot/handlers/media.py больше НЕТ ссылок на caption_raw (grep по файлу).
+    2. Эквивалентная логика извлечения (`msg.caption or None`) корректно обрабатывает
+       оба варианта: caption=None (нет подписи) и caption="текст" (есть подпись).
+
+    Также проверяем end-to-end: post создаётся и сохраняется с правильным caption в БД.
     """
+    # 1. Static-проверка: в handlers/media.py нет обращений к caption_raw как к атрибуту
+    #    (`message.caption_raw`, `.caption_raw or`). Допускается упоминание в комментарии,
+    #    объясняющем, почему атрибут не используется.
+    import re
+    from pathlib import Path
+
+    media_path = Path(__file__).resolve().parent.parent.parent / "app" / "bot" / "handlers" / "media.py"
+    media_src = media_path.read_text(encoding="utf-8")
+    # Шаблоны которые могли бы вызвать AttributeError в aiogram 3.x:
+    #   - любой доступ через точку к атрибуту caption_raw (message.caption_raw, msg.caption_raw, ...)
+    #   - присваивание или обращение без точки в коде (caption_raw = ...)
+    # НЕ считаем регрессией упоминание в docstring/комментарии.
+    code_only = "\n".join(
+        line for line in media_src.splitlines()
+        if not line.lstrip().startswith("#") and '"""' not in line
+    )
+    bad_patterns = [
+        r"\.caption_raw\b",          # message.caption_raw / msg.caption_raw
+        r"^\s*caption_raw\s*=",      # caption_raw = ...
+    ]
+    for pat in bad_patterns:
+        m = re.search(pat, code_only, flags=re.MULTILINE)
+        assert m is None, (
+            f"В {media_path} найдено обращение к caption_raw как к атрибуту/переменной "
+            f"(pattern={pat!r}) — aiogram 3.x не имеет такого атрибута."
+        )
+
+    # 2. Логика извлечения (повторяет receive_media: `caption = message.caption or None`).
+    from unittest.mock import MagicMock
+
+    from aiogram.types import Message
+
+    # caption=None (нет подписи) — извлечение должно дать None, не упасть.
+    msg_no_caption = MagicMock(spec=Message)
+    msg_no_caption.caption = None
+    extracted_none = msg_no_caption.caption or None
+    assert extracted_none is None, f"caption=None должен дать None, получилось {extracted_none!r}"
+
+    # caption="Test caption" — извлечение должно дать строку как есть.
+    msg_with_caption = MagicMock(spec=Message)
+    msg_with_caption.caption = "Test caption"
+    extracted_str = msg_with_caption.caption or None
+    assert extracted_str == "Test caption", f"Ожидали 'Test caption', получили {extracted_str!r}"
+
+    # 3. End-to-end: посты с caption=None и caption="..." сохраняются в БД корректно.
     from conftest import run_with_db
 
     async def body():
@@ -139,7 +209,11 @@ def test_hot_reload_scheduler_registers_new_queue(tmp_path):
     async def body():
         from app.repositories import channels as channels_repo
         from app.repositories import queues as queues_repo
-        from app.scheduler import get_scheduler, reload_scheduler
+        from app.scheduler import get_scheduler, reload_scheduler, reset_scheduler
+
+        # PR-40 (H-T6): сбрасываем singleton scheduler — иначе между тестами
+        # может течь scheduler из предыдущего теста (running=True, со старыми job'ами).
+        reset_scheduler()
 
         # Инициализируем scheduler (имитируем запуск приложения)
         sched = get_scheduler()
@@ -287,47 +361,6 @@ def test_routing_rule_crud(tmp_path):
         assert len(rules) == 0
 
     run_with_db(tmp_path, body)
-
-
-def test_keyboards_build_routing():
-    """Клавиатуры для routing rules строятся без ошибок."""
-    from app.bot.keyboards import builder as kb
-
-    st = kb.source_type_picker()
-    assert st is not None
-    assert len(st.inline_keyboard) > 0
-
-    qpk = kb.rule_pick_queue([{"id": 1, "name": "Test"}])
-    assert qpk is not None
-
-    rl = kb.rules_list(
-        [{"id": 1, "source_type": "any", "source_pattern": ".*", "target_queue_id": 1, "priority": 0, "is_active": 1}],
-        {1: "Test"},
-    )
-    assert rl is not None
-
-    ra = kb.rule_actions(1)
-    assert ra is not None
-
-    # add_menu должен содержать кнопку «🔀 Правило»
-    am = kb.add_menu()
-    buttons_text = [b.text for row in am.inline_keyboard for b in row]
-    assert any("🔀" in t for t in buttons_text), f"Нет кнопки Маршрутизация в add_menu: {buttons_text}"
-
-
-def test_post_card_has_delete_button():
-    """Карточка поста содержит кнопку «🗑 Удалить пост» (для очистки дубликатов)."""
-    from app.bot.keyboards import builder as kb
-
-    post = {
-        "id": 42,
-        "status": "possible_duplicate",
-        "queue_id": None,  # во Входящих
-        "file_type": "photo",
-    }
-    card = kb.post_card(post, queues=[])
-    buttons = [b.text for row in card.inline_keyboard for b in row]
-    assert any("🗑" in t for t in buttons), f"Нет кнопки удаления в карточке поста: {buttons}"
 
 
 def test_create_post_with_media_group_id(tmp_path):
@@ -542,16 +575,6 @@ def test_list_queues_with_channel_and_orphan(tmp_path):
     run_with_db(tmp_path, body)
 
 
-def test_keyboards_need_queue_menu():
-    """Клавиатура «Нет очередей» для правил маршрутизации содержит кнопку создания очереди."""
-    from app.bot.keyboards import builder as kb
-
-    menu = kb.need_queue_menu()
-    buttons = [b.text for row in menu.inline_keyboard for b in row]
-    assert any("Создать очередь" in t for t in buttons), f"Нет кнопки создания очереди: {buttons}"
-    assert any("Назад" in t for t in buttons), f"Нет кнопки Назад: {buttons}"
-
-
 def test_add_rule_blocks_when_no_queues(tmp_path):
     """cb_add_rule проверяет очереди ДО начала flow правила (UX-фикс).
 
@@ -646,231 +669,6 @@ def test_add_rule_starts_flow_when_queues_exist(tmp_path):
     run_with_db(tmp_path, body)
 
 
-def test_pick_channel_for_post_keyboard():
-    """Клавиатура выбора канала для поста (блок A — интерактивный выбор)."""
-    from app.bot.keyboards import builder as kb
-
-    channels = [
-        {"id": 1, "name": "AnimeCh", "username": "anime"},
-        {"id": 2, "name": "MemeCh", "username": None},
-    ]
-    markup = kb.pick_channel_for_post(42, channels)
-    buttons = [b.text for row in markup.inline_keyboard for b in row]
-    assert any("AnimeCh" in t for t in buttons)
-    assert any("MemeCh" in t for t in buttons)
-    # Должна быть кнопка создания канала
-    assert any("Создать канал" in t for t in buttons)
-    # callback_data ведёт на pickch
-    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert any("menu:post:42:pickch:1" == c for c in callbacks), f"Нет callback pickch: {callbacks}"
-
-
-def test_pick_queue_for_post_keyboard():
-    """Клавиатура выбора очереди канала для поста."""
-    from app.bot.keyboards import builder as kb
-
-    queues = [
-        {"id": 1, "name": "AnimeQ", "interval_minutes": 60},
-        {"id": 2, "name": "MemeQ", "interval_minutes": 30},
-    ]
-    markup = kb.pick_queue_for_post(42, channel_id=1, queues=queues)
-    buttons = [b.text for row in markup.inline_keyboard for b in row]
-    assert any("AnimeQ" in t for t in buttons)
-    assert any("MemeQ" in t for t in buttons)
-    # Должна быть кнопка создания очереди и возврата к каналам
-    assert any("Создать очередь" in t for t in buttons)
-    assert any("К каналам" in t for t in buttons)
-    # callback_data для toq (перемещение поста)
-    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert any("menu:post:42:toq:1" == c for c in callbacks), f"Нет callback toq: {callbacks}"
-    # callback для создания очереди с возвратом к посту
-    assert any("menu:addq_forch:1:42" == c for c in callbacks), f"Нет callback addq_forch: {callbacks}"
-
-
-def test_routing_source_types_no_direct_user():
-    """Из UI создания правил убраны telegram_direct и telegram_user (блок A)."""
-    from app.bot.keyboards import builder as kb
-
-    source_types = [v for v, _ in kb.ROUTING_SOURCE_TYPES]
-    assert "telegram_channel" in source_types
-    assert "telegram_direct" not in source_types, "telegram_direct должен быть убран из правил"
-    assert "telegram_user" not in source_types, "telegram_user должен быть убран из правил"
-    assert "any" in source_types
-
-
-def test_is_in_time_window_no_restrictions():
-    """Очередь без ограничений — всегда в окне."""
-    from app.services.queue_time import is_in_time_window
-
-    queue = {"id": 1, "start_at": None, "end_at": None, "daily_window_start": None, "daily_window_end": None}
-    assert is_in_time_window(queue) is True
-
-
-def test_is_in_time_window_start_in_future():
-    """start_at в будущем — не в окне."""
-    from datetime import datetime, timedelta
-
-    from app.services.queue_time import is_in_time_window
-
-    future = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-    queue = {"id": 1, "start_at": future, "end_at": None, "daily_window_start": None, "daily_window_end": None}
-    assert is_in_time_window(queue) is False
-
-
-def test_is_in_time_window_start_in_past():
-    """start_at в прошлом — в окне (нет других ограничений)."""
-    from datetime import datetime, timedelta
-
-    from app.services.queue_time import is_in_time_window
-
-    past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-    queue = {"id": 1, "start_at": past, "end_at": None, "daily_window_start": None, "daily_window_end": None}
-    assert is_in_time_window(queue) is True
-
-
-def test_is_in_time_window_end_passed_continue_after_end():
-    """end_at прошёл, strategy=continue_after_end — в окне (продолжаем)."""
-    from datetime import datetime, timedelta
-
-    from app.services.queue_time import is_in_time_window
-
-    past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-    queue = {
-        "id": 1, "start_at": None, "end_at": past,
-        "daily_window_start": None, "daily_window_end": None,
-        "end_strategy": "continue_after_end",
-    }
-    assert is_in_time_window(queue) is True
-
-
-def test_is_in_time_window_end_passed_continue_next_day():
-    """end_at прошёл, strategy=continue_next_day — не в окне (ждём)."""
-    from datetime import datetime, timedelta
-
-    from app.services.queue_time import is_in_time_window
-
-    past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-    queue = {
-        "id": 1, "start_at": None, "end_at": past,
-        "daily_window_start": None, "daily_window_end": None,
-        "end_strategy": "continue_next_day",
-    }
-    assert is_in_time_window(queue) is False
-
-
-def test_handle_end_strategy_move_to_inbox(tmp_path):
-    """end_strategy=move_to_inbox — все pending посты → Входящие."""
-    from conftest import run_with_db
-
-    async def body():
-        from datetime import datetime, timedelta
-
-        from app.repositories import channels as channels_repo
-        from app.repositories import posts as posts_repo
-        from app.repositories import queues as queues_repo
-        from app.services.queue_time import handle_end_strategy
-
-        ch_id = await channels_repo.create_channel(-1000000000088, "EndCh")
-        qid = await queues_repo.create_queue(ch_id, "EndQ")
-        # 3 pending поста
-        for i in range(3):
-            await posts_repo.create_post(
-                source_type="telegram_direct", file_type="photo", queue_id=qid,
-                tg_file_id=f"f{i}", file_unique_id=f"u{i}",
-            )
-        past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        queue = await queues_repo.get_queue(qid)
-        queue["end_at"] = past
-        queue["end_strategy"] = "move_to_inbox"
-
-        result = await handle_end_strategy(queue)
-        assert result is True
-        # Все посты должны быть во Входящих (queue_id=None)
-        inbox = await posts_repo.list_inbox(limit=100)
-        assert len(inbox) == 3, f"Ожидали 3 поста во Входящих, получили {len(inbox)}"
-
-    run_with_db(tmp_path, body)
-
-
-def test_handle_end_strategy_delete(tmp_path):
-    """end_strategy=delete — все pending посты удалены."""
-    from conftest import run_with_db
-
-    async def body():
-        from datetime import datetime, timedelta
-
-        from app.repositories import channels as channels_repo
-        from app.repositories import posts as posts_repo
-        from app.repositories import queues as queues_repo
-        from app.services.queue_time import handle_end_strategy
-
-        ch_id = await channels_repo.create_channel(-1000000000099, "DelCh")
-        qid = await queues_repo.create_queue(ch_id, "DelQ")
-        for i in range(3):
-            await posts_repo.create_post(
-                source_type="telegram_direct", file_type="photo", queue_id=qid,
-                tg_file_id=f"df{i}", file_unique_id=f"du{i}",
-            )
-        past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        queue = await queues_repo.get_queue(qid)
-        queue["end_at"] = past
-        queue["end_strategy"] = "delete"
-
-        result = await handle_end_strategy(queue)
-        assert result is True
-        # Все посты удалены
-        total = await posts_repo.total_count()
-        assert total == 0, f"Ожидали 0 постов, получили {total}"
-
-    run_with_db(tmp_path, body)
-
-
-def test_parse_dates_dash():
-    """Парсинг '-' → (None, None) — без ограничений."""
-    from app.bot.handlers.menu import _parse_dates
-
-    result = _parse_dates("-")
-    assert result == (None, None)
-
-
-def test_parse_dates_valid():
-    """Парсинг '14.10.26 06:00 - 16.10.26 22:00' → (start_utc, end_utc)."""
-    from app.bot.handlers.menu import _parse_dates
-
-    result = _parse_dates("14.10.26 - 16.10.26")
-    assert result is not None
-    assert result[0] is not None
-    assert result[1] is not None
-    # Проверяем, что это ISO-строки
-    assert "2026-10-13" in result[0]
-    assert "2026-10-16" in result[1]
-
-
-def test_parse_dates_invalid():
-    """Парсинг невалидной строки → None."""
-    from app.bot.handlers.menu import _parse_dates
-
-    assert _parse_dates("неправильный формат") is None
-
-
-def test_format_queue_time_info():
-    """Человекочитаемое описание временных настроек очереди."""
-    from app.services.queue_time import format_queue_time_info
-
-    queue = {
-        "start_at": "2026-10-13 06:00:00",
-        "end_at": "2026-10-15 22:00:00",
-        "daily_window_start": "06:00",
-        "daily_window_end": "22:00",
-        "end_strategy": "continue_next_day",
-    }
-    info = format_queue_time_info(queue)
-    assert "старт" in info
-    assert "конец" in info
-    assert "окно" in info
-    assert "продолжить на следующий день" in info
-
-
 def test_db_migration_adds_time_columns(tmp_path):
     """Миграция добавляет start_at, end_at, daily_window, end_strategy в существующую БД."""
     from conftest import run_with_db
@@ -888,45 +686,4 @@ def test_db_migration_adds_time_columns(tmp_path):
     run_with_db(tmp_path, body)
 
 
-def test_archive_tags_sanitize_minus():
-    """Теги архива: минус убирается из chat_id (#from_100..., не #from_-100...)."""
-    from app.services.archive import _build_tags, _sanitize_tag_id
 
-    # chat_id с минусом
-    assert _sanitize_tag_id(-1002435408188) == "1002435408188"
-    assert _sanitize_tag_id("-1002435408188") == "1002435408188"
-    assert _sanitize_tag_id(None) == ""
-
-    # Полные теги
-    post = {
-        "source_type": "telegram_channel",
-        "source_id": "-1002435408188",
-    }
-    tags = _build_tags(post, target_channel_id=-1001258194124, all_types=["photo"])
-    assert "#from_1002435408188" in tags, f"Тег from сломан: {tags}"
-    assert "#to_1001258194124" in tags, f"Тег to сломан: {tags}"
-    assert "#pic" in tags, f"Тег pic без #: {tags}"
-    assert "#from_-" not in tags, f"Минус не убран: {tags}"
-
-
-def test_archive_tags_dm_source():
-    """Теги архива: источник ЛС → #from_dm."""
-    from app.services.archive import _build_tags
-
-    post = {"source_type": "telegram_direct", "source_id": "479924833"}
-    tags = _build_tags(post, target_channel_id=-1002257882757, all_types=["photo", "video"])
-    assert "#from_dm" in tags
-    assert "#to_1002257882757" in tags
-    assert "#pic" in tags
-    assert "#vid" in tags
-
-
-def test_archive_tags_no_minus_in_hashtags():
-    """Все хэштеги не содержат минус (Telegram ломает #-...)."""
-    from app.services.archive import _build_tags
-
-    post = {"source_type": "telegram_channel", "source_id": "-1001686639428"}
-    tags = _build_tags(post, target_channel_id=-1002257882757, all_types=["photo"])
-    for tag in tags.split():
-        assert not tag.startswith("#-"), f"Хэштег с минусом: {tag}"
-        assert tag.startswith("#"), f"Тег без #: {tag}"
