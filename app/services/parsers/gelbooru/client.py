@@ -240,9 +240,6 @@ class GelbooruClient:
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
-        # PR-40 LOW-фикс: обязательно обнуляем ссылку — иначе ClientSession
-        # останется в памяти до GC, а close() могут вызывать повторно (idempotent).
-        self._session = None
 
 
 # Глобальный singleton-клиент (как в gbooru_tg)

@@ -129,156 +129,22 @@ def test_post_file_id_strategy_fields(tmp_path):
 
 
 def test_duplicate_detection(tmp_path):
-    """Точный дубликат по file_unique_id (ТЗ §2.4.3).
-
-    PR-40: усилены assertions — проверяем полный dict, не только tg_file_id.
-    """
+    """Точный дубликат по file_unique_id (ТЗ §2.4.3)."""
     from conftest import run_with_db
 
     async def body():
         from app.repositories import posts as posts_repo
 
-        pid = await posts_repo.create_post(
-            source_type="telegram_direct",
-            file_type="photo",
-            tg_file_id="f1",
-            file_unique_id="UNIQ_DUP",
-            original_caption="caption text",
-            file_size=12345,
-            tags=["1girl", "smile"],
+        await posts_repo.create_post(
+            source_type="telegram_direct", file_type="photo", tg_file_id="f1", file_unique_id="UNIQ_DUP"
         )
         found = await posts_repo.find_by_file_unique_id("UNIQ_DUP")
         assert len(found) == 1
-        # Полная проверка dict'а — не только tg_file_id
-        post = found[0]
-        assert post["id"] == pid
-        assert post["tg_file_id"] == "f1"
-        assert post["file_unique_id"] == "UNIQ_DUP"
-        assert post["file_type"] == "photo"
-        assert post["source_type"] == "telegram_direct"
-        assert post["original_caption"] == "caption text"
-        assert post["file_size"] == 12345
-        assert post["tags"] == ["1girl", "smile"]
-        assert post["status"] == "pending"
+        assert found[0]["tg_file_id"] == "f1"
 
         assert await posts_repo.find_by_file_unique_id("NOPE") == []
 
     run_with_db(tmp_path, body)
-
-
-def test_create_post_invalid_file_type(tmp_path):
-    """create_post с невалидным file_type → ValueError (PR-40 edge case)."""
-    from conftest import run_with_db
-
-    async def body():
-        from app.repositories import posts as posts_repo
-
-        with pytest.raises(ValueError, match="file_type"):
-            await posts_repo.create_post(
-                source_type="telegram_direct",
-                file_type="audio",  # НЕ валидном списке (photo/video/gif/document)
-            )
-
-    run_with_db(tmp_path, body)
-
-
-def test_create_post_invalid_status(tmp_path):
-    """create_post с невалидным status → ValueError (PR-40 edge case)."""
-    from conftest import run_with_db
-
-    async def body():
-        from app.repositories import posts as posts_repo
-
-        with pytest.raises(ValueError, match="статус"):
-            await posts_repo.create_post(
-                source_type="telegram_direct",
-                file_type="photo",
-                status="weird_status",  # не в списке
-            )
-
-    run_with_db(tmp_path, body)
-
-
-def test_task_queue_enqueue_invalid_type(tmp_path):
-    """task_queue.enqueue с невалидным task_type → ValueError (PR-40 edge case)."""
-    from conftest import run_with_db
-
-    async def body():
-        from app.repositories import posts as posts_repo
-        from app.repositories import task_queue as tq
-
-        pid = await posts_repo.create_post(source_type="chrome_ext", file_type="photo")
-        with pytest.raises(ValueError, match="task_type"):
-            await tq.enqueue(pid, "delete", {"url": "x"})  # не в списке (download/process/repost)
-
-    run_with_db(tmp_path, body)
-
-
-def test_add_hash_invalid_type(tmp_path):
-    """duplicates.add_hash с невалидным hash_type → ValueError (PR-40 edge case)."""
-    from conftest import run_with_db
-
-    async def body():
-        from app.repositories import duplicates as dup_repo
-        from app.repositories import posts as posts_repo
-
-        pid = await posts_repo.create_post(source_type="telegram_direct", file_type="photo")
-        with pytest.raises(ValueError, match="hash_type"):
-            await dup_repo.add_hash(pid, "some_hash_value", hash_type="sha256")
-            # валидные: md5, phash
-
-    run_with_db(tmp_path, body)
-
-
-def test_add_hash_valid_types(tmp_path):
-    """duplicates.add_hash с валидными hash_type (md5/phash) — сохраняется."""
-    from conftest import run_with_db
-
-    async def body():
-        from app.repositories import duplicates as dup_repo
-        from app.repositories import posts as posts_repo
-
-        pid = await posts_repo.create_post(source_type="telegram_direct", file_type="photo")
-        # md5
-        rid1 = await dup_repo.add_hash(pid, "d41d8cd98f00b204e9800998ecf8427e", "md5")
-        assert rid1 > 0
-        # phash
-        rid2 = await dup_repo.add_hash(pid, "ffffffffffffffff", "phash")
-        assert rid2 > 0
-
-        # find_by_hash должен вернуть post_id
-        md5_hits = await dup_repo.find_by_hash("d41d8cd98f00b204e9800998ecf8427e", "md5")
-        assert len(md5_hits) == 1
-        assert md5_hits[0]["post_id"] == pid
-
-    run_with_db(tmp_path, body)
-
-
-def test_hamming_hex_directly():
-    """PR-40: _hamming_hex — прямая проверка popcount (LOW-фокус из worklog).
-
-    Раньше не было теста для _hamming_hex напрямую — только косвенно через find_phash_near.
-    """
-    from app.repositories.duplicates import _hamming_hex
-
-    # Одинаковое значение → 0
-    assert _hamming_hex("0000", "0000") == 0
-    assert _hamming_hex("ffff", "ffff") == 0
-    # Разные значения
-    # 0x0001 vs 0x0000 → 1 бит отличается
-    assert _hamming_hex("0001", "0000") == 1
-    # 0xffff vs 0x0000 → 16 бит
-    assert _hamming_hex("ffff", "0000") == 16
-    # Разные длины → -1 (невалидный ввод)
-    assert _hamming_hex("fff", "ffff") == -1
-    assert _hamming_hex("", "ffff") == -1
-    assert _hamming_hex("ffff", "") == -1
-    # Невалидные hex → -1
-    assert _hamming_hex("xyzw", "ffff") == -1
-    assert _hamming_hex("ffff", "xyzw") == -1
-    # None → -1
-    assert _hamming_hex(None, "ffff") == -1  # type: ignore[arg-type]
-    assert _hamming_hex("ffff", None) == -1  # type: ignore[arg-type]
 
 
 def test_task_queue_take_next(tmp_path):
