@@ -10,11 +10,14 @@ venv/
 .env
 
 # Data (runtime)
-data/db/*.db
 data/downloads/*
 !data/downloads/.gitkeep
 data/media/*
 !data/media/.gitkeep
+# БД и WAL-файлы — bot.db в data/ (не в data/db/)
+*.db
+*.db-shm
+*.db-wal
 
 # IDE
 .idea/

@@ -61,7 +61,7 @@ async def check_db() -> int:
     if missing:
         log.error("[FAIL] Нет таблиц: %s", missing)
         return 1
-    log.info("[OK] Все 9 таблиц из ТЗ §5 присутствуют: %s", ", ".join(sorted(expected)))
+    log.info("[OK] Все 10 таблиц из ТЗ §5 присутствуют: %s", ", ".join(sorted(expected)))
 
     # RBAC (ТЗ §2.6)
     mod = {"tg_id": 999999, "username": "test_mod", "role": "moderator", "is_active": 1}

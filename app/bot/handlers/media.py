@@ -20,7 +20,6 @@ from aiogram import F, Router
 from aiogram.types import (
     Animation,
     Audio,
-    BufferedInputFile,  # noqa: F401 — оставлено для будущих фаз
     Document,
     Message,
     PhotoSize,

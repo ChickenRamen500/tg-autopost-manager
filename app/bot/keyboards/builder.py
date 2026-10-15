@@ -37,7 +37,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         kb.button(text="🔀 Маршрутизация", callback_data="menu:rules")
         kb.button(text="➕ Добавить", callback_data="menu:add")
         kb.button(text="⚙️ Настройки", callback_data="menu:settings")
-    kb.adjust(2, 1, 2, 2)
+    kb.adjust(2, 1, 2, 2, 1)
     return kb.as_markup()
 
 
