@@ -67,7 +67,8 @@ class AccessMiddleware(BaseMiddleware):
             logger.info("RBAC: tg_id=%s — ДОСТУП ЗАКРЫТ (guest/inactive)", tg_id)
             if isinstance(event, Message):
                 text = event.text or ""
-                if text and text.split()[0] in ("/start", "/help"):
+                parts = text.split()
+                if parts and parts[0] in ("/start", "/help"):
                     data["user"] = None
                     data["user_role"] = None
                     return await handler(event, data)

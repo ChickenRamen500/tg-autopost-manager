@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import html
 import logging
 from datetime import UTC
 
@@ -178,7 +179,7 @@ async def cb_queue(call: CallbackQuery) -> None:
 
     time_info = format_queue_time_info(queue)
     text = (
-        f"📋 <b>Очередь #{qid} «{queue['name']}»</b>\n"
+        f"📋 <b>Очередь #{qid} «{html.escape(queue['name'])}»</b>\n"
         f"Канал: #{queue['channel_id']}\n"
         f"Интервал: каждые {queue['interval_minutes']} мин\n"
         f"Альбомы группой: {group_label}\n"
@@ -336,7 +337,7 @@ async def cb_post(call: CallbackQuery) -> None:
                 await _render_post_card(call, post, queues)
                 await call.message.answer(
                     f"💡 Создать правило маршрутизации?\n"
-                    f"Источник: канал {post.get('source_id', '?')}\n"
+                    f"Источник: канал {html.escape(post.get('source_id', '?'))}\n"
                     f"→ Очередь: «{qname}» (#{queue_id})\n\n"
                     f"Будущие посты из этого канала будут автоматически идти в эту очередь.",
                     reply_markup=kb.create_rule_prompt(post_id, queue_id, post["source_id"] or ""),
@@ -416,7 +417,7 @@ async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict])
         f"Очередь: {post.get('queue_id') or '— (Входящие)'}\n"
     )
     if post.get("original_caption"):
-        text += f"Подпись: {post['original_caption'][:97]}...\n" if len(post['original_caption']) > 100 else f"Подпись: {post['original_caption']}\n"
+        text += f"Подпись: {html.escape(post['original_caption'][:97])}...\n" if len(post['original_caption']) > 100 else f"Подпись: {html.escape(post['original_caption'])}\n"
     if post.get("tg_file_id"):
         text += f"file_id: {post['tg_file_id'][:20]}...\n"
     if post.get("media_group_id"):
@@ -475,7 +476,7 @@ async def cb_channel_info(call: CallbackQuery, state: FSMContext) -> None:
     all_queues = await queues_repo.list_queues(active_only=False)
     channel_queues = [q for q in all_queues if q["channel_id"] == ch_id]
     text = (
-        f"📢 <b>Канал #{ch_id} «{channel['name']}»</b>\n"
+        f"📢 <b>Канал #{ch_id} «{html.escape(channel['name'])}»</b>\n"
         f"Chat ID: {channel['tg_chat_id']}\n"
         f"Username: @{channel.get('username') or '—'}\n"
         f"Активен: {'да' if channel['is_active'] else 'нет'}\n"
@@ -610,7 +611,7 @@ async def cb_add_queue_for_channel(call: CallbackQuery, state: FSMContext, user_
     await state.update_data(channel_id=channel_id, return_to_post=post_id)
     await state.set_state(AddStates.add_queue_name)
     await call.message.edit_text(
-        f"📋 <b>Добавление очереди</b> для канала «{channel['name']}»\n"
+        f"📋 <b>Добавление очереди</b> для канала «{html.escape(channel['name'])}»\n"
         f"Шаг 2/6: Пришли название очереди (например: Утренние посты)",
         reply_markup=kb.confirm_cancel(),
     )
@@ -1078,7 +1079,7 @@ async def cb_rule_actions(call: CallbackQuery, user_role: str | None = None) -> 
     text = (
         f"🔀 <b>Правило #{rule['id']}</b>\n"
         f"Тип источника: {rule['source_type']}\n"
-        f"Паттерн: `{rule['source_pattern']}`\n"
+        f"Паттерн: `{html.escape(rule['source_pattern'])}`\n"
         f"Очередь: «{qname}» (#{rule['target_queue_id']})\n"
         f"Приоритет: {rule['priority']}\n"
         f"Активно: {'да' if rule['is_active'] else 'нет'}"

@@ -49,7 +49,9 @@ import time
 
 # Throttle: не отправлять уведомление чаще чем раз в N минут для одной очереди
 _NOTIFY_THROTTLE_SEC = 300  # 5 минут
-_last_notify: dict[int, float] = {}  # queue_id → monotonic timestamp
+# Раздельные dict для almost_empty и finished (code review Regression #5)
+_last_almost_empty: dict[int, float] = {}  # queue_id → monotonic timestamp
+_last_finished: set[int] = set()  # queue_id → one-shot (пока очередь не пополнится)
 
 
 async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name: str, remaining: int) -> None:
@@ -60,12 +62,12 @@ async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name
     threshold = await app_settings_repo.get_notify_threshold()
     if remaining > threshold:
         return
-    # Throttle
+    # Throttle — отдельный dict для almost_empty
     now = time.monotonic()
-    last = _last_notify.get(queue_id, 0.0)
+    last = _last_almost_empty.get(queue_id, 0.0)
     if now - last < _NOTIFY_THROTTLE_SEC:
         return  # уже отправляли недавно
-    _last_notify[queue_id] = now
+    _last_almost_empty[queue_id] = now
 
     text = (
         f"⏰ <b>Очередь скоро закончится</b>\n"
@@ -78,19 +80,24 @@ async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name
 async def notify_queue_finished(queue_id: int, queue_name: str, channel_name: str) -> None:
     """«Очередь закончилась» — последний пост отправлен.
 
-    Throttle: отправляем только ОДИН раз (флаг в _last_notify).
+    One-shot: отправляем ТОЛЬКО ОДИН раз. При добавлении новых постов в очередь —
+    сбрасываем флаг (нужно вызвать reset_finished).
     """
-    now = time.monotonic()
-    # Если уже отправляли «finished» — не повторяем
-    if _last_notify.get(queue_id, 0.0) > 0 and now - _last_notify.get(queue_id, 0.0) < _NOTIFY_THROTTLE_SEC:
+    # Если уже отправляли «finished» для этой очереди — не повторяем
+    if queue_id in _last_finished:
         return
-    _last_notify[queue_id] = now
+    _last_finished.add(queue_id)
 
     text = (
         f"✅ <b>Очередь закончилась</b>\n"
         f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}» — все посты отправлены."
     )
     await notify_admin(text)
+
+
+def reset_finished(queue_id: int) -> None:
+    """Сбрасывает one-shot флаг «finished» — вызывается когда в очередь добавлены новые посты."""
+    _last_finished.discard(queue_id)
 
 
 async def notify_send_error(queue_id: int, queue_name: str, post_id: int, error: str) -> None:

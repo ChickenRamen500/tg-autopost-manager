@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 
@@ -44,7 +45,7 @@ async def cmd_list_queues(message: Message, user: dict | None = None, user_role:
     for q in queues:
         active = "✅" if q["is_active"] else "⏸"
         lines.append(
-            f"{active} #{q['id']} «{q['name']}» → @{q.get('channel_username') or q['channel_name']} "
+            f"{active} #{q['id']} «{html.escape(q['name'])}» → @{html.escape(q.get('channel_username') or q['channel_name'])} "
             f"(каждые {q['interval_minutes']} мин)"
         )
     await message.answer("\n".join(lines))
@@ -280,7 +281,7 @@ async def cmd_add_channel(message: Message, command: CommandObject, user_role: s
         await message.answer(
             f"⚠️ Канал с tg_chat_id={tg_chat_id} уже существует: "
             f"#{existing['id']} «{existing['name']}»"
-            + (f" @{existing['username']}" if existing.get("username") else "")
+            + (f" @{html.escape(existing['username'])}" if existing.get("username") else "")
             + ".\nУдалите его (/remove_channel) или используйте другой chat_id."
         )
         return
@@ -303,7 +304,7 @@ async def cmd_list_channels(message: Message) -> None:
     lines = ["📢 <b>Каналы</b>:"]
     for c in channels:
         active = "✅" if c["is_active"] else "⏸"
-        lines.append(f"{active} #{c['id']} «{c['name']}» @{c.get('username') or '—'} ({c['tg_chat_id']})")
+        lines.append(f"{active} #{c['id']} «{html.escape(c['name'])}» @{html.escape(c.get('username') or '—')} ({c['tg_chat_id']})")
     await message.answer("\n".join(lines))
 
 
@@ -401,6 +402,9 @@ async def cmd_add_to_queue(message: Message, command: CommandObject, user_role: 
 
     /add_to_queue <post_id> <queue_id>  — поставить пост в очередь
     """
+    if user_role not in ("admin", "moderator"):
+        await message.answer("🔒 Доступ: admin/moderator.")
+        return
     args = (command.args or "").split()
     if len(args) < 2:
         await message.answer("Использование: /add_to_queue <post_id> <queue_id>")
@@ -422,7 +426,7 @@ async def cmd_add_to_queue(message: Message, command: CommandObject, user_role: 
         if post and post["status"] in ("failed", "possible_duplicate", "duplicate"):
             await posts_repo.update_status(post_id, "pending")
         await message.answer(
-            f"✓ Пост #{post_id} добавлен в очередь «{queue['name']}» "
+            f"✓ Пост #{post_id} добавлен в очередь «{html.escape(queue['name'])}» "
             f"(каждые {queue['interval_minutes']} мин)."
         )
     else:

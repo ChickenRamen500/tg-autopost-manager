@@ -129,6 +129,10 @@ async def lifespan(_app: FastAPI):
         # Отменяем cache cleanup task
         if _cache_cleanup_task and not _cache_cleanup_task.done():
             _cache_cleanup_task.cancel()
+            try:
+                await _cache_cleanup_task
+            except asyncio.CancelledError:
+                pass
         # Закрываем bot (AiohttpSession)
         try:
             from app.bot import close_bot

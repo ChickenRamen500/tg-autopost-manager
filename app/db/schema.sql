@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS posts (
     send_attempts      INTEGER NOT NULL DEFAULT 0,
     last_error         TEXT,
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (queue_id) REFERENCES queues(id) ON DELETE CASCADE
+    FOREIGN KEY (queue_id) REFERENCES queues(id) ON DELETE SET NULL
 );
 
 -- Правила маршрутизации
