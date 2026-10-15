@@ -33,7 +33,8 @@ services:
       dockerfile: docker/Dockerfile
     restart: always
     depends_on:
-      - local-bot-api
+      local-bot-api:
+        condition: service_healthy
     environment:
       - BOT_API_URL=http://local-bot-api:8081
       - BOT_TOKEN=${BOT_TOKEN}

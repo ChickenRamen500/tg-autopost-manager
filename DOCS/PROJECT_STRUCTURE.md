@@ -71,5 +71,5 @@ tg-media-queue-bot/
 | 5. Обработка + веб | ⬜ план | `app/services/caption/`, `app/services/media/` (кроп ffmpeg), `app/web/` (Jinja2+Bootstrap) |
 | 6. Полировка | ⬜ план | `scripts/` (автоочистка downloads), доп. `tests/`, retry/уведомления |
 
-> **Фаза 2 реализована** — см. `DOCS/PHASE2_GUIDE.md`. 22 юнит-теста проходят, ruff: 0 ошибок.
+> **Фаза 2 реализована** — см. `DOCS/PHASE2_GUIDE.md`. 61 юнит-тест проходят, ruff: 0 ошибок.
 > Готовая инфраструктура для Фазы 3: персистентная `task_queue` (`take_next` через UPDATE…RETURNING), репозиторий дубликатов с расстоянием Хэмминга для pHash, `subscriptions.list_due_subscriptions()` для автопарсинга.

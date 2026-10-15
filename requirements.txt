@@ -1,17 +1,13 @@
-fastapi
-uvicorn[standard]
-aiogram>=3.4
-aiosqlite
-apscheduler
-aiohttp
-yt-dlp
-Pillow
-imagehash
-jinja2
-python-dotenv
-# Dev/test deps (не в Docker-образ, только для локальной разработки)
-# pytest
-# pytest-asyncio
-# ruff
+fastapi>=0.100,<1.0
+uvicorn[standard]>=0.29,<1.0
+aiogram>=3.4,<4.0
+aiosqlite>=0.20,<1.0
+apscheduler>=3.10,<4.0
+aiohttp>=3.9,<4.0
+yt-dlp>=2024.0
+Pillow>=10.0
+imagehash>=4.3
+jinja2>=3.1,<4.0
+python-dotenv>=1.0,<2.0
 # pixivy — опциональный парсер Pixiv (ТЗ §2.1, Фаза 5). Не ставим в базовый образ:
 # пакет нестабилен на PyPI и ломает docker-сборку. При необходимости: pip install pixivy
