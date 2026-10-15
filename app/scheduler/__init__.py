@@ -53,6 +53,34 @@ def get_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
+def reset_scheduler() -> None:
+    """Сбрасывает singleton scheduler (для тестов).
+
+    PR-40 (H-T6): без этого scheduler «течёт» между тестами — первый тест,
+    вызвавший sched.start(), оставляет scheduler в состоянии running, и следующий
+    тест, создающий новый scheduler через get_scheduler(), получает тот же
+    инстанс с запущенными job'ами предыдущего теста.
+
+    Использовать в начале теста, затрагивающего scheduler:
+        from app.scheduler import reset_scheduler
+        reset_scheduler()  # чистый singleton
+        sched = get_scheduler()
+        sched.start()
+        # ...
+        sched.shutdown(wait=False)
+    """
+    global _scheduler
+    if _scheduler is not None:
+        try:
+            if _scheduler.running:
+                _scheduler.shutdown(wait=False)
+        except Exception as e:  # noqa: BLE001 — тесты не должны падать на teardown
+            log.warning("reset_scheduler: shutdown error: %s", e)
+        _scheduler = None
+        # Также чистим троттлинг-словарь — иначе между тестами сохраняются last_send.
+        _last_send.clear()
+
+
 async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: dict | None = None) -> None:
     """Отправляет один пост в канал по стратегии file_id → файл (ТЗ §2.5.1).
 
