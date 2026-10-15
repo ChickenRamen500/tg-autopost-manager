@@ -40,7 +40,7 @@ async def cmd_list_queues(message: Message, user: dict | None = None, user_role:
     if not queues:
         await message.answer("Очередей пока нет.")
         return
-    lines = ["📋 **Очереди**:"]
+    lines = ["📋 <b>Очереди</b>:"]
     for q in queues:
         active = "✅" if q["is_active"] else "⏸"
         lines.append(
@@ -72,7 +72,10 @@ async def cmd_queue(message: Message, command: CommandObject, user: dict | None 
 
 
 @router.message(Command("remove_from_queue"))
-async def cmd_remove_from_queue(message: Message, command: CommandObject) -> None:
+async def cmd_remove_from_queue(message: Message, command: CommandObject, user_role: str | None = None) -> None:
+    if user_role not in ("admin", "moderator"):
+        await message.answer("🔒 Доступ: admin/moderator.")
+        return
     if not command.args:
         await message.answer("Использование: /remove_from_queue <post_id>")
         return
@@ -98,7 +101,7 @@ async def cmd_stats(message: Message) -> None:
     queues = await queues_repo.list_queues(active_only=True)
     users = await users_repo.list_users()
     await message.answer(
-        "📊 **Статистика**\n"
+        "📊 <b>Статистика</b>\n"
         f"Постов всего: {total}\n"
         f"  • pending: {pending}\n"
         f"  • sent: {sent}\n"
@@ -247,7 +250,7 @@ async def cmd_list_users(message: Message, user_role: str | None = None) -> None
     if not users:
         await message.answer("Пользователей нет.")
         return
-    lines = ["👥 **Пользователи**:"]
+    lines = ["👥 <b>Пользователи</b>:"]
     for u in users:
         active = "✅" if u["is_active"] else "⏸"
         lines.append(f"{active} @{u.get('username') or '—'} ({u['role']}, tg_id={u['tg_id']})")
@@ -297,7 +300,7 @@ async def cmd_list_channels(message: Message) -> None:
     if not channels:
         await message.answer("Каналов нет.")
         return
-    lines = ["📢 **Каналы**:"]
+    lines = ["📢 <b>Каналы</b>:"]
     for c in channels:
         active = "✅" if c["is_active"] else "⏸"
         lines.append(f"{active} #{c['id']} «{c['name']}» @{c.get('username') or '—'} ({c['tg_chat_id']})")
@@ -468,7 +471,7 @@ async def cmd_list_subscriptions(message: Message, user_role: str | None = None)
     if not subs:
         await message.answer("Подписок нет.")
         return
-    lines = ["🔔 **Подписки**:"]
+    lines = ["🔔 <b>Подписки</b>:"]
     for s in subs:
         tags = s.get("tags") if isinstance(s.get("tags"), list) else json.loads(s.get("tags") or "[]")
         lines.append(f"#{s['id']} {s['site']}: {', '.join(tags)}")

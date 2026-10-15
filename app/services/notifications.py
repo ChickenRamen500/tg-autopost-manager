@@ -68,7 +68,7 @@ async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name
     _last_notify[queue_id] = now
 
     text = (
-        f"⏰ **Очередь скоро закончится**\n"
+        f"⏰ <b>Очередь скоро закончится</b>\n"
         f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}»\n"
         f"Осталось постов: {remaining}"
     )
@@ -87,7 +87,7 @@ async def notify_queue_finished(queue_id: int, queue_name: str, channel_name: st
     _last_notify[queue_id] = now
 
     text = (
-        f"✅ **Очередь закончилась**\n"
+        f"✅ <b>Очередь закончилась</b>\n"
         f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}» — все посты отправлены."
     )
     await notify_admin(text)
@@ -96,7 +96,7 @@ async def notify_queue_finished(queue_id: int, queue_name: str, channel_name: st
 async def notify_send_error(queue_id: int, queue_name: str, post_id: int, error: str) -> None:
     """Ошибка отправки поста (failed после max_attempts)."""
     text = (
-        f"❌ **Ошибка отправки поста**\n"
+        f"❌ <b>Ошибка отправки поста</b>\n"
         f"Очередь #{queue_id} «{queue_name}», пост #{post_id}\n"
         f"Ошибка: {error[:200]}"
     )
