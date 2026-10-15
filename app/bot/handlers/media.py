@@ -34,6 +34,28 @@ logger = logging.getLogger("handlers.media")
 
 router = Router(name="media")
 
+
+async def _safe_answer(message: Message, text: str, **kwargs) -> None:
+    """Отправляет ответ, ловя TelegramRetryAfter (flood control).
+
+    При RetryAfter — ждём retry_after + 0.5 сек и повторяем один раз.
+    При других ошибках — логируем и пропускаем (не роняем хендлер).
+    """
+    from aiogram.exceptions import TelegramRetryAfter
+
+    try:
+        await message.answer(text, **kwargs)
+    except TelegramRetryAfter as e:
+        retry = float(e.retry_after) + 0.5
+        logger.warning("Flood control: ждём %.1f сек, retry", retry)
+        await asyncio.sleep(retry)
+        try:
+            await message.answer(text, **kwargs)
+        except Exception:  # noqa: BLE001
+            logger.warning("Retry ответа тоже упал — пропускаем")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Не удалось отправить ответ: %s", e)
+
 # Debounce для групповой архивации альбомов в служебный канал.
 _album_archive_tasks: dict[str, asyncio.Task] = {}
 ALBUM_DEBOUNCE_SEC = 1.5
@@ -193,7 +215,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     if media.get("file_unique_id"):
         existing = await posts_repo.find_by_file_unique_id(media["file_unique_id"])
         if existing:
-            await message.answer(
+            await _safe_answer(message, 
                 f"⚠️ Похоже на дубликат: file_unique_id уже есть в системе "
                 f"(пост #{existing[0]['id']}, статус: {existing[0]['status']}).\n"
                 "Пост всё равно добавлен во «Входящие» как possible_duplicate для ручной проверки."
@@ -279,7 +301,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
             msg = f"📥 Пост #{post_id} → Входящие. Куда отправить?"
             if is_album:
                 msg += " (альбом — каждый файл отдельным постом)"
-            await message.answer(msg, reply_markup=pick_kb, reply_to_message_id=message.message_id)
+            await _safe_answer(message, msg, reply_markup=pick_kb, reply_to_message_id=message.message_id)
         else:
             # Для пересылок из каналов (telegram_channel) — правило не найдено,
             # просто информируем (правила создаются через UI маршрутизации)
@@ -288,14 +310,14 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
                 msg += " (альбом)"
             else:
                 msg += "\nПравило маршрутизации не найдено. /menu → 🔀 Маршрутизация"
-            await message.answer(msg, reply_to_message_id=message.message_id)
+            await _safe_answer(message, msg, reply_to_message_id=message.message_id)
     else:
         from app.repositories import queues as queues_repo
 
         queue = await queues_repo.get_queue(queue_id)
         qname = queue["name"] if queue else f"#{queue_id}"
         pending_count = await queues_repo.count_pending(queue_id)
-        await message.answer(
+        await _safe_answer(message, 
             f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
             reply_to_message_id=message.message_id,
         )
