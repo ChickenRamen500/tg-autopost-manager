@@ -1,0 +1,507 @@
+# Полный отчёт по репозиторию `tg-autopost-manager` (после PR #31, #32, #33)
+
+## Часть 1 — Что сделали 3 fix-PR
+
+### PR #31 — `fix/code-review-high-severity` (commit `a8022f2`, 13 исправлений)
+
+| # | Баг | Что сделано |
+|---|---|---|
+| 1 | Порядок роутеров (CRITICAL) | `app/bot/__init__.py:45-48` — `admin` подключается ПЕРЕД `media`. Дополнительно `media.py:305` фильтр `receive_text` изменён на `F.text & ~F.text.startswith("/")` (двойной фикс) |
+| 2 | `cb_post` без `call.answer()` | Все 7 action-веток + default fall-through в `menu.py` теперь вызывают `call.answer()` |
+| 3 | `scheduler:276` `posts_repo.count_pending` | → `queues_repo.count_pending`. `queues_repo` импортирован вверху `scheduler/__init__.py:30-32` |
+| 4 | `main.py` lifespan не закрывал ресурсы | В `finally`-блок добавлены `gelbooru_client.close()` (с try/except), `close_bot()` (с try/except), `_cache_cleanup_task.cancel()` |
+| 5 | `cmd_cancel` через `F.text == "/cancel"` | → `Command("cancel")` в `menu.py:92` |
+| 6 | FK без `ON DELETE CASCADE` | Добавлен CASCADE в `schema.sql` для всех 6 FK. **⚠️ НО**: для `posts.queue_id` сделан CASCADE вместо требуемого SET NULL — см. Regression #2 |
+| 7 | `_send_album_group` для 1-item не передавал `queue` | `_send_one_post(posts[0], channel, queue)` теперь передаёт `queue` |
+| 8 | Album failure path без `notify_send_error` | Добавлен `await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error)` |
+| 9 | + try/except `IntegrityError` в админ-хендлерах `remove_*` | Обёрнуты `cmd_remove_channel`, `cmd_remove_queue`, `cmd_remove_user` — теперь отвечают админу «Сначала удалите связанные сущности» вместо краша |
+| — | `cmd_remove_from_queue` RBAC | Добавлена проверка `user_role in ("admin", "moderator")` (admin.py:76-78) |
+
+### PR #32 — `fix/code-review-medium-severity` (commit `24ece69`, 9 исправлений)
+
+| # | Баг | Что сделано |
+|---|---|---|
+| 1 | `int(parts[N])` без try/except | Добавлен хелпер `_safe_int()` в `menu.py:76-84`, обёрнуты все 11 callback-парсеров. **⚠️ НО**: sync-функция вызывает `asyncio.ensure_future` — см. ниже |
+| 2 | `cmd_remove_from_queue` RBAC | (см. выше) |
+| 3 | `parse_mode` (`**` как литералы) | `local_bot_api.py:55-59`: `Bot(..., default=DefaultBotProperties(parse_mode=ParseMode.HTML))`. Все `**text**` → `<b>text</b>`. **🔴 НО**: НИ ОДНОЙ `html.escape()` НЕ ДОБАВЛЕНО — см. Regression #1 |
+| 4 | `menu:channel:<id>` вне FSM → spinner | Добавлен `cb_channel_info` (menu.py:445) без StateFilter, бранчится по состоянию. Старый `add_queue_pick_channel` убран |
+| 5 | `_parse_dates` off by 59s | `replace(hour=23, minute=59, second=59)` (menu.py:678) |
+| 6 | `requirements.txt` dev deps | Добавлены **как комментарии** (`# pytest`, `# pytest-asyncio`, `# ruff`) — `pip install -r requirements.txt` их НЕ ставит |
+| 7 | `check_phase2.py` 9 таблиц | `app_settings` добавлен в expected set (L59) |
+| 8 | `Dockerfile TZ` | `TZ=Europe/Moscow` → `TZ=Asia/Yekaterinburg`. **🟡 НО**: `.env.example:17` осталось `TZ=Europe/Moscow` → загружается через `env_file` в compose и **переопределяет** ENV из Dockerfile — см. Regression #3 |
+| 9 | Устаревший комментарий "Появится на Фазе 2" | Убран, заменён на «Фаза 2 реализована» |
+
+### PR #33 — `fix/code-review-low-severity` (commit `1206579`, 8 исправлений)
+
+| # | Баг | Что сделано |
+|---|---|---|
+| 1 | `.gitignore` | Убран мёртвый `data/db/*.db`. Все `*.db`/`*.db-shm`/`*.db-wal` теперь в одном месте |
+| 2 | `media.py` dead import `BufferedInputFile` | Убран `# noqa: F401` |
+| 3 | `_render_post_card` truncate без ellipsis | Добавлено `[:97] + "..."` (menu.py) |
+| 4 | `kb.main_menu` adjust | `adjust(2,1,2,2)` → `adjust(2,1,2,2,1)` — 9-я кнопка больше не orphan |
+| 5 | `access.py` `text.split()[0]` IndexError | Изменено на `if text and text.split()[0] in (...)`. **⚠️ НО**: для whitespace-only `"   "` `bool` = True → split = `[]` → `[][0]` всё равно IndexError. Фикс косметический |
+| 6 | `PHASE2_GUIDE.md` 9→10 таблиц | В 4 местах обновлено. **⚠️ НО**: в L12 «10 таблиц» но перечислено 9 имён (`app_settings` не добавлен в список). L368 «22 теста» не тронут |
+| 7 | `check_phase2.py` "9 таблиц" в логе | → «10 таблиц» |
+| 8 | `fix_encoding.py` исключения | Добавлены `.venv`, `venv`, `__pycache__`, `data` в exclusion tuple |
+
+---
+
+## Часть 2 — Новый баг с твоего production: `TelegramRetryAfter` на `message.answer`
+
+### Твой лог
+```
+TelegramRetryAfter: Telegram server says - Flood control exceeded on method 'SendMessage' in chat 670635487. Retry in 5 seconds.
+File "/app/app/bot/handlers/media.py", line 298, in receive_media
+    await message.answer(
+```
+
+### Что происходит
+
+Когда ты пересылаешь боту много медиа за короткое время (или отправляешь серию альбомов), **каждый forwarded media триггерит `receive_media`**, который:
+
+1. `media.py:260-267` — `archive_post()` шлёт пост в служебный канал (`bot.send_photo`/`send_video`/`send_document`)
+2. `media.py:282` или `:291` или `:298` — `message.answer(...)` — ответ-подтверждение тебе в ЛС
+
+Дополнительно (после PR #31, в Фазе 2), если в момент пересылки срабатывает scheduler и отправляет пост → `notify_admin()` / `notify_queue_almost_empty` / `notify_queue_finished` / `notify_send_error` — все шлют в `settings.admin_tg_id` (твой ЛС, chat_id 670635487).
+
+**Все эти `SendMessage`-вызовы бьют в один chat (твой ЛС, `670635487` — положительное число, значит это user_id, а не -100 канал).** Лимиты Telegram: ~30 сообщений в секунду в один чат для ботов, но если ты шлёшь сериями по 5-7 в секунду — Telegram включает flood control с `retry_after=5`.
+
+### Где проблема в коде
+
+`app/bot/handlers/media.py:298`:
+```python
+await message.answer(
+    f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
+    reply_to_message_id=message.message_id,
+)
+```
+
+`message.answer` — это `bot.send_message(chat_id=message.chat.id, text=...)`. Если он бросает `TelegramRetryAfter`, **исключение не ловится** — оно поднимается до aiogram dispatcher, который логирует «Cause exception while process update» и помечает апдейт как «not handled».
+
+### Важные нюансы
+
+1. **Пост уже сохранён в БД** к моменту ошибки: `posts_repo.create_post()` (строка 296, до `message.answer` на строке 298) уже выполнен. То есть ты не теряешь посты — ты теряешь только подтверждение.
+
+2. **Архивация тоже может упасть** — `archive_post` (строка 265) обёрнут в `try/except Exception` (строки 260-267) — он молча логируется как warning. Но если `archive_post` слал в служебный канал и получил `RetryAfter`, пост уже не будет заархивирован (нет retry).
+
+3. **`notifications.py` тоже не retry'ит** — `notify_admin` (строка 32) оборачивает в `try/except Exception`, но НЕ ловит `TelegramRetryAfter` отдельно → нет `await asyncio.sleep(retry_after)` + retry. Просто «не удалось отправить» в лог.
+
+4. **Это та же корневая бага, что я флаговал в первоначальном ревью как #7** — там речь шла про scheduler's `send_photo`/`send_video`/`send_media_group`, тут — про handler's `message.answer`. **Разные кодовые пути, один корень: `TelegramRetryAfter` нигде не ловится отдельно.**
+
+### Что нужно сделать (минимум)
+
+```python
+# В media.py вокруг message.answer
+from aiogram.exceptions import TelegramRetryAfter
+
+async def _safe_answer(message, text, **kwargs):
+    try:
+        await message.answer(text, **kwargs)
+    except TelegramRetryAfter as e:
+        logger.warning("Flood control: ждём %s сек, retry", e.retry_after)
+        await asyncio.sleep(float(e.retry_after) + 0.5)
+        try:
+            await message.answer(text, **kwargs)
+        except Exception:
+            logger.warning("Retry ответа тоже упал — пропускаем")
+    except Exception as e:
+        logger.warning("Не удалось отправить ответ: %s", e)
+```
+
+И обернуть все ~5 вызовов `message.answer` в `receive_media`.
+
+### Что нужно сделать (правильно, для системы в целом)
+
+Ввести **per-chat rate limiter** для всех `bot.send_*`/`message.answer`/`call.answer`/`notify_*`:
+
+```python
+# app/services/rate_limiter.py (новый)
+import asyncio
+from collections import defaultdict
+
+class ChatRateLimiter:
+    """Лимит SendMessage на чат: не более N за T секунд, иначе ждём."""
+    def __init__(self, max_per_window: int = 25, window_sec: float = 1.0):
+        self._max = max_per_window
+        self._window = window_sec
+        self._timestamps: dict[int, list[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, chat_id: int) -> None:
+        async with self._lock:
+            now = asyncio.get_event_loop().time()
+            ts = self._timestamps[chat_id]
+            # Чистим старые
+            self._timestamps[chat_id] = [t for t in ts if now - t < self._window]
+            if len(self._timestamps[chat_id]) >= self._max:
+                wait = self._window - (now - self._timestamps[chat_id][0])
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            self._timestamps[chat_id].append(asyncio.get_event_loop().time())
+
+chat_limiter = ChatRateLimiter(max_per_window=25, window_sec=1.0)
+```
+
+Применять перед каждым `bot.send_*(chat_id=...)`, `message.answer()` (через промежуточный helper), `notify_admin`. Это убирает flood control целиком.
+
+**Альтернатива для `receive_media` (UX-friendly)**: при получении серии медиа за короткое окно — группировать подтверждения в одно сообщение «✓ Получено N постов: #1, #2, #3 → очередь «X»». Тот же debounce-паттерн, что для альбомной архивации в `media.py:_schedule_album_archive`.
+
+---
+
+## Часть 3 — Регрессии, введённые фиксами
+
+### 🔴 Regression #1 — HTML-инъекция (CRITICAL, из PR #32)
+
+PR #32 выставил `parse_mode=ParseMode.HTML` глобально (`local_bot_api.py:55-59`), но **ни одной `html.escape()` не добавлено**. Греп подтверждает: 0 совпадений `html.escape`, `import html`, `from html import` по всему репозиторию.
+
+**Это та самая регрессия, которую предыдущий ревьюер ЯВНО предупреждал** в worklog.md (кросс-каттинги #2 и #5):
+> "Adding parse_mode=\"HTML\" later WITHOUT escaping user-controlled text (captions, usernames, channel names) in f-string builders would create HTML injection — latent risk. When fixing parse_mode issue, ALSO add html.escape(...) calls or switch to MarkdownV2 with proper escaping."
+
+PR #32 это предупреждение проигнорировал.
+
+**28+ f-строк с пользовательским текстом** теперь интерполируются в HTML-parsed message bodies без эскейпинга. Самые опасные:
+
+| Что | Где | Источник |
+|---|---|---|
+| `post['original_caption']` | `menu.py:419` (`_render_post_card`) | Любой пересланный caption — полностью атакер-контролируемый |
+| `q['name']`, `c['name']` | `menu.py:181, 396, 478, 547, 558, 613, 757, 886, 894`; `admin.py:47, 282, 294, 306, 425` | Admin-supplied (через FSM или `/add_*`) |
+| `user['username']` | `menu.py:1204`; `admin.py:249` | Telegram-supplied, мутабельный |
+| `rule['source_pattern']` | `menu.py:1042, 1081` | Admin-supplied (regex) |
+| `q.get('channel_username')`, `existing['username']` | `admin.py:47, 282, 306` | Admin/Telegram-supplied |
+| `post.get('source_id', '?')` | `menu.py:339-340` | Callback data из пересланного поста |
+
+**Эксплойты**:
+1. **Любой юзер** пересылает боту фото с caption `<a href="t.me/evilbot">Join premium</a>` → пост сохраняется с этим `original_caption` → админ открывает пост в inbox → `_render_post_card` (`menu.py:419`) интерполирует caption напрямую в HTML → **админ видит кликабельную phishing-ссылку**.
+2. **Админ** называет канал `<a href="https://evil.tld/phish">Support</a>` → каждый channel-list rendering (`admin.py:306`, `menu.py:478`) показывает кликабельную «Support» ссылку → moderator кликает → фишинг.
+3. **Админ** называет очередь `<b>test</b>` → queue card рендерит «test» жирным везде.
+4. **Юзер с username** `<a href="evil">x</a>` → user-list rendering инъецирует ссылку.
+
+**Фикс**: добавить `import html` в начале каждого файла + обернуть каждую интерполяцию пользовательского текста в `html.escape(...)`. ~28 сайтов, по 1 строке на каждый.
+
+---
+
+### 🟠 Regression #2 — `posts.queue_id ON DELETE CASCADE` вместо SET NULL (HIGH, из PR #31)
+
+`app/db/schema.sql:89` теперь:
+```sql
+FOREIGN KEY (queue_id) REFERENCES queues(id) ON DELETE CASCADE
+```
+
+ТЗ §2.3.4 требовало `ON DELETE SET NULL` — посты должны **возвращаться в inbox** при удалении очереди (это прямо упоминалось в комментах schema.sql:63 `NULL = «Входящие» (inbox)`). PR #31 сделал CASCADE → **посты удаляются outrightly**. Админ, удаляющий очередь, **молча теряет посты**.
+
+Усугубляется отсутствием миграции: SQLite не может ALTER FK на существующих таблицах (`_run_migrations` в `database.py:86-126` делает только `ALTER TABLE ADD COLUMN`). Текущий эффект:
+- Существующие БД (созданные до PR #31): FK остаётся RESTRICT → `remove_queue` всё ещё бросает `IntegrityError` (теперь ловится `try/except`, но удалять всё равно нельзя).
+- Свежие БД (после PR #31): CASCADE → посты тихо удаляются.
+- **Три разных поведения в зависимости от возраста БД.**
+
+**Фикс**: поменять CASCADE → SET NULL в schema.sql + написать миграцию: `CREATE TABLE _posts_new ... INSERT SELECT ... DROP TABLE posts ... ALTER TABLE _posts_new RENAME TO posts ...` + recreate indexes.
+
+---
+
+### 🟡 Regression #3 — `.env.example` TZ отменяет фикс Dockerfile (MEDIUM, latent, из PR #32)
+
+PR #32 поменял `docker/Dockerfile:17 TZ=Asia/Yekaterinburg`. Но `.env.example:17` осталось `TZ=Europe/Moscow`. `docker-compose.yml:47-48` загружает `.env` через `env_file`, что **переопределяет** `ENV` из Dockerfile.
+
+Пользователь, следующий `DOCS/QUICKSTART_NEW_MACHINE.md:43 cp .env.example .env`, снова получает Moscow TZ → `daily_window` считается по Москве (UTC+3) вместо Екатеринбурга (UTC+5) → окно «с 9:00» сдвигается на 2 часа.
+
+**Фикс**: убрать `TZ=` из `.env.example` (TZ берётся из Dockerfile) ИЛИ поменять на `TZ=Asia/Yekaterinburg`.
+
+---
+
+### 🟠 Regression #4 — `TelegramRetryAfter` не ловится в хендлерах (HIGH, новый, не связан с PR #31-33)
+
+Это тот самый баг из Части 2. Он не введён конкретным PR, но стал заметнее после того, как:
+1. PR #31 пофиксил `count_pending` AttributeError → уведомления стали отправляться → выросло число `SendMessage` в admin DM.
+2. Архивация (блок D) добавлена в Фазе 2 (PR #27) → каждый forwarded media шлёт в archive_channel + reply в admin DM.
+
+Теперь бот бьёт в admin DM сериями `SendMessage` (post reply + archive confirm + notify_*), что триггерит `TelegramRetryAfter`.
+
+**Фикс**: см. Часть 2 — `_safe_answer` helper минимум, per-chat rate limiter — правильно.
+
+---
+
+### 🟡 Regression #5 — `notifications._last_notify` общий dict глушит «finished» (MEDIUM, из PR #33)
+
+`app/services/notifications.py:52` — `_last_notify: dict[int, float]` keyed только по `queue_id`. И `notify_queue_almost_empty` (L66-68), и `notify_queue_finished` (L85-87) используют **один и тот же dict**.
+
+Сценарий:
+1. Очередь падает до 3 постов → `notify_queue_almost_empty` fires, `_last_notify[qid] = t1`
+2. В течение 5 минут очередь доходит до 0 → `notify_queue_finished` проверяет `now2 - t1 < 300` → True → **return early** → админ **никогда не видит «очередь закончилась»**
+
+PR #33 пытался сделать `notify_queue_finished` one-shot через комментарий «отправляем только ОДИН раз», но реализация не одна-shot — через 5 минут оно может пере-fire'нуть.
+
+**Фикс**: разнести на `_last_almost_empty` и `_last_finished` (или композитные ключи `(queue_id, kind)`), + хранить «previous pending count» чтобы fire «finished» только на переходе non-zero → zero.
+
+---
+
+### 🟡 Regression #6 — cache cleanup task cancel не awaited (MEDIUM, из PR #31)
+
+`app/main.py:130-131`:
+```python
+if _cache_cleanup_task and not _cache_cleanup_task.done():
+    _cache_cleanup_task.cancel()
+```
+
+Сравни с `_bot_polling_task` который правильно awaited (`main.py:117-121`):
+```python
+_bot_polling_task.cancel()
+try:
+    await _bot_polling_task
+except asyncio.CancelledError:
+    pass
+```
+
+`cache._cleanup_task` только `.cancel()` без `await`. `cache.cleanup_loop` ловит `except Exception`, но `CancelledError` — `BaseException` в Py 3.8+ → не ловится → поднимается как task's exception → asyncio логирует «Task exception was never retrieved» при GC. Race: процесс может выйти до того, как задача увидит отмену.
+
+**Фикс**: добавить `try: await _cache_cleanup_task except asyncio.CancelledError: pass` после `.cancel()`.
+
+---
+
+## Часть 4 — Текущее состояние всех найденных багов
+
+### Сводная таблица по слоям
+
+| Слой | FIXED | PARTIAL | NOT FIXED | REGRESSION | NEW |
+|---|---|---|---|---|---|
+| Bot (R4) | 7 | 2 | 9 | 1 (HTML inj) | 3 minor |
+| Scheduler/Репы/Сервисы (R5) | 5 | 4 | 35 | 2 (CASCADE + cache) | 3 |
+| Tests/Scripts/Docker/Доки (R6) | 4 | 6 | 16 | 0 | 6 doc inconsistencies |
+| **Production regression** (твой лог) | — | — | — | 1 (RetryAfter) | — |
+| **Итого** | **16** | **12** | **60** | **4** | **12** |
+
+### 4.1. ✅ Полностью починено (16)
+
+**Бот-слой** (7):
+1. Router include order (`app/bot/__init__.py:45-48`)
+2. `cb_post` main flow `call.answer()`
+3. `cb_channel_info` general handler (заменил `add_queue_pick_channel`)
+4. `_safe_int` хелпер для всех 11 callback-парсеров
+6. `cmd_cancel` → `Command("cancel")`
+12. `_parse_dates` → `second=59`
++ `.env.example` документирует `ADMIN_TG_ID`
+
+**Scheduler/Репы/Сервисы** (5):
+1. `count_pending` → `queues_repo.count_pending` (**Баг A**)
+8. `_send_album_group` для 1-item передаёт `queue`
+11. Album failure path вызывает `notify_send_error`
+33. `cache.start_cleanup_task` return value сохраняется в `_cache_cleanup_task`
+42. `main.py` lifespan shutdown закрывает `close_bot()`, `gelbooru_client.close()`, отменяет `_cache_cleanup_task` (но см. Regression #6 — cancel без await)
+
+**Тесты/Скрипты/Docker/Доки** (4):
+7. `check_phase2.py` expected set включает `app_settings`
+11. `fix_encoding.py` исключает `.venv`/`venv`/`__pycache__`/`data`
+13a. `Dockerfile:17 TZ` → `Asia/Yekaterinburg`
+20a (частично). `PHASE2_GUIDE.md` 4 из 5 мест «9→10»
+
+### 4.2. ⚠️ Частично починено (12)
+
+**Бот**:
+- Bug 10 (RBAC): `cmd_remove_from_queue` теперь проверяет. Но **`cmd_add_to_queue` (`admin.py:398-429`) всё ещё без проверки** — любой зарегистрированный юзер может перекинуть пост в любую очередь.
+- Bug 17 (access.py): PR #33 только косметика — `text.split()[0]` **всё ещё бросает IndexError на whitespace-only `"   "`**. Реальный фикс: `parts = text.split(); if parts and parts[0] in (...)`.
+
+**Scheduler/Репы**:
+- Bug 15 (FK CASCADE): добавлен CASCADE, но **неправильный для `posts.queue_id`** (Regression #2) + нет миграции для существующих БД.
+- Bug 2 (APScheduler): `job_defaults={"misfire_grace_time": 300, ...}` **НЕ добавлен** в `_scheduler = AsyncIOScheduler(timezone="UTC")`. `add_job` тоже без `misfire_grace_time`. In-memory jobstore остался.
+- Bug 37 (daily_window partial): добавлен `log.warning`, но очередь всё равно работает 24/7.
+- Bug 40 (notifications dedup): throttle добавлен, но с багом (Regression #5).
+
+**Тесты/Скрипты/Docker/Доки**:
+- Bug 5 (tests): добавлены 3 теста для `archive.py` хелперов (в PR #29, не в #31-33). Но `gelbooru/{client,cache,tags_db}`, `notifications.py` send path, `/health*` — без тестов. `test_scheduler.py` всё ещё не вызывает код планировщика.
+- Bug 13 (Dockerfile): TZ починен, но `USER`, multi-stage, `HEALTHCHECK` — нет.
+- Bug 18 (requirements): dev deps добавлены **как комментарии** — `pip install -r requirements.txt` их не ставит.
+- Bug 20 (PHASE2_GUIDE): в 4 местах «9→10», но L12 перечисление содержит 9 имён, L368 «22 теста» не тронут, `1.md:152` expected-output противоречит реальному `check_phase2.py:64`.
+- Bug 22 (TZ): Dockerfile починен, но `.env.example` остался Moscow (Regression #3).
+- Bug 26 (.env.example): `ADMIN_TG_ID` и `SECRET_TOKEN` добавлены. `TZ` остался Moscow, `TIMEZONE` не задокументирован.
+
+### 4.3. ❌ Не починено (60) — топ самых критичных
+
+**Scheduler (`app/scheduler/__init__.py`)**:
+- 2. APScheduler in-memory jobstore (jobs теряются на рестарте) + нет `misfire_grace_time` (дефолт 1s слишком мало)
+- 3. **Нет классификации permanent-ошибок Telegram** (`TelegramForbiddenError`, `chat not found`, `entity_too_large`) → retry 3× потом failed. ТЗ §2.5.2 п.5 НЕ реализован.
+- 4. **Album `mark_sent` без транзакции** (каждый `mark_sent` отдельный commit) → partial-send дубликаты на крэше
+- 5. **Альбомы >10 элементов ломаются** (no chunking logic)
+- 6. **Strategy 2 OOM** — `BufferedInputFile(fh.read())` грузит весь файл в RAM. Нужно `FSInputFile(file_path)`.
+- 7. **429 `retry_after` фактически игнорируется** (`getattr(e, "retry_after", None)` fallback на `sleep(2.0)`) — **та же бага, что твой новый TelegramRetryAfter, но в scheduler**
+- 9. Album path НЕ применяет `strip_caption`/`signature_template` очереди
+- 10. `_send_one_post` не обрезает caption до 1024 → `BadRequest: caption is too long`
+- 12. `_last_send[queue_id]` не обновляется на failure-path (dead code)
+- 13. Throttle `await asyncio.sleep(wait)` блокирует scheduler tick
+- 14. `asyncio.get_event_loop().time()` deprecated (5 вызовов)
+
+**Репозитории**:
+- 16. `posts.update_status` не различает переходы (any→any)
+- 17. `posts.update_status("sent")` не сбрасывает `send_attempts`
+- 18. `posts.increment_attempt` возвращает 0 для несуществующего поста → infinite retry без mark_failed
+- 19. `posts.find_album_posts` фильтрует только `status='pending'` → теряет partial-sent альбомы
+- 20. `posts._row_to_post` глушит `JSONDecodeError` для `tags` → `[]` без лога
+- 21. `queues.list_queues` LEFT JOIN с `WHERE c.is_active = 1` → конвертирует в INNER JOIN → scheduler теряет очереди с неактивными каналами
+- 22. `users.add_user` молча реактивирует + меняет роль
+- 23. `users.username` без UNIQUE → `find_by_username` ambiguous
+- 24. `app_settings.set(key, value)` `str(value)` теряет тип
+- 25. `task_queue.take_next` без `claimed_at`/`requeue_stale()` для crash recovery
+- 26. `task_queue.requeue` не сбрасывает `attempts`, нет max-retry
+
+**Сервисы**:
+- 27. `gelbooru_client._get_session` без лока → concurrent first-call leaks session
+- 28. `gelbooru_client.check_file_alive` обходит rate limit → API ban risk
+- 29. `gelbooru_client.search_posts` кэширует пустой результат 60с при любом сбое
+- 30. `gelbooru_client._request` читает body ДО проверки status
+- 31. `gelbooru_client.safe_params` мёртвый код
+- 34. `cache` нет max-size policy
+- 35. `tags_db.init_tags_db` нет `busy_timeout`/`WAL`
+- 36. `queue_time.handle_end_strategy` циклы по `limit=1000`, каждый commit независимый, счётчики игнорируют bool return
+- 38. `archive._source_tag` мислэблит не-Telegram источники как `#from_dm`
+- 39. `archive.archive_album` и `scheduler._send_album_group` дублируют логику
+- 41. `routing._looks_like_regex` URL chars не в `_REGEX_HINTS`
+
+**main.py**:
+- 43. `/health*` endpoints без авторизации (`SECRET_TOKEN` существует, но не проверяется)
+- 44. `_bot_polling` без retry/reconnect на non-`CancelledError`
+
+**Бот** (не перечисленные выше):
+- 5. `edit_text` на удалённых сообщениях — 31 вызов в `menu.py`, нигде не обёрнут в try/except `TelegramBadRequest`
+- 7. `_create_queue_from_state` — `data["channel_id"]` без `.get()` → KeyError
+- 8. `cb_create_rule_from_post` не ловит исключения `routing_repo.create_rule` → spinner
+- 9. `add_user_tg_id` — `fsm_non_text_in_state` ловит forwarded non-text первым → dead code
+- 11. `cb_post:toq` игнорирует bool return `assign_queue`
+- 13. `add_queue_daily_window` — regex `(\d{1,2}):(\d{2})` позволяет `99:00`
+- 14. `add_queue_signature` — нет лимита длины (Telegram limit 1024)
+- 15. `cmd_add_queue` — `args.split()` ломает multi-word имена
+- 16. `cmd_add_channel` — нет валидации `-100` prefix
+
+**Тесты/Скрипты/Docker**:
+- 1. `test_scheduler.py` переопределяет булевку в тестовом теле (false positive). Ноль тестов для tick/429/throttle/permanent-error/`_check_queue_notifications`.
+- 2. `conftest.py:13` `PYTEST_DISABLE_PLUGIN_AUTOLOAD` мёртвый код
+- 3. `conftest.py` нет pytest-фикстур, `object.__setattr__` хак
+- 4. `test_regression.py:12-51` mis-named тест
+- 6. `test_settings.py:5-8` module-level env var setting → test isolation
+- 8. `check_phase2.py:142-144` `except Exception: return 0` всё ещё глушит
+- 9. `populate_tags.py` нет argparse, нет Ctrl-C handler
+- 10. `cleanup_downloads.py` — 0 байт
+- 12. `init_db.py:40` `bootstrap_admin(settings.admin_tg_id, None)` сохраняет admin с `username=NULL`
+- 14. Docker: root, no `USER`, no multi-stage, no `HEALTHCHECK`, no CPU limit, local-bot-api без resource limits, нет `cap_drop`/`security_opt`/`init`/`read_only`, port 8081 через `ports:` вместо `expose:`, `depends_on` без `condition: service_healthy`
+- 15. `docker-compose.yml:9-10` env vars без `:?required`
+- 16. `docker-compose.yml:37-48` одновременно `environment:` и `env_file: .env`
+- 17. `docker-compose.yml:51` `E:\Media` хардкод Windows
+- 19. `pyproject.toml` нет `[tool.ruff]`, `[tool.mypy]`, `[tool.coverage]`
+- 21. `PHASE1_GUIDE.md:28 D:\Media` vs `docker-compose.yml:51 E:\Media`
+- 23. README:18-33 — pHash, ffmpeg, Jinja2+Bootstrap, Chrome extension всё ещё заявлены как current features, хотя это Фазы 4-5 стабы
+- 24. `PROJECT_STRUCTURE.md:32-40` — `app/web/`, `chrome-extension/` всё ещё не существуют
+- 25. `PROJECT_STRUCTURE.md:74` — «22 юнит-теста» не тронут (actual 61)
+
+### 4.4. Новые баги от фиксов (12)
+
+**По бот-слою (3)**:
+- `_safe_int` (`menu.py:76-84`) — sync-функция, вызывает `asyncio.ensure_future(call.answer(...))`. Если event loop не запущен (в тестах) → `RuntimeError`. Если `call.answer` поднимет исключение — оно тихо теряется в задаче. Должна быть `async def`.
+- `_safe_int` не ловит `IndexError` на malformed callback (если `parts` короче ожидаемого — `_safe_int(parts[3], ...)` бросит `IndexError` ДО входа в try-блок).
+- `_safe_int` — `import asyncio` внутри `if call:` ветки (на hot path).
+
+**По сервисам (3)**:
+- `notifications._last_notify` — общий dict → Regression #5
+- `notify_queue_finished` всё ещё спамит каждые 5 мин (не one-shot)
+- Cache cleanup task cancel — fire-and-forget → Regression #6
+
+**По докам (6 inconsistencies)**:
+- `PHASE2_GUIDE.md:12` — «10 таблиц» но перечислено 9 имён (`app_settings` не добавлен в список)
+- `PHASE2_GUIDE.md:368` — «22 теста» не тронут
+- `PHASE2_GUIDE.md:420/473/490` — «30 в test_regression.py» (actual 39)
+- `1.md:152` — expected output противоречит `check_phase2.py:64`
+- `PROJECT_STRUCTURE.md:74` — «22 юнит-теста» vs `PHASE2_GUIDE.md:312` — «61 passed»
+- `.env.example:17 TZ=Europe/Moscow` vs `docker/Dockerfile:17 TZ=Asia/Yekaterinburg` → Regression #3
+
+---
+
+## Часть 5 — План починки (приоритеты)
+
+### 🔴 P0 — критично, чинить немедленно
+
+1. **HTML escape на 28+ сайтах** (Regression #1). Добавить `import html` в начало каждого handler-файла + обернуть все интерполяции пользовательского текста в `html.escape(...)`. **Без этого бот открыт к фишингу админов через пересланные captions и имена очередей/каналов.**
+   ```python
+   import html
+   # было
+   text = f"📋 <b>Очередь #{qid} «{queue['name']}»</b>\n"
+   # стало
+   text = f"📋 <b>Очередь #{qid} «{html.escape(queue['name'])}»</b>\n"
+   ```
+
+2. **`TelegramRetryAfter` не ловится** (Regression #4 + Bug #7 scheduler). Ввести `_safe_answer` helper для всех `message.answer`/`call.answer`/`notify_admin` и обернуть все вызовы `bot.send_*` в try/except `TelegramRetryAfter` с `await asyncio.sleep(retry_after + 0.5)` + retry.
+   ```python
+   from aiogram.exceptions import TelegramRetryAfter
+   
+   async def _safe_send(bot, chat_id, send_method, **kwargs):
+       try:
+           return await getattr(bot, send_method)(chat_id=chat_id, **kwargs)
+       except TelegramRetryAfter as e:
+           await asyncio.sleep(float(e.retry_after) + 0.5)
+           return await getattr(bot, send_method)(chat_id=chat_id, **kwargs)
+   ```
+
+3. **Schema: `posts.queue_id ON DELETE CASCADE` → `SET NULL`** (Regression #2) + написать миграцию для существующих БД.
+
+### 🟠 P1 — высоко, чинить в этом спринте
+
+4. **`notifications._last_notify`**: разнести на `_last_almost_empty` и `_last_finished`. Сделать `notify_queue_finished` one-shot переходом non-empty → empty (хранить previous pending count в БД).
+
+5. **APScheduler**: `job_defaults={"misfire_grace_time": 300, "coalesce": True, "max_instances": 1}`. Опционально — `SQLAlchemyJobStore` для персистентности.
+
+6. **Permanent-error classification**: `isinstance(e, TelegramForbiddenError)` или проверка `BadRequest` message на `chat not found`/`chat_id_invalid`/`entity_too_large` → `mark_failed` без retry (ТЗ §2.5.2 п.5).
+
+7. **`cmd_add_to_queue` RBAC**: добавить проверку `user_role in ("admin", "moderator")` (PR #31 пропустил — `cmd_remove_from_queue` добавил, `cmd_add_to_queue` нет).
+
+8. **`.env.example` TZ**: убрать `TZ=` (берётся из Dockerfile) или поменять на `Asia/Yekaterinburg` (Regression #3).
+
+9. **Album `mark_sent` → один bulk `UPDATE ... WHERE id IN (...)`** (транзакционный atomic mark) — убирает partial-send-on-crash дубликаты.
+
+10. **Cache cleanup task cancel + await** (как `_bot_polling_task`) — Regression #6.
+
+### 🟡 P2 — средне, чинить до Фазы 3
+
+11. **`FSInputFile(file_path)` вместо `BufferedInputFile(fh.read())`** для strategy-2 (OOM fix).
+12. **Альбомы >10 chunking**: разбивать на группы ≤10 с разными `media_group_id` (UUID-суффикс).
+13. **`_send_one_post` truncate caption до 1024 символов**.
+14. **`_safe_int` → `async def`** + try/except `IndexError` на bounds.
+15. **`gelbooru_client._get_session` → `asyncio.Lock`**; `check_file_alive` → обернуть в `self._semaphore`; `search_posts` → не кэшировать `None`-результат как пустой.
+16. **`tags_db.init_tags_db` → добавить `PRAGMA busy_timeout=5000` + `journal_mode=WAL`**.
+17. **`users.add_user`**: отказывать если пользователь существует (или разделить add/reactivate).
+18. **`users.username`**: добавить UNIQUE constraint (миграция с table recreate).
+19. **`task_queue.take_next`**: добавить `claimed_at` + `requeue_stale(older_than)`.
+20. **`posts.increment_attempt`**: возвращать `None` для несуществующего поста, в scheduler явно проверять.
+21. **`access.py` middleware**: `parts = text.split(); if parts and parts[0] in (...)` (настоящий фикс IndexError). Cache для `get_user_by_tg_id` (TTL 60s). Skip `bootstrap_admin` после первой успешной инициализации.
+22. **`cmd_add_channel` валидация `-100` prefix** + проверка, что бот админ в канале.
+23. **`add_queue_daily_window` валидация 0-23/0-59**.
+24. **`add_queue_signature` лимит 800 символов** (оставляя запас для caption).
+25. **`cmd_add_queue` через `shlex.split`** для multi-word имён.
+26. **`_create_queue_from_state` → `.get()` + try/except** для corrupted state.
+27. **`cb_create_rule_from_post` → try/except вокруг `create_rule`**.
+28. **Все `call.message.edit_text` → обернуть в try/except `TelegramBadRequest`** (~25 сайтов в menu.py).
+29. **`/health*` endpoints**: добавить `SECRET_TOKEN` FastAPI Dependency.
+30. **`_bot_polling`**: retry loop с exponential backoff для non-`CancelledError`.
+31. **`queue_time.handle_end_strategy`**: bulk `UPDATE/DELETE` одной транзакцией.
+32. **`routing._looks_like_regex`**: добавить URL chars (`:`, `/`, `?`) в `_REGEX_HINTS` ИЛИ добавить колонку `pattern_type` в `routing_rules`.
+
+### 🟢 P3 — низко, чинить по мере
+
+33. `requirements.txt`: pin версии (`fastapi>=0.100,<0.200` и т.д.) + добавить dev-extras как реальные зависимости в `pyproject.toml [project.optional-dependencies] dev = [...]`.
+34. `pyproject.toml`: добавить `[tool.ruff]`, `[tool.mypy]`, `[tool.pytest.ini_options.asyncio_mode = "auto"]`.
+35. Docker: `USER appuser` (создать через `useradd`), multi-stage build, `HEALTHCHECK`, `cpus: '1.0'` на bot, resource limits на local-bot-api, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `init: true`, `read_only: true`, `depends_on` с `condition: service_healthy`, port 8081 через `expose:`.
+36. Тесты: добавить `test_scheduler_tick.py` с моком `get_bot` + test для 429 + test для permanent error + test для `_check_queue_notifications`.
+37. Документация: убрать из README/PROJECT_STRUCTURE claims про pHash/ffmpeg/Jinja2/Chrome-extension как current features, пометить как «Фаза 5 stub». Привести в соответствие PHASE1/PHASE2/QUICKSTART/1.md (один источник правды).
+38. `populate_tags.py`: argparse + Ctrl-C handler с `try/finally` для `close()`.
+39. `init_db.py`: `bootstrap_admin(settings.admin_tg_id, username=None)` → если есть возможность получить username из env, передать его.
+40. `cleanup_downloads.py`: либо реализовать, либо удалить файл.
+
+---
+
+## Часть 6 — Итог
+
+3 fix-PR закрыли **16 из ~76 ранее найденных багов Фазы 2**, включая 3 критических, подтверждённых тобой (A — `count_pending` AttributeError, B — `**` как литералы, C — частично, через уже существующий путь записи `ARCHIVE_CHANNEL_ID`).
+
+Но **введены 4 регрессии**, одна из которых — **CRITICAL HTML-инъекция** — ровно та, которую предыдущий ревьюер **явно предупреждал** в worklog.md. Плюс 5-я регрессия всплыла на твоём production — `TelegramRetryAfter` на `message.answer` в `media.py:298` (бот бьёт в admin DM сериями `SendMessage`: post reply + archive confirm + notify_*, и Telegram включает flood control).
+
+Самое простое и опасное — Regression #1 (HTML escape). Это ~28 однострочных правок (`html.escape(...)` вокруг пользовательского текста), но без них бот открыт к фишингу админов через пересланные captions и имена очередей/каналов.
+
+Самое заметное на production — Regression #4 (`TelegramRetryAfter`). Без per-chat rate limiter или хотя бы try/except + retry на всех `bot.send_*` бот будет периодически падать с «Update is not handled» при интенсивной пересылке медиа.
+
+Приоритеты P0 — HTML escape + `TelegramRetryAfter` handling + `posts.queue_id` SET NULL — нужно закрывать следующим PR.
+
+Полные детальные находки с цитатами кода и номерами строк сохранены в `/home/z/my-project/worklog.md` под Task IDs R4, R5, R6.
