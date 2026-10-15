@@ -248,7 +248,7 @@ async def cb_create_rule_from_post(call: CallbackQuery, user_role: str | None = 
     await call.answer(f"✓ Правило #{rid} создано", show_alert=True)
     await call.message.edit_text(
         f"✓ Правило #{rid} создано!\n"
-        f"Источник: telegram_channel `{source_id}`\n"
+        f"Источник: telegram_channel <code>{html.escape(source_id)}</code>\n"
         f"→ Очередь: #{queue_id} (priority 10)\n\n"
         f"Будущие посты из этого канала будут автоматически идти в эту очередь.",
         reply_markup=kb.main_menu(is_admin=True),
@@ -283,13 +283,13 @@ async def cb_post(call: CallbackQuery) -> None:
         ch_name = channel["name"] if channel else f"#{channel_id}"
         if not channel_queues:
             await call.message.edit_text(
-                f"📢 Канал «{ch_name}» выбран.\n\n"
+                f"📢 Канал «{html.escape(ch_name)}» выбран.\n\n"
                 f"⚠️ В этом канале нет очередей. Создай очередь для него:",
                 reply_markup=kb.pick_queue_for_post(post_id, channel_id, []),
             )
         else:
             await call.message.edit_text(
-                f"📢 Канал «{ch_name}». Выбери очередь:",
+                f"📢 Канал «{html.escape(ch_name)}». Выбери очередь:",
                 reply_markup=kb.pick_queue_for_post(post_id, channel_id, channel_queues),
             )
         await call.answer()
@@ -321,6 +321,9 @@ async def cb_post(call: CallbackQuery) -> None:
             await call.answer("Пост не найден", show_alert=True)
             return
         await posts_repo.assign_queue(post_id, queue_id)
+        # Сбрасываем флаг «finished» — в очередь добавлен новый пост (CRITICAL C4)
+        from app.services import notifications
+        notifications.reset_finished(queue_id)
         if post["status"] in ("failed", "possible_duplicate", "duplicate"):
             await posts_repo.update_status(post_id, "pending")
         queue = await queues_repo.get_queue(queue_id)
@@ -381,29 +384,19 @@ async def cb_post(call: CallbackQuery) -> None:
         return
 
     if action == "del":
-        # Удаление поста (для очистки дубликатов из Входящих)
+        # Двухшаговое подтверждение удаления поста (MEDIUM из ревью)
         post = await posts_repo.get_post(post_id)
         if not post:
             await call.answer("Пост не найден", show_alert=True)
             return
-        await posts_repo.delete_post(post_id)
-        await call.answer(f"Пост #{post_id} удалён", show_alert=True)
-        # Возврат туда, откуда пришли: Входящие или очередь
-        if post.get("queue_id") is None:
-            posts = await posts_repo.list_inbox(limit=15)
-            await call.message.edit_text(
-                "📥 <b>Входящие</b> (посты без очереди)" if posts else "📥 Входящие пусты",
-                reply_markup=kb.inbox_posts(posts),
-            )
-        else:
-            qid = post["queue_id"]
-            posts = await posts_repo.list_queue_posts(qid, limit=15)
-            queue = await queues_repo.get_queue(qid)
-            qname = queue["name"] if queue else f"#{qid}"
-            await call.message.edit_text(
-                f"📋 Очередь #{qid} «{qname}» (постов: {len(posts)})",
-                reply_markup=kb.queue_posts(qid, posts),
-            )
+        await call.message.edit_text(
+            f"🗑 <b>Удалить пост #{post_id}?</b>\n"
+            f"Тип: <code>{html.escape(post.get('file_type') or '?')}</code>\n"
+            f"Статус: <code>{html.escape(post.get('status') or '?')}</code>\n\n"
+            f"⚠️ Действие необратимо.",
+            reply_markup=kb.confirm_delete("post", post_id),
+        )
+        await call.answer()
         return
 
     post = await posts_repo.get_post(post_id)
@@ -418,17 +411,16 @@ async def cb_post(call: CallbackQuery) -> None:
 async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict]) -> None:
     text = (
         f"🖼 <b>Пост #{post['id']}</b>\n"
-        f"Тип: {post['file_type']}\n"
-        f"Источник: {post['source_type']}\n"
-        f"Статус: {post['status']}\n"
+        f"Тип: <code>{html.escape(post.get('file_type') or '?')}</code>\n"
+        f"Источник: <code>{html.escape(post.get('source_type') or '?')}</code>\n"
+        f"Статус: <code>{html.escape(post.get('status') or '?')}</code>\n"
         f"Очередь: {post.get('queue_id') or '— (Входящие)'}\n"
     )
     if post.get("original_caption"):
-        text += f"Подпись: {html.escape(post['original_caption'][:97])}...\n" if len(post['original_caption']) > 100 else f"Подпись: {html.escape(post['original_caption'])}\n"
-    if post.get("tg_file_id"):
-        text += f"file_id: {post['tg_file_id'][:20]}...\n"
-    if post.get("media_group_id"):
-        text += f"📸 Альбом: {post['media_group_id'][:20]}...\n"
+        cap = post["original_caption"]
+        text += f"Подпись: {html.escape(cap[:97])}...\n" if len(cap) > 100 else f"Подпись: {html.escape(cap)}\n"
+    # Убираем tg_file_id и media_group_id — это Telegram-внутренние идентификаторы,
+    # неинформативные для пользователя.
     await call.message.edit_text(text, reply_markup=kb.post_card(post, queues))
 
 
@@ -468,7 +460,7 @@ async def cb_channel_info(call: CallbackQuery, state: FSMContext) -> None:
         channel = await channels_repo.get_channel(ch_id)
         ch_name = channel["name"] if channel else f"#{ch_id}"
         await call.message.edit_text(
-            f"Канал #{ch_id} «{ch_name}» выбран.\nШаг 2/6: Пришли название очереди (например: Утренние посты)",
+            f"Канал #{ch_id} «{html.escape(ch_name)}» выбран.\nШаг 2/6: Пришли название очереди (например: Утренние посты)",
             reply_markup=kb.confirm_cancel(),
         )
         await call.answer()
@@ -485,7 +477,7 @@ async def cb_channel_info(call: CallbackQuery, state: FSMContext) -> None:
     text = (
         f"📢 <b>Канал #{ch_id} «{html.escape(channel['name'])}»</b>\n"
         f"Chat ID: {channel['tg_chat_id']}\n"
-        f"Username: @{channel.get('username') or '—'}\n"
+        f"Username: @{html.escape(channel.get('username') or '—')}\n"
         f"Активен: {'да' if channel['is_active'] else 'нет'}\n"
         f"Очередей: {len(channel_queues)}"
     )
@@ -661,9 +653,9 @@ async def add_queue_interval(message: Message, state: FSMContext) -> None:
     await state.set_state(AddStates.add_queue_start_end)
     await message.answer(
         "Шаг 4/6: Даты начала и конца очереди.\n\n"
-        "Формат: `дд.мм.гг - дд.мм.гг`\n"
-        "Пример: `14.10.26 - 16.10.26`\n\n"
-        "Или `-` если без ограничений (сразу/бесконечно).",
+        "Формат: <code>дд.мм.гг - дд.мм.гг</code>\n"
+        "Пример: <code>14.10.26 - 16.10.26</code>\n\n"
+        "Или <code>-</code> если без ограничений (сразу/бесконечно).",
         reply_markup=kb.confirm_cancel(),
     )
 
@@ -707,8 +699,8 @@ async def add_queue_start_end(message: Message, state: FSMContext) -> None:
         parsed = _parse_dates(text)
         if parsed is None:
             await message.answer(
-                "Не понял формат. Пример: `14.10.26 - 16.10.26`\n"
-                "Или `-` если без ограничений.",
+                "Не понял формат. Пример: <code>14.10.26 - 16.10.26</code>\n"
+                "Или <code>-</code> если без ограничений.",
                 reply_markup=kb.confirm_cancel(),
             )
             return
@@ -716,9 +708,9 @@ async def add_queue_start_end(message: Message, state: FSMContext) -> None:
     await state.set_state(AddStates.add_queue_daily_window)
     await message.answer(
         "Шаг 5/6: Ежедневное окно отправки (часы работы каждый день).\n\n"
-        "Формат: `чч:мм - чч:мм`\n"
-        "Пример: `06:00 - 22:00` (посты только с 6:00 до 22:00)\n\n"
-        "Или `-` если без окна (посты в любое время суток).",
+        "Формат: <code>чч:мм - чч:мм</code>\n"
+        "Пример: <code>06:00 - 22:00</code> (посты только с 6:00 до 22:00)\n\n"
+        "Или <code>-</code> если без окна (посты в любое время суток).",
         reply_markup=kb.confirm_cancel(),
     )
 
@@ -734,7 +726,7 @@ async def add_queue_daily_window(message: Message, state: FSMContext) -> None:
         m = re.match(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", text)
         if not m:
             await message.answer(
-                "Не понял формат. Пример: `06:00 - 22:00`\nИли `-` если без окна.",
+                "Не понял формат. Пример: <code>06:00 - 22:00</code>\nИли <code>-</code> если без окна.",
                 reply_markup=kb.confirm_cancel(),
             )
             return
@@ -839,9 +831,9 @@ async def queue_settings_toggle(call: CallbackQuery, state: FSMContext) -> None:
         return
 
     elif action == "create":
-        # Создать очередь с текущими настройками
+        # Создать очередь с текущими настройками — loading-состояние
+        await call.answer("⏳ Создаём очередь...")
         await _create_queue_from_state(call, state)
-        await call.answer()
         return
 
     await call.answer()
@@ -1095,15 +1087,19 @@ async def cb_rule_actions(call: CallbackQuery, user_role: str | None = None) -> 
     action = parts[3] if len(parts) > 3 else None
 
     if action == "del":
-        await routing_repo.remove_rule(rid)
-        await call.answer(f"Правило #{rid} удалено", show_alert=True)
-        rules = await routing_repo.list_rules(active_only=False)
-        queues = await queues_repo.list_queues(active_only=False)
-        queues_map = {q["id"]: q["name"] for q in queues}
+        # Двухшаговое подтверждение удаления правила
+        rule = await routing_repo.get_rule(rid)
+        if not rule:
+            await call.answer("Не найдено", show_alert=True)
+            return
         await call.message.edit_text(
-            "🔀 <b>Правила маршрутизации</b>:" if rules else "🔀 Правил нет.",
-            reply_markup=kb.rules_list(rules, queues_map) if rules else kb.back_button(),
+            f"🗑 <b>Удалить правило #{rid}?</b>\n"
+            f"Тип: <code>{html.escape(rule['source_type'])}</code>\n"
+            f"Паттерн: <code>{html.escape(rule['source_pattern'])}</code>\n\n"
+            f"⚠️ Действие необратимо.",
+            reply_markup=kb.confirm_delete("rule", rid),
         )
+        await call.answer()
         return
 
     rule = await routing_repo.get_rule(rid)
@@ -1114,9 +1110,9 @@ async def cb_rule_actions(call: CallbackQuery, user_role: str | None = None) -> 
     qname = next((q["name"] for q in queues if q["id"] == rule["target_queue_id"]), f"#{rule['target_queue_id']}")
     text = (
         f"🔀 <b>Правило #{rule['id']}</b>\n"
-        f"Тип источника: {rule['source_type']}\n"
-        f"Паттерн: `{html.escape(rule['source_pattern'])}`\n"
-        f"Очередь: «{qname}» (#{rule['target_queue_id']})\n"
+        f"Тип источника: <code>{html.escape(rule['source_type'])}</code>\n"
+        f"Паттерн: <code>{html.escape(rule['source_pattern'])}</code>\n"
+        f"Очередь: «{html.escape(qname)}» (#{rule['target_queue_id']})\n"
         f"Приоритет: {rule['priority']}\n"
         f"Активно: {'да' if rule['is_active'] else 'нет'}"
     )
@@ -1390,3 +1386,87 @@ async def add_threshold(message: Message, state: FSMContext) -> None:
     await app_settings_repo.set_notify_threshold(n)
     await message.answer(f"✓ Порог «скоро закончится» = {n} постов", reply_markup=kb.main_menu(is_admin=True))
     await state.clear()
+
+
+# ===========================================================================
+# Подтверждение/отмена удаления (двухшаговое подтверждение, MEDIUM из ревью)
+# ===========================================================================
+
+@router.callback_query(F.data.startswith("confirm_del:"))
+async def cb_confirm_delete(call: CallbackQuery, user_role: str | None = None) -> None:
+    """Второй шаг подтверждения удаления: выполняет удаление."""
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    parts = call.data.split(":")
+    kind = parts[1] if len(parts) > 1 else ""
+    try:
+        item_id = int(parts[2])
+    except (IndexError, ValueError):
+        await call.answer("Неверный формат", show_alert=True)
+        return
+
+    if kind == "post":
+        post = await posts_repo.get_post(item_id)
+        if not post:
+            await call.answer("Пост не найден", show_alert=True)
+            return
+        await posts_repo.delete_post(item_id)
+        await call.answer(f"Пост #{item_id} удалён", show_alert=True)
+        # Возврат туда, откуда пришли: Входящие или очередь
+        if post.get("queue_id") is None:
+            posts = await posts_repo.list_inbox(limit=15)
+            await call.message.edit_text(
+                "📥 <b>Входящие</b> (посты без очереди)" if posts else "📥 Входящие пусты",
+                reply_markup=kb.inbox_posts(posts),
+            )
+        else:
+            qid = post["queue_id"]
+            posts = await posts_repo.list_queue_posts(qid, limit=15)
+            queue = await queues_repo.get_queue(qid)
+            qname = queue["name"] if queue else f"#{qid}"
+            await call.message.edit_text(
+                f"📋 Очередь #{qid} «{html.escape(qname)}» (постов: {len(posts)})",
+                reply_markup=kb.queue_posts(qid, posts),
+            )
+        return
+
+    if kind == "user":
+        user = await users_repo.get_user(item_id)
+        if not user:
+            await call.answer("Не найден", show_alert=True)
+            return
+        if user["tg_id"] == (call.from_user.id if call.from_user else 0):
+            await call.answer("Нельзя удалить себя", show_alert=True)
+            return
+        try:
+            await users_repo.remove_user(user["tg_id"])
+        except Exception as e:  # noqa: BLE001 — FK constraint
+            await call.answer(f"⚠️ Не удалось удалить: {e}", show_alert=True)
+            return
+        await call.answer("Удалён", show_alert=True)
+        users = await users_repo.list_users()
+        current_tg = call.from_user.id if call.from_user else 0
+        await call.message.edit_text("👥 Пользователи:", reply_markup=kb.users_list(users, current_tg))
+        return
+
+    if kind == "rule":
+        await routing_repo.remove_rule(item_id)
+        await call.answer(f"Правило #{item_id} удалено", show_alert=True)
+        rules = await routing_repo.list_rules(active_only=False)
+        queues = await queues_repo.list_queues(active_only=False)
+        queues_map = {q["id"]: q["name"] for q in queues}
+        await call.message.edit_text(
+            "🔀 <b>Правила маршрутизации</b>:" if rules else "🔀 Правил нет.",
+            reply_markup=kb.rules_list(rules, queues_map) if rules else kb.back_button(),
+        )
+        return
+
+    await call.answer("Неизвестный тип", show_alert=True)
+
+
+@router.callback_query(F.data == "cancel_del")
+async def cb_cancel_delete(call: CallbackQuery) -> None:
+    """Отмена удаления — возврат в главное меню."""
+    await call.message.edit_text("🏠 Удаление отменено.", reply_markup=kb.main_menu(is_admin=True))
+    await call.answer()

@@ -140,11 +140,11 @@ def _extract_media(message: Message) -> dict[str, Any] | None:
                 "file_size": d.file_size, "mime_type": d.mime_type}
     if message.audio:
         a: Audio = message.audio  # type: ignore[no-redef]
-        return {"file_type": "document", "tg_file_id": a.file_id, "file_unique_id": a.file_unique_id,
+        return {"file_type": "audio", "tg_file_id": a.file_id, "file_unique_id": a.file_unique_id,
                 "file_size": a.file_size, "mime_type": a.mime_type}
     if message.voice:
         v: Voice = message.voice  # type: ignore[no-redef]
-        return {"file_type": "document", "tg_file_id": v.file_id, "file_unique_id": v.file_unique_id,
+        return {"file_type": "voice", "tg_file_id": v.file_id, "file_unique_id": v.file_unique_id,
                 "file_size": v.file_size, "mime_type": v.mime_type}
     return None
 
@@ -315,6 +315,9 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         queue = await queues_repo.get_queue(queue_id)
         qname = queue["name"] if queue else f"#{queue_id}"
         pending_count = await queues_repo.count_pending(queue_id)
+        # Сбрасываем флаг «finished» — в очередь добавлен новый пост (CRITICAL C4)
+        from app.services import notifications
+        notifications.reset_finished(queue_id)
         await _safe_answer(message,
             f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
             reply_to_message_id=message.message_id,
@@ -325,7 +328,5 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
 @router.message(F.text & ~F.text.startswith("/"))
 async def receive_text(message: Message, user: dict | None = None) -> None:
     """Текст без команды — сохраняем как возможный caption-черновик во Входящие (ТЗ §2.1.1 п.1 'Текст')."""
-    if message.text and message.text.startswith("/"):
-        return  # команды обрабатываются другими хендлерами
     # Текст сам по себе не создаёт пост (нет медиа), но логируем для будущего
     logger.info("Текст без медиа от user=%s — игнорируется", getattr(message.from_user, "id", None))

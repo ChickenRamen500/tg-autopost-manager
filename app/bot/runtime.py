@@ -39,6 +39,16 @@ def get_bot() -> Bot:
 
 async def close_bot() -> None:
     global _bot
+    # Отменяем все pending album-archive tasks (cleanup при shutdown)
+    try:
+        from app.bot.handlers.media import _album_archive_tasks
+
+        for task in list(_album_archive_tasks.values()):
+            if not task.done():
+                task.cancel()
+        _album_archive_tasks.clear()
+    except ImportError:
+        pass  # media-хендлеры не импортированы (например, в тестах)
     if _bot is not None:
         await _bot.session.close()
         _bot = None

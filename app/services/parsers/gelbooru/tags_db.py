@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,8 @@ async def init_tags_db() -> None:
     global _conn
     if _conn is not None:
         return
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # Синхронный mkdir обернём в поток, чтобы не блокировать event loop.
+    await asyncio.to_thread(settings.data_dir.mkdir, parents=True, exist_ok=True)
     _conn = await aiosqlite.connect(str(_db_path()))
     _conn.row_factory = aiosqlite.Row
     # P2-16: WAL + busy_timeout для конкурентного доступа (populate_tags.py write + app read)
@@ -89,31 +91,37 @@ def _get_conn() -> aiosqlite.Connection:
 
 
 async def upsert_tags(tags: list[dict[str, Any]]) -> int:
-    """Bulk insert/update списка тегов ({name, type, count}). Возвращает число обработанных."""
+    """Bulk insert/update списка тегов ({name, type, count}). Возвращает число обработанных.
+
+    Использует executemany — один round-trip вместо N INSERT-запросов.
+    """
     if not tags:
         return 0
     db = _get_conn()
-    processed = 0
+    rows: list[tuple[str, int, int]] = []
     for tag in tags:
         name = (tag.get("name") or "").strip()
         if not name:
             continue
         tag_type = int(tag.get("type", 0) or 0)
         count = int(tag.get("count", 0) or 0)
-        try:
-            await db.execute(
-                "INSERT INTO tags (name, type, count, updated_at) "
-                "VALUES (?, ?, ?, datetime('now')) "
-                "ON CONFLICT(name) DO UPDATE SET "
-                "type = excluded.type, count = excluded.count, "
-                "updated_at = datetime('now')",
-                (name, tag_type, count),
-            )
-            processed += 1
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to upsert tag %r: %s", name, e)
-    await db.commit()
-    return processed
+        rows.append((name, tag_type, count))
+    if not rows:
+        return 0
+    try:
+        await db.executemany(
+            "INSERT INTO tags (name, type, count, updated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
+            "ON CONFLICT(name) DO UPDATE SET "
+            "type = excluded.type, count = excluded.count, "
+            "updated_at = datetime('now')",
+            rows,
+        )
+        await db.commit()
+        return len(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to executemany upsert %d tags: %s", len(rows), e)
+        return 0
 
 
 async def get_tag_types(names: list[str]) -> dict[str, int]:
@@ -158,10 +166,13 @@ async def autocomplete(prefix: str, limit: int = 10) -> list[dict[str, Any]]:
     prefix = prefix.strip().lower()
     if not prefix:
         return []
+    # Экранируем специальные символы LIKE (% и _) — иначе пользовательский ввод
+    # вида '%' или '_' ломает семантику поиска или матчит лишнее.
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     db = _get_conn()
     cur = await db.execute(
-        "SELECT name, type, count FROM tags WHERE name LIKE ? ORDER BY count DESC, name ASC LIMIT ?",
-        (prefix + "%", limit),
+        "SELECT name, type, count FROM tags WHERE name LIKE ? ESCAPE '\\' ORDER BY count DESC, name ASC LIMIT ?",
+        (escaped + "%", limit),
     )
     rows = await cur.fetchall()
     await cur.close()

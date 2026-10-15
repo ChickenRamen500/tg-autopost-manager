@@ -25,6 +25,8 @@ TYPE_TAGS = {
     "video": "vid",
     "gif": "gif",
     "document": "doc",
+    "audio": "aud",
+    "voice": "voice",
 }
 
 
@@ -86,6 +88,8 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
         file_type = post.get("file_type", "document")
         caption = post.get("original_caption")
         full_caption = f"{tags}\n{caption}" if caption else tags
+        if len(full_caption) > 1024:
+            full_caption = full_caption[:1021] + "..."
 
         if file_type == "photo":
             await bot.send_photo(chat_id=archive_channel, photo=tg_file_id, caption=full_caption)
@@ -93,6 +97,10 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
             await bot.send_video(chat_id=archive_channel, video=tg_file_id, caption=full_caption)
         elif file_type == "gif":
             await bot.send_animation(chat_id=archive_channel, animation=tg_file_id, caption=full_caption)
+        elif file_type == "audio":
+            await bot.send_audio(chat_id=archive_channel, audio=tg_file_id, caption=full_caption)
+        elif file_type == "voice":
+            await bot.send_voice(chat_id=archive_channel, voice=tg_file_id, caption=full_caption)
         else:
             await bot.send_document(chat_id=archive_channel, document=tg_file_id, caption=full_caption)
         log.info("Пост #%s архивирован в канал %s", post.get("id"), archive_channel)
@@ -108,33 +116,41 @@ async def archive_album(posts: list[dict[str, Any]], target_channel_id: int) -> 
     if not archive_channel:
         return False
 
-    all_types = list({p.get("file_type", "document") for p in posts})
+    all_types = list(dict.fromkeys(p.get("file_type", "document") for p in posts))
     tags = _build_tags(posts[0] if posts else {}, target_channel_id, all_types)
 
     try:
-        from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+        from aiogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
         from app.bot.runtime import get_bot
 
         bot = get_bot()
-        media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument] = []
-        for i, p in enumerate(posts):
+        media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio] = []
+        sent_idx = 0
+        for p in posts:
             fid = p.get("tg_file_id")
             if not fid:
+                log.warning("Пост #%s альбома без tg_file_id — пропущен в архиве", p.get("id"))
                 continue
             ft = p.get("file_type", "document")
-            cap = tags if i == 0 else None
+            cap = tags if sent_idx == 0 else None
+            sent_idx += 1
             if ft == "photo":
                 media.append(InputMediaPhoto(media=fid, caption=cap))
             elif ft == "video":
                 media.append(InputMediaVideo(media=fid, caption=cap))
+            elif ft == "audio":
+                media.append(InputMediaAudio(media=fid, caption=cap))
             else:
                 media.append(InputMediaDocument(media=fid, caption=cap))
 
         if not media:
             return False
+        # Обрезаем подпись первого элемента до 1024 (лимит Telegram для album caption)
+        if media and media[0].caption and len(media[0].caption) > 1024:
+            media[0].caption = media[0].caption[:1021] + "..."
         await bot.send_media_group(chat_id=archive_channel, media=media)
-        log.info("Альбом (%d постов) архивирован", len(posts))
+        log.info("Альбом (%d медиа) архивирован", len(media))
         return True
     except Exception as e:  # noqa: BLE001
         log.warning("Не удалось архивировать альбом: %s", e)

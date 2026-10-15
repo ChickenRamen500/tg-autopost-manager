@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TTL = 10 * 60          # 10 минут — результаты поиска
 POST_TTL = 60 * 60             # 1 час — одиночный пост (редко меняется)
 CLEANUP_INTERVAL = 10 * 60     # чистка истёкших записей каждые 10 минут
+MAX_CACHE_SIZE = 2000          # лимит записей в кеше (FIFO-eviction)
 
 # key -> (value, expire_at_monotonic)
 _cache: dict[str, tuple[Any, float]] = {}
@@ -46,6 +47,13 @@ def get(key: str) -> Any | None:
 
 
 def set(key: str, value: Any, ttl: int = DEFAULT_TTL) -> None:
+    # Простейшее FIFO-eviction — защита от неограниченного роста кеша.
+    # При достижении лимита выбрасываем самую старую (первую) запись.
+    if len(_cache) >= MAX_CACHE_SIZE and key not in _cache:
+        try:
+            _cache.pop(next(iter(_cache)))
+        except (StopIteration, KeyError):
+            pass
     _cache[key] = (value, time.monotonic() + ttl)
 
 
@@ -78,8 +86,12 @@ def cleanup_expired() -> int:
     return len(expired_keys)
 
 
-async def start_cleanup_task() -> asyncio.Task:
-    """Фоновая задача периодической очистки истёкших записей."""
+def start_cleanup_task() -> asyncio.Task:
+    """Фоновая задача периодической очистки истёкших записей.
+
+    Sync-функция: создаёт asyncio.Task и возвращает его без await,
+    чтобы можно было использовать как `task = cache.start_cleanup_task()`.
+    """
 
     async def cleanup_loop():
         while True:

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
@@ -46,6 +47,40 @@ def get_dispatcher() -> Dispatcher:
     dp.include_router(admin.router)
     dp.include_router(media.router)
     dp.include_router(start.router)
+
+    # Глобальный error-handler: не роняем dispatcher из-за необработанной ошибки в хендлере.
+    # Логируем и пытаемся сообщить пользователю.
+    try:
+        from aiogram.exceptions import TelegramRetryAfter
+        from aiogram.types import ErrorEvent, Update
+
+        @dp.errors()
+        async def on_error(event: ErrorEvent, update: Update) -> None:  # type: ignore[unused-ignore]
+            log.exception("Unhandled exception in handler: %s", event.exception)
+            try:
+                if update.callback_query:
+                    try:
+                        await update.callback_query.answer(
+                            "⚠️ Внутренняя ошибка. Попробуй позже.",
+                            show_alert=True,
+                        )
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after)
+                        await update.callback_query.answer(
+                            "⚠️ Внутренняя ошибка. Попробуй позже.",
+                            show_alert=True,
+                        )
+                elif update.message:
+                    try:
+                        await update.message.answer("⚠️ Произошла ошибка. /menu для возврата.")
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after)
+                        await update.message.answer("⚠️ Произошла ошибка. /menu для возврата.")
+            except Exception:  # noqa: BLE001 — не роняем dispatcher из-за ошибки в error-handler
+                pass
+    except ImportError:
+        log.warning("aiogram ErrorEvent недоступен — глобальный error-handler не зарегистрирован")
+
     _dp = dp
     return dp
 

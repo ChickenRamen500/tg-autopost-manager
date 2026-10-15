@@ -31,6 +31,15 @@ GELBOORU_API_URL = "https://gelbooru.com/index.php"
 RATE_LIMIT = 8  # запросов в секунду
 RATE_LIMIT_INTERVAL = 1.0 / RATE_LIMIT  # ~125 мс
 
+# Sentinel для индикации "не кешируем ошибку" (None означает "нет данных" в кеш-логике)
+_UNCACHEABLE = object()
+
+# Дефолтные headers для запросов к gelbooru (анти-бот-защита)
+_DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; tg-autopost-manager/1.0)",
+    "Accept": "application/json",
+}
+
 
 class GelbooruClient:
     """Асинхронный клиент Gelbooru API с rate limiting."""
@@ -43,7 +52,10 @@ class GelbooruClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_connect=5, sock_read=10),
+                headers=_DEFAULT_HEADERS,
+            )
         return self._session
 
     async def _rate_limit(self) -> None:
@@ -55,42 +67,87 @@ class GelbooruClient:
             self._last_request_time = time.monotonic()
 
     async def _request(self, params: dict[str, Any]) -> list | dict | None:
+        """Запрос к gelbooru API с retry на 429/5xx.
+
+        Возвращает:
+            - dict/list при успехе
+            - None при 404 (легитимный "нет данных" — кешируется коротким TTL)
+            - _UNCACHEABLE (sentinel) при 429/5xx/timeout/сетевой ошибке — НЕ кешируется,
+              чтобы временный сбой не маскировался кешём на 60 секунд.
+        """
+        # api_key/user_id опциональны (ТЗ §10: gbooru_tg требовал их, здесь — нет)
+        if settings.gelbooru_api_key:
+            params["api_key"] = settings.gelbooru_api_key
+        if settings.gelbooru_user_id:
+            params["user_id"] = settings.gelbooru_user_id
+        params["json"] = "1"
+
+        # Маскирование api_key для логов — ПОСЛЕ добавления в params
+        safe_params = {k: ("***" if k == "api_key" else v) for k, v in params.items()}
+
+        max_retries = 2
+        backoff = 0.5
+
         async with self._semaphore:
             await self._rate_limit()
             session = await self._get_session()
-
-            safe_params = {k: ("***" if k == "api_key" else v) for k, v in params.items()}
             logger.debug("Gelbooru request: %s", safe_params)
 
-            # api_key/user_id опциональны (ТЗ §10: gbooru_tg требовал их, здесь — нет)
-            if settings.gelbooru_api_key:
-                params["api_key"] = settings.gelbooru_api_key
-            if settings.gelbooru_user_id:
-                params["user_id"] = settings.gelbooru_user_id
-            params["json"] = "1"
-
-            try:
-                async with session.get(GELBOORU_API_URL, params=params) as response:
-                    body = await response.read()
-                    if response.status == 200:
-                        logger.info("Gelbooru response: status=%d, size=%d bytes", response.status, len(body))
-                        data = await response.json()
-                        if isinstance(data, dict) and "@attributes" in data:
-                            attrs = data["@attributes"]
-                            if isinstance(attrs, dict) and "count" in attrs:
-                                logger.debug("Gelbooru API count: %s", attrs["count"])
-                        return data
-                    if response.status == 404:
-                        logger.info("Gelbooru response: status=404")
-                        return None
-                    logger.warning("Gelbooru API returned status %d", response.status)
-                    return None
-            except TimeoutError:
-                logger.error("Gelbooru API request timed out")
-                return None
-            except Exception as e:  # noqa: BLE001 — сеть/API, не роняем запрос
-                logger.error("Gelbooru API request failed: %s", e)
-                return None
+            for attempt in range(max_retries + 1):
+                try:
+                    async with session.get(GELBOORU_API_URL, params=params) as response:
+                        body = await response.read()
+                        if response.status == 200:
+                            logger.info("Gelbooru response: status=%d, size=%d bytes", response.status, len(body))
+                            data = await response.json(content_type=None)
+                            if isinstance(data, dict) and "@attributes" in data:
+                                attrs = data["@attributes"]
+                                if isinstance(attrs, dict) and "count" in attrs:
+                                    logger.debug("Gelbooru API count: %s", attrs["count"])
+                            return data
+                        if response.status == 404:
+                            logger.info("Gelbooru response: status=404")
+                            return None
+                        if response.status == 429:
+                            retry_after = response.headers.get("Retry-After")
+                            if attempt < max_retries:
+                                wait = float(retry_after) if retry_after else 1.0
+                                logger.warning("Gelbooru 429: ждём %ss и ретраим (attempt %d)", wait, attempt + 1)
+                                await asyncio.sleep(wait)
+                                await self._rate_limit()
+                                continue
+                            logger.warning("Gelbooru 429: retry limit exceeded")
+                            return _UNCACHEABLE
+                        if response.status >= 500:
+                            if attempt < max_retries:
+                                logger.warning("Gelbooru %d: retry через %.1fs (attempt %d)", response.status, backoff, attempt + 1)
+                                await asyncio.sleep(backoff)
+                                backoff *= 3  # 0.5 → 1.5
+                                await self._rate_limit()
+                                continue
+                            logger.warning("Gelbooru %d: retry limit exceeded", response.status)
+                            return _UNCACHEABLE
+                        logger.warning("Gelbooru API returned status %d", response.status)
+                        return _UNCACHEABLE
+                except TimeoutError:
+                    if attempt < max_retries:
+                        logger.warning("Gelbooru timeout: retry через %.1fs (attempt %d)", backoff, attempt + 1)
+                        await asyncio.sleep(backoff)
+                        backoff *= 3
+                        await self._rate_limit()
+                        continue
+                    logger.error("Gelbooru API request timed out")
+                    return _UNCACHEABLE
+                except Exception as e:  # noqa: BLE001 — сеть/API, не роняем запрос
+                    if attempt < max_retries:
+                        logger.warning("Gelbooru request failed: %s — retry через %.1fs (attempt %d)", e, backoff, attempt + 1)
+                        await asyncio.sleep(backoff)
+                        backoff *= 3
+                        await self._rate_limit()
+                        continue
+                    logger.error("Gelbooru API request failed: %s", e)
+                    return _UNCACHEABLE
+            return _UNCACHEABLE
 
     async def search_posts(self, tags: str, pid: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         """Поиск постов. Результат кешируется 10 минут (пустой — 60 сек)."""
@@ -104,6 +161,10 @@ class GelbooruClient:
         logger.info("search_posts: tags=%r, pid=%d, limit=%d", tags, pid, limit)
 
         data = await self._request(params)
+        # Не кешируем ошибки (sentinel) — пробрасываем как пустой результат без кеширования
+        if data is _UNCACHEABLE:
+            logger.info("search_posts: 0 posts (request failed, не кешируется)")
+            return []
         posts: list[dict[str, Any]] = []
         if data is None:
             logger.info("search_posts: 0 posts (data=None)")
@@ -133,6 +194,8 @@ class GelbooruClient:
         params = {"page": "dapi", "s": "post", "q": "index", "id": post_id, "limit": 1}
         data = await self._request(params)
         post: dict[str, Any] | None = None
+        if data is _UNCACHEABLE:
+            return None
         if data is None:
             return None
         if isinstance(data, list) and len(data) > 0:
@@ -163,6 +226,8 @@ class GelbooruClient:
 
         params = {"page": "dapi", "s": "tag", "q": "index", "tags": f"post_id:{post_id}"}
         data = await self._request(params)
+        if data is _UNCACHEABLE:
+            return []
         tags = self._parse_tag_response(data)
         if tags:
             cache.set(cache_key, tags, ttl=cache.POST_TTL)
@@ -184,6 +249,8 @@ class GelbooruClient:
             batch = clean[i : i + chunk_size]
             params = {"page": "dapi", "s": "tag", "q": "index", "names": " ".join(batch)}
             data = await self._request(params)
+            if data is _UNCACHEABLE:
+                continue
             all_tags.extend(self._parse_tag_response(data))
 
         if all_tags:
@@ -194,6 +261,8 @@ class GelbooruClient:
         """Одна страница тегов (max 100). Возвращает (tags, total_count)."""
         params = {"page": "dapi", "s": "tag", "q": "index", "pid": pid, "limit": limit, "orderby": orderby}
         data = await self._request(params)
+        if data is _UNCACHEABLE:
+            return [], 0
         tags = self._parse_tag_response(data)
         total = 0
         if isinstance(data, dict) and "@attributes" in data:
@@ -219,6 +288,7 @@ class GelbooruClient:
 
     async def check_file_alive(self, file_url: str) -> bool:
         """HEAD-запрос: доступен ли файл (Referer/UA обязательны — gelbooru отдаёт 403 без них)."""
+        await self._rate_limit()
         session = await self._get_session()
         try:
             async with session.head(
