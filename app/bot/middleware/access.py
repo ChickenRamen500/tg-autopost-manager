@@ -46,10 +46,25 @@ class AccessMiddleware(BaseMiddleware):
             except Exception as e:  # noqa: BLE001 — не роняем запрос из-за bootstrap
                 logger.warning("bootstrap_admin упал: %s", e)
 
-        db_user = await users_repo.get_user_by_tg_id(tg_id)
+        # Ищем пользователя в БД. try/except — если БД не инициализирована
+        # или есть ошибка запроса, логируем и пускаем как гостя (не роняем бота).
+        db_user = None
+        try:
+            db_user = await users_repo.get_user_by_tg_id(tg_id)
+        except Exception as e:  # noqa: BLE001 — не роняем запрос
+            logger.error("Ошибка поиска пользователя tg_id=%s: %s", tg_id, e)
+
+        if db_user is not None:
+            logger.info(
+                "RBAC: tg_id=%s найден, role=%s is_active=%s",
+                tg_id, db_user.get("role"), db_user.get("is_active"),
+            )
+        else:
+            logger.info("RBAC: tg_id=%s НЕ найден в БД", tg_id)
 
         if db_user is None or not db_user.get("is_active", 0):
             # Гость/неактивный: /start и /help разрешаем, остальное — отказ
+            logger.info("RBAC: tg_id=%s — ДОСТУП ЗАКРЫТ (guest/inactive)", tg_id)
             if isinstance(event, Message):
                 text = event.text or ""
                 if text.split()[0] in ("/start", "/help") if text else False:

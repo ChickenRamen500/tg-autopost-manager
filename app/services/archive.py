@@ -4,8 +4,11 @@
 Теги в подписи: #from_<source> #to_<channel> #<type>
 
 Примеры:
-- Фото из канала: #from_-1001686639428 #to_-1002257882757 #photo
-- Альбом из ЛС: #from_dm #to_-1002257882757 #photo #video
+- Фото из канала: #from_1001686639428 #to_1002257882757 #pic
+- Альбом из ЛС: #from_dm #to_1002257882757 #pic #vid
+
+Важно: chat_id каналов начинается с -100..., но в тегах минус убираем
+(#from_1002435408188, не #from_-1002435408188) — иначе Telegram ломает хэштег.
 """
 from __future__ import annotations
 
@@ -25,12 +28,22 @@ TYPE_TAGS = {
 }
 
 
+def _sanitize_tag_id(value: str | int | None) -> str:
+    """Убирает минус из chat_id для тегов (Telegram ломает #from_-100...).
+
+    -1002435408188 → 1002435408188
+    """
+    if value is None:
+        return ""
+    return str(value).lstrip("-")
+
+
 def _source_tag(post: dict[str, Any], target_channel_id: int) -> str:
     """Формирует тег источника: #from_<chat_id> или #from_dm."""
     st = post.get("source_type", "")
     sid = post.get("source_id")
     if st in ("telegram_channel",) and sid:
-        return f"#from_{sid}"
+        return f"#from_{_sanitize_tag_id(sid)}"
     # telegram_direct, telegram_user и всё из ЛС — #from_dm
     return "#from_dm"
 
@@ -39,12 +52,13 @@ def _build_tags(post: dict[str, Any], target_channel_id: int, all_types: list[st
     """Собирает строку тегов для подписи архивного сообщения."""
     tags = [
         _source_tag(post, target_channel_id),
-        f"#to_{target_channel_id}",
+        f"#to_{_sanitize_tag_id(target_channel_id)}",
     ]
     for ft in all_types:
         tag = TYPE_TAGS.get(ft, ft)
-        if tag not in tags:
-            tags.append(tag)
+        hashtag = f"#{tag}"
+        if hashtag not in tags:
+            tags.append(hashtag)
     return " ".join(tags)
 
 
