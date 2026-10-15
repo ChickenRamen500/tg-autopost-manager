@@ -886,3 +886,47 @@ def test_db_migration_adds_time_columns(tmp_path):
             assert col in cols, f"Нет колонки {col} в queues: {cols}"
 
     run_with_db(tmp_path, body)
+
+
+def test_archive_tags_sanitize_minus():
+    """Теги архива: минус убирается из chat_id (#from_100..., не #from_-100...)."""
+    from app.services.archive import _build_tags, _sanitize_tag_id
+
+    # chat_id с минусом
+    assert _sanitize_tag_id(-1002435408188) == "1002435408188"
+    assert _sanitize_tag_id("-1002435408188") == "1002435408188"
+    assert _sanitize_tag_id(None) == ""
+
+    # Полные теги
+    post = {
+        "source_type": "telegram_channel",
+        "source_id": "-1002435408188",
+    }
+    tags = _build_tags(post, target_channel_id=-1001258194124, all_types=["photo"])
+    assert "#from_1002435408188" in tags, f"Тег from сломан: {tags}"
+    assert "#to_1001258194124" in tags, f"Тег to сломан: {tags}"
+    assert "#pic" in tags, f"Тег pic без #: {tags}"
+    assert "#from_-" not in tags, f"Минус не убран: {tags}"
+
+
+def test_archive_tags_dm_source():
+    """Теги архива: источник ЛС → #from_dm."""
+    from app.services.archive import _build_tags
+
+    post = {"source_type": "telegram_direct", "source_id": "479924833"}
+    tags = _build_tags(post, target_channel_id=-1002257882757, all_types=["photo", "video"])
+    assert "#from_dm" in tags
+    assert "#to_1002257882757" in tags
+    assert "#pic" in tags
+    assert "#vid" in tags
+
+
+def test_archive_tags_no_minus_in_hashtags():
+    """Все хэштеги не содержат минус (Telegram ломает #-...)."""
+    from app.services.archive import _build_tags
+
+    post = {"source_type": "telegram_channel", "source_id": "-1001686639428"}
+    tags = _build_tags(post, target_channel_id=-1002257882757, all_types=["photo"])
+    for tag in tags.split():
+        assert not tag.startswith("#-"), f"Хэштег с минусом: {tag}"
+        assert tag.startswith("#"), f"Тег без #: {tag}"

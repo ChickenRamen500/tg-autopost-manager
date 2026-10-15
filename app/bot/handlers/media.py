@@ -229,7 +229,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
             msg = f"📥 Пост #{post_id} → Входящие. Куда отправить?"
             if is_album:
                 msg += " (альбом — каждый файл отдельным постом)"
-            await message.answer(msg, reply_markup=pick_kb)
+            await message.answer(msg, reply_markup=pick_kb, reply_to_message_id=message.message_id)
         else:
             # Для пересылок из каналов (telegram_channel) — правило не найдено,
             # просто информируем (правила создаются через UI маршрутизации)
@@ -238,7 +238,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
                 msg += " (альбом)"
             else:
                 msg += "\nПравило маршрутизации не найдено. /menu → 🔀 Маршрутизация"
-            await message.answer(msg)
+            await message.answer(msg, reply_to_message_id=message.message_id)
     else:
         from app.repositories import queues as queues_repo
 
@@ -246,7 +246,8 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         qname = queue["name"] if queue else f"#{queue_id}"
         pending_count = await queues_repo.count_pending(queue_id)
         await message.answer(
-            f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})"
+            f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
+            reply_to_message_id=message.message_id,
         )
     logger.info("Принят пост #%s: type=%s source=%s queue=%s album=%s", post_id, media["file_type"], source["source_type"], queue_id, is_album)
 
