@@ -9,12 +9,20 @@
 """
 from __future__ import annotations
 
+import html
 import logging
+import time
 
 from app.config.settings import settings
 from app.repositories import app_settings as app_settings_repo
 
 log = logging.getLogger("notifications")
+
+# Throttle: не отправлять уведомление чаще чем раз в N минут для одной очереди
+_NOTIFY_THROTTLE_SEC = 300  # 5 минут
+# Раздельные dict для almost_empty и finished (code review Regression #5)
+_last_almost_empty: dict[int, float] = {}  # queue_id → monotonic timestamp
+_last_finished: set[int] = set()  # queue_id → one-shot (пока очередь не пополнится)
 
 
 async def notify_admin(text: str) -> None:
@@ -45,15 +53,6 @@ async def notify_admin(text: str) -> None:
             log.warning("Не удалось продублировать уведомление в служебный канал: %s", e)
 
 
-import time
-
-# Throttle: не отправлять уведомление чаще чем раз в N минут для одной очереди
-_NOTIFY_THROTTLE_SEC = 300  # 5 минут
-# Раздельные dict для almost_empty и finished (code review Regression #5)
-_last_almost_empty: dict[int, float] = {}  # queue_id → monotonic timestamp
-_last_finished: set[int] = set()  # queue_id → one-shot (пока очередь не пополнится)
-
-
 async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name: str, remaining: int) -> None:
     """«Скоро закончится» — pending постов ≤ threshold.
 
@@ -71,7 +70,7 @@ async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name
 
     text = (
         f"⏰ <b>Очередь скоро закончится</b>\n"
-        f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}»\n"
+        f"Очередь #{queue_id} «{html.escape(queue_name)}» в канале «{html.escape(channel_name)}»\n"
         f"Осталось постов: {remaining}"
     )
     await notify_admin(text)
@@ -90,7 +89,7 @@ async def notify_queue_finished(queue_id: int, queue_name: str, channel_name: st
 
     text = (
         f"✅ <b>Очередь закончилась</b>\n"
-        f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}» — все посты отправлены."
+        f"Очередь #{queue_id} «{html.escape(queue_name)}» в канале «{html.escape(channel_name)}» — все посты отправлены."
     )
     await notify_admin(text)
 
@@ -104,7 +103,7 @@ async def notify_send_error(queue_id: int, queue_name: str, post_id: int, error:
     """Ошибка отправки поста (failed после max_attempts)."""
     text = (
         f"❌ <b>Ошибка отправки поста</b>\n"
-        f"Очередь #{queue_id} «{queue_name}», пост #{post_id}\n"
-        f"Ошибка: {error[:200]}"
+        f"Очередь #{queue_id} «{html.escape(queue_name)}», пост #{post_id}\n"
+        f"Ошибка: {html.escape(error[:200])}"
     )
     await notify_admin(text)

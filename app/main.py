@@ -116,7 +116,7 @@ async def lifespan(_app: FastAPI):
 
     # 4. Кеш Gelbooru + фоновая очистка (ТЗ §10.1)
     cache.init_cache()
-    _cache_cleanup_task = await cache.start_cleanup_task()
+    _cache_cleanup_task = cache.start_cleanup_task()
 
     # 5. Планировщик (ТЗ §2.5)
     await setup_scheduler_async()

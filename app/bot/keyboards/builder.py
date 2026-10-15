@@ -180,6 +180,19 @@ def confirm_cancel() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def confirm_delete(kind: str, item_id: int) -> InlineKeyboardMarkup:
+    """Двухшаговое подтверждение удаления (пост/пользователь/правило).
+
+    kind: "post" | "user" | "rule" — определяет callback-префикс.
+    callback_data: confirm_del:<kind>:<id> / cancel_del
+    """
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Подтвердить удаление", callback_data=f"confirm_del:{kind}:{item_id}")
+    kb.button(text="🔙 Отмена", callback_data="cancel_del")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def user_actions(user_id: int, is_self: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if not is_self:

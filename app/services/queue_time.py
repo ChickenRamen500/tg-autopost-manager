@@ -10,6 +10,7 @@ start_at/end_at хранятся в UTC, daily_window — в локальном 
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
@@ -18,6 +19,10 @@ from app.config.settings import settings
 from app.repositories import posts as posts_repo
 
 log = logging.getLogger("queue_time")
+
+# Кешируем ZoneInfo, чтобы не пересоздавать на каждый вызов (zoneinfo — тяжёлая инициализация)
+_TZ: ZoneInfo | None = None
+_TZ_LOCK = asyncio.Lock()
 
 
 def _parse_iso_utc(s: str | None) -> datetime | None:
@@ -53,8 +58,14 @@ def _now_utc() -> datetime:
 
 
 def _now_local() -> datetime:
-    """Текущее время в локальном TZ (для daily_window)."""
-    return datetime.now(ZoneInfo(settings.timezone))
+    """Текущее время в локальном TZ (для daily_window).
+
+    ZoneInfo кешируется на уровне модуля (первый вызов создаёт, последующие переиспользуют).
+    """
+    global _TZ
+    if _TZ is None:
+        _TZ = ZoneInfo(settings.timezone)
+    return datetime.now(_TZ)
 
 
 def is_in_time_window(queue: dict) -> bool:
@@ -70,7 +81,7 @@ def is_in_time_window(queue: dict) -> bool:
 
     start_at = _parse_iso_utc(queue.get("start_at"))
     if start_at is not None and now < start_at:
-        log.debug("Очередь #%s: ещё не началась (start_at=%s, now=%s)", queue["id"], start_at, now)
+        log.debug("Очередь #%s: ещё не началась (start_at=%s, now=%s)", queue.get("id", "?"), start_at, now)
         return False
 
     end_at = _parse_iso_utc(queue.get("end_at"))
@@ -79,12 +90,12 @@ def is_in_time_window(queue: dict) -> bool:
         strategy = queue.get("end_strategy", "continue_next_day")
         if strategy == "continue_after_end":
             # Игнорируем end_at — продолжаем по интервалу
-            log.debug("Очередь #%s: end_at прошёл, но strategy=continue_after_end — продолжаем", queue["id"])
+            log.debug("Очередь #%s: end_at прошёл, но strategy=continue_after_end — продолжаем", queue.get("id", "?"))
             # Дальше проверим daily_window
         else:
             # continue_next_day / move_to_inbox / delete — не отправляем сейчас,
             # обработка стратегии в handle_end_strategy (вызывает отправителя)
-            log.debug("Очередь #%s: end_at прошёл, strategy=%s — не в окне", queue["id"], strategy)
+            log.debug("Очередь #%s: end_at прошёл, strategy=%s — не в окне", queue.get("id", "?"), strategy)
             return False
 
     # daily_window — ежедневное окно в локальном времени.
@@ -92,18 +103,18 @@ def is_in_time_window(queue: dict) -> bool:
     ws = _parse_hhmm(queue.get("daily_window_start"))
     we = _parse_hhmm(queue.get("daily_window_end"))
     if (ws is None) != (we is None):  # ровно один задан — warning
-        log.warning("Очередь #%s: daily_window задан частично (start=%s, end=%s) — игнорирую окно", queue["id"], ws, we)
+        log.warning("Очередь #%s: daily_window задан частично (start=%s, end=%s) — игнорирую окно", queue.get("id", "?"), ws, we)
     elif ws is not None and we is not None:
         local_now = _now_local().time()
         if ws <= we:
             # Обычное окно: 06:00..22:00
             if not (ws <= local_now < we):
-                log.debug("Очередь #%s: вне daily_window (%s < %s < %s)", queue["id"], ws, local_now, we)
+                log.debug("Очередь #%s: вне daily_window (%s < %s < %s)", queue.get("id", "?"), ws, local_now, we)
                 return False
         else:
             # Окно через полночь: 22:00..06:00
             if not (local_now >= ws or local_now < we):
-                log.debug("Очередь #%s: вне daily_window (ночь)", queue["id"])
+                log.debug("Очередь #%s: вне daily_window (ночь)", queue.get("id", "?"))
                 return False
 
     return True
@@ -123,7 +134,7 @@ async def handle_end_strategy(queue: dict) -> bool:
     - delete: удалить все pending посты очереди
     """
     strategy = queue.get("end_strategy", "continue_next_day")
-    queue_id = queue["id"]
+    queue_id = queue.get("id", "?")
 
     if strategy == "continue_next_day":
         # Просто ждём — ничего не делаем с постами

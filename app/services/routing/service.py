@@ -12,12 +12,19 @@
 """
 from __future__ import annotations
 
+import functools
 import logging
 import re
 
 from app.repositories import routing as routing_repo
 
 log = logging.getLogger("routing")
+
+
+@functools.lru_cache(maxsize=256)
+def _compile_pattern(pattern: str, flags: int) -> re.Pattern:
+    """Компилирует и кеширует regex-паттерн (защита от повторной компиляции в hot path)."""
+    return re.compile(pattern, flags)
 
 
 def _matches(pattern: str, value: str | None) -> bool:
@@ -28,15 +35,21 @@ def _matches(pattern: str, value: str | None) -> bool:
     - Паттерн, выглядящий как regex (содержит спецсимволы . * + ? [ ] ( ) | ^ $ \\ { })
       → трактуется как regex (full match)
     - Иначе → точное совпадение строк
+
+    Защита от ReDoS: ограничиваем длину значения (паттерны из репозитория могут быть
+    скомпрометированы и вызвать катастрофический backtracking).
     """
     if not pattern:
         return False
     if value is None:
         return False
+    if len(value) > 500:  # защита от ReDoS — слишком длинное значение не матчим
+        return False
 
     if _looks_like_regex(pattern):
         try:
-            return re.fullmatch(pattern, value, flags=re.IGNORECASE | re.DOTALL) is not None
+            flags = re.IGNORECASE | re.DOTALL
+            return _compile_pattern(pattern, flags).fullmatch(value) is not None
         except re.error as e:
             log.warning("Невалидный regex-паттерн %r: %s — трактуем как точное совпадение", pattern, e)
             return pattern == value
@@ -66,20 +79,21 @@ async def route_post(source_type: str, source_id: str | None, tags: list[str] | 
     rules = await routing_repo.list_rules(active_only=True)
     tag_str = " ".join(tags) if tags else ""
 
+    # Разделяем кандидаты для матчинга: для telegram-источников матчем source_id,
+    # для booru/прочих — только теги. Это исключает неоднозначность, когда для
+    # booru-поста числовой source_id случайно матчит правило, написанное для канала.
+    if source_type in ("telegram_channel", "telegram_user"):
+        candidates = [str(source_id)] if source_id else []
+    else:
+        candidates = [tag_str] if tag_str else []
+
     for rule in rules:
         rtype = rule["source_type"]
         if rtype != "any" and rtype != source_type:
             continue
 
-        # Паттерн может матчиться по source_id либо по тегам (для booru-источников)
-        candidates = []
-        if source_id is not None:
-            candidates.append(str(source_id))
-        if tag_str:
-            candidates.append(tag_str)
         # Для booru часто source_id — числовой id поста, а правило — по тегам:
         # проверяем паттерн против каждой строки-кандидата
-
         matched = any(_matches(rule["source_pattern"], c) for c in candidates) if candidates else False
 
         if matched:

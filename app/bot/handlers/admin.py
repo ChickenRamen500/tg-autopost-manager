@@ -7,6 +7,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -67,8 +68,8 @@ async def cmd_queue(message: Message, command: CommandObject, user: dict | None 
         return
     lines = [f"📦 Очередь #{qid} (последние {len(posts)} постов):"]
     for p in posts:
-        cap = (p.get("original_caption") or "")[:40]
-        lines.append(f"  #{p['id']} [{p['status']}] {p['file_type']} {cap}")
+        cap = html.escape((p.get("original_caption") or "")[:40])
+        lines.append(f"  #{p['id']} [{html.escape(p['status'])}] {html.escape(p['file_type'])} {cap}")
     await message.answer("\n".join(lines))
 
 
@@ -156,22 +157,28 @@ async def cmd_add_user(message: Message, command: CommandObject, user_role: str 
             await message.answer("❌ tg_id должен быть положительным числом (отрицательные/ноль не допускаются).")
             return
         username = args[2] if len(args) > 2 else None
+        if username and (len(username) > 32 or not re.match(r"^[a-zA-Z0-9_]+$", username)):
+            await message.answer("❌ Некорректный username (макс 32 символа, только латиница/цифры/_)")
+            return
         await users_repo.add_user(tg_id, username, role)
         await message.answer(
             f"✓ Пользователь tg_id={tg_id} добавлен ролью {role}"
-            + (f" (@{username})" if username else "")
+            + (f" (@{html.escape(username)})" if username else "")
             + ".\nПопроси его написать боту /start — после этого он сможет пользоваться ботом."
         )
         return
 
     # Способ 2: @username — нужен forward для определения tg_id
     username = identifier.lstrip("@")
+    if len(username) > 32 or not re.match(r"^[a-zA-Z0-9_]+$", username):
+        await message.answer("❌ Некорректный username (макс 32 символа, только латиница/цифры/_)")
+        return
     await message.answer(
-        f"Чтобы добавить @{username} ролью {role}, определи его tg_id:\n"
+        f"Чтобы добавить @{html.escape(username)} ролью {role}, определи его tg_id:\n"
         "1. Попроси пользователя написать @userinfobot — он ответит числовым ID.\n"
-        f"2. Затем: /add_user <его_ID> {role} {username}\n\n"
+        f"2. Затем: /add_user <его_ID> {role} {html.escape(username)}\n\n"
         "Либо перешли мне любое сообщение от этого пользователя и ответь на него:\n"
-        f"/set_role @{username} {role}"
+        f"/set_role @{html.escape(username)} {role}"
     )
 
 
@@ -219,7 +226,10 @@ async def cmd_set_role(message: Message, command: CommandObject, user_role: str 
         return
     final_username = username or (target_username.lstrip("@") if target_username else None)
     await users_repo.add_user(target_tg_id, final_username, role)
-    await message.answer(f"✓ Пользователь tg_id={target_tg_id} теперь {role}.")
+    await message.answer(
+        f"✓ Пользователь tg_id={target_tg_id} теперь {role}."
+        + (f" (@{html.escape(final_username)})" if final_username else "")
+    )
 
 
 @router.message(Command("remove_user"))
@@ -234,7 +244,7 @@ async def cmd_remove_user(message: Message, command: CommandObject, user_role: s
     username = args[0].lstrip("@")
     target = await users_repo.find_by_username(username)
     if not target:
-        await message.answer(f"Пользователь @{username} не найден.")
+        await message.answer(f"Пользователь @{html.escape(username)} не найден.")
         return
     if target["role"] == "admin" and target["tg_id"] == getattr(message.from_user, "id", 0):
         await message.answer("Нельзя удалить самого себя.")
@@ -244,7 +254,7 @@ async def cmd_remove_user(message: Message, command: CommandObject, user_role: s
     except Exception as e:  # noqa: BLE001 — FK constraint error
         await message.answer(f"⚠️ Не удалось удалить пользователя (есть подписки?): {e}")
         return
-    await message.answer(f"✓ @{username} удалён.")
+    await message.answer(f"✓ @{html.escape(username)} удалён.")
 
 
 @router.message(Command("list_users"))
@@ -259,7 +269,8 @@ async def cmd_list_users(message: Message, user_role: str | None = None) -> None
     lines = ["👥 <b>Пользователи</b>:"]
     for u in users:
         active = "✅" if u["is_active"] else "⏸"
-        lines.append(f"{active} @{u.get('username') or '—'} ({u['role']}, tg_id={u['tg_id']})")
+        uname = u.get("username") or "—"
+        lines.append(f"{active} @{html.escape(uname)} ({u['role']}, tg_id={u['tg_id']})")
     await message.answer("\n".join(lines))
 
 
@@ -278,7 +289,13 @@ async def cmd_add_channel(message: Message, command: CommandObject, user_role: s
         await message.answer("tg_chat_id должен быть числом (например, -1001234567890).")
         return
     name = args[1]
+    if len(name) > 128:
+        await message.answer("❌ Имя канала слишком длинное (макс 128 символов).")
+        return
     username = args[2].lstrip("@") if len(args) > 2 else None
+    if username and (len(username) > 32 or not re.match(r"^[a-zA-Z0-9_]+$", username)):
+        await message.answer("❌ Некорректный username (макс 32 символа, только латиница/цифры/_)")
+        return
 
     # Проверяем дубликат tg_chat_id ДО вставки (UNIQUE constraint, ТЗ §5.1 channels)
     existing = await channels_repo.get_channel_by_chat_id(tg_chat_id)
@@ -297,7 +314,7 @@ async def cmd_add_channel(message: Message, command: CommandObject, user_role: s
         # Race condition: канал создан между нашей проверкой и вставкой
         await message.answer(f"⚠️ Канал с tg_chat_id={tg_chat_id} уже существует (создан параллельно).")
         return
-    await message.answer(f"✓ Канал «{name}» добавлен (id={cid}, chat_id={tg_chat_id}).")
+    await message.answer(f"✓ Канал «{html.escape(name)}» добавлен (id={cid}, chat_id={tg_chat_id}).")
 
 
 @router.message(Command("list_channels"))
@@ -365,7 +382,7 @@ async def cmd_add_queue(message: Message, command: CommandObject, user_role: str
     from app.scheduler import reload_scheduler
     n = await reload_scheduler()
     await message.answer(
-        f"✓ Очередь «{name}» добавлена (id={qid}, каждые {interval} мин).\n"
+        f"✓ Очередь «{html.escape(name)}» добавлена (id={qid}, каждые {interval} мин).\n"
         f"✓ Планировщик перерегистрирован: активных очередей — {n}. Перезапуск не нужен."
     )
 
@@ -432,6 +449,9 @@ async def cmd_add_to_queue(message: Message, command: CommandObject, user_role: 
         return
     ok = await posts_repo.assign_queue(post_id, queue_id)
     if ok:
+        # Сбрасываем флаг «finished» — в очередь добавлен новый пост (CRITICAL C4)
+        from app.services import notifications
+        notifications.reset_finished(queue_id)
         # Если пост был в failed/duplicate — вернём в pending для публикации
         post = await posts_repo.get_post(post_id)
         if post and post["status"] in ("failed", "possible_duplicate", "duplicate"):
@@ -453,8 +473,8 @@ async def cmd_list_inbox(message: Message, user_role: str | None = None) -> None
         return
     lines = [f"📥 «Входящие» (последние {len(inbox)}):"]
     for p in inbox:
-        cap = (p.get("original_caption") or "")[:40]
-        lines.append(f"  #{p['id']} [{p['status']}] {p['file_type']} {cap}")
+        cap = html.escape((p.get("original_caption") or "")[:40])
+        lines.append(f"  #{p['id']} [{html.escape(p['status'])}] {html.escape(p['file_type'])} {cap}")
     lines.append("\nНазначить очередь: /add_to_queue <post_id> <queue_id>")
     await message.answer("\n".join(lines))
 
@@ -470,11 +490,11 @@ async def cmd_subscribe(message: Message, command: CommandObject, user: dict | N
         return
     site = args[0].lower()
     tags = args[1:]
-    if not user:
-        await message.answer("Пользователь не определён.")
-        return
     sid = await subs_repo.create_subscription(user["id"], site, tags)
-    await message.answer(f"✓ Подписка #{sid} на {site}: {', '.join(tags)} (проверка каждые 6 ч).\nАвтопарсинг — Фаза 3.")
+    await message.answer(
+        f"✓ Подписка #{sid} на {html.escape(site)}: {', '.join(html.escape(t) for t in tags)} "
+        f"(проверка каждые 6 ч).\nАвтопарсинг — Фаза 3."
+    )
 
 
 @router.message(Command("list_subscriptions"))
@@ -489,5 +509,5 @@ async def cmd_list_subscriptions(message: Message, user_role: str | None = None)
     lines = ["🔔 <b>Подписки</b>:"]
     for s in subs:
         tags = s.get("tags") if isinstance(s.get("tags"), list) else json.loads(s.get("tags") or "[]")
-        lines.append(f"#{s['id']} {s['site']}: {', '.join(tags)}")
+        lines.append(f"#{s['id']} {html.escape(s['site'])}: {', '.join(html.escape(t) for t in tags)}")
     await message.answer("\n".join(lines))

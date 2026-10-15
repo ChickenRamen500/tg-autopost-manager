@@ -89,6 +89,10 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
             await bot.send_video(chat_id=chat_id, video=tg_file_id, caption=caption)
         elif file_type == "gif":
             await bot.send_animation(chat_id=chat_id, animation=tg_file_id, caption=caption)
+        elif file_type == "audio":
+            await bot.send_audio(chat_id=chat_id, audio=tg_file_id, caption=caption)
+        elif file_type == "voice":
+            await bot.send_voice(chat_id=chat_id, voice=tg_file_id, caption=caption)
         else:
             await bot.send_document(chat_id=chat_id, document=tg_file_id, caption=caption)
         log.info("Пост #%s отправлен по file_id (type=%s)", post["id"], file_type)
@@ -109,6 +113,10 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
         await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
     elif file_type == "gif":
         await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
+    elif file_type == "audio":
+        await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
+    elif file_type == "voice":
+        await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
     else:
         await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
     log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
@@ -120,14 +128,14 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
     Все посты должны иметь одинаковый media_group_id и быть в одной очереди.
     Caption берётся из первого поста (Telegram показывает подпись только для первого).
     """
-    from aiogram.types import InputMediaDocument, InputMediaPhoto, InputMediaVideo
+    from aiogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo
 
     from app.bot.runtime import get_bot
 
     bot = get_bot()
     chat_id = channel["tg_chat_id"]
 
-    media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument] = []
+    media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio] = []
     for i, p in enumerate(posts):
         # Caption только для первого элемента альбома (ограничение Telegram)
         caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
@@ -140,6 +148,8 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
             media.append(InputMediaPhoto(media=fid, caption=caption))
         elif ft == "video":
             media.append(InputMediaVideo(media=fid, caption=caption))
+        elif ft == "audio":
+            media.append(InputMediaAudio(media=fid, caption=caption))
         else:
             media.append(InputMediaDocument(media=fid, caption=caption))
 
