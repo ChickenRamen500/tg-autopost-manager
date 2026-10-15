@@ -87,10 +87,13 @@ def is_in_time_window(queue: dict) -> bool:
             log.debug("Очередь #%s: end_at прошёл, strategy=%s — не в окне", queue["id"], strategy)
             return False
 
-    # daily_window — ежедневное окно в локальном времени
+    # daily_window — ежедневное окно в локальном времени.
+    # Если задан только один из start/end — warning и игнорируем окно (не падаем).
     ws = _parse_hhmm(queue.get("daily_window_start"))
     we = _parse_hhmm(queue.get("daily_window_end"))
-    if ws is not None and we is not None:
+    if (ws is None) != (we is None):  # ровно один задан — warning
+        log.warning("Очередь #%s: daily_window задан частично (start=%s, end=%s) — игнорирую окно", queue["id"], ws, we)
+    elif ws is not None and we is not None:
         local_now = _now_local().time()
         if ws <= we:
             # Обычное окно: 06:00..22:00

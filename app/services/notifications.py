@@ -45,11 +45,28 @@ async def notify_admin(text: str) -> None:
             log.warning("Не удалось продублировать уведомление в служебный канал: %s", e)
 
 
+import time
+
+# Throttle: не отправлять уведомление чаще чем раз в N минут для одной очереди
+_NOTIFY_THROTTLE_SEC = 300  # 5 минут
+_last_notify: dict[int, float] = {}  # queue_id → monotonic timestamp
+
+
 async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name: str, remaining: int) -> None:
-    """«Скоро закончится» — pending постов ≤ threshold."""
+    """«Скоро закончится» — pending постов ≤ threshold.
+
+    Throttle: не чаще раза в 5 минут для одной очереди (чтобы не спамить).
+    """
     threshold = await app_settings_repo.get_notify_threshold()
     if remaining > threshold:
         return
+    # Throttle
+    now = time.monotonic()
+    last = _last_notify.get(queue_id, 0.0)
+    if now - last < _NOTIFY_THROTTLE_SEC:
+        return  # уже отправляли недавно
+    _last_notify[queue_id] = now
+
     text = (
         f"⏰ **Очередь скоро закончится**\n"
         f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}»\n"
@@ -59,7 +76,16 @@ async def notify_queue_almost_empty(queue_id: int, queue_name: str, channel_name
 
 
 async def notify_queue_finished(queue_id: int, queue_name: str, channel_name: str) -> None:
-    """«Очередь закончилась» — последний пост отправлен."""
+    """«Очередь закончилась» — последний пост отправлен.
+
+    Throttle: отправляем только ОДИН раз (флаг в _last_notify).
+    """
+    now = time.monotonic()
+    # Если уже отправляли «finished» — не повторяем
+    if _last_notify.get(queue_id, 0.0) > 0 and now - _last_notify.get(queue_id, 0.0) < _NOTIFY_THROTTLE_SEC:
+        return
+    _last_notify[queue_id] = now
+
     text = (
         f"✅ **Очередь закончилась**\n"
         f"Очередь #{queue_id} «{queue_name}» в канале «{channel_name}» — все посты отправлены."

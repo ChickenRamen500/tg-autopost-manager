@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -96,7 +97,7 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
             return fh.read()
 
     data = await asyncio.to_thread(_read_bytes)
-    doc = BufferedInputFile(data, filename=file_path.rsplit("/", 1)[-1])
+    doc = BufferedInputFile(data, filename=os.path.basename(file_path))
     if file_type == "photo":
         await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
     elif file_type == "video":
@@ -108,7 +109,7 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
     log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
 
 
-async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]) -> None:
+async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any], queue: dict | None = None) -> None:
     """Отправляет альбом (несколько постов) одним сообщением через send_media_group (ТЗ §2.1.1).
 
     Все посты должны иметь одинаковый media_group_id и быть в одной очереди.
@@ -138,7 +139,7 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
             media.append(InputMediaDocument(media=fid, caption=caption))
 
     if len(media) == 1:
-        await _send_one_post(posts[0], channel)
+        await _send_one_post(posts[0], channel, queue)
         return
 
     await bot.send_media_group(chat_id=chat_id, media=media)
@@ -200,7 +201,7 @@ async def send_post_from_queue(queue_id: int) -> None:
             last_error: str | None = None
             for _attempt in range(1, max_attempts + 1):
                 try:
-                    await _send_album_group(album_posts, channel)
+                    await _send_album_group(album_posts, channel, queue)
                     _last_send[queue_id] = asyncio.get_event_loop().time()
                     # Помечаем все посты альбома как sent
                     for p in album_posts:
@@ -223,6 +224,9 @@ async def send_post_from_queue(queue_id: int) -> None:
                         for p in album_posts:
                             await posts_repo.mark_failed(p["id"], last_error)
                         log.error("Альбом %s переведён в failed после %d попыток", mgid, max_attempts)
+                        # Уведомление об ошибке (блок C) — для альбомов тоже
+                        from app.services.notifications import notify_send_error
+                        await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
                         return
                     await asyncio.sleep(2.0)
             _last_send[queue_id] = asyncio.get_event_loop().time()
@@ -273,7 +277,7 @@ async def _check_queue_notifications(queue: dict, channel: dict) -> None:
             notify_queue_finished,
         )
 
-        pending = await posts_repo.count_pending(queue["id"])
+        pending = await queues_repo.count_pending(queue["id"])
         channel_name = channel.get("name") or f"#{channel['id']}"
         if pending == 0:
             await notify_queue_finished(queue["id"], queue["name"], channel_name)

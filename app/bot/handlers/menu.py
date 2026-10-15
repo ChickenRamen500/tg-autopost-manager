@@ -74,7 +74,7 @@ class AddStates(StatesGroup):
 # Должны быть зарегистрированы ПЕРВЫМИ, иначе FSM-хендлеры их перехватят.
 # ===========================================================================
 
-@router.message(F.text == "/cancel")
+@router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext, user_role: str | None = None) -> None:
     """Отмена любого FSM-действия. Перехватывает /cancel В ЛЮБОМ состоянии."""
     current = await state.get_state()
@@ -379,6 +379,7 @@ async def cb_post(call: CallbackQuery) -> None:
         return
     queues = await queues_repo.list_queues(active_only=True)
     await _render_post_card(call, post, queues)
+    await call.answer()
 
 
 async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict]) -> None:

@@ -96,7 +96,7 @@ async def lifespan(_app: FastAPI):
 
     # 4. Кеш Gelbooru + фоновая очистка (ТЗ §10.1)
     cache.init_cache()
-    await cache.start_cleanup_task()
+    _cache_cleanup_task = await cache.start_cleanup_task()
 
     # 5. Планировщик (ТЗ §2.5)
     await setup_scheduler_async()
@@ -106,14 +106,12 @@ async def lifespan(_app: FastAPI):
 
     # 6. Bot polling (ТЗ §8)
     _bot_polling_task = asyncio.create_task(_bot_polling())
-    # Важно: без done_callback исключение в задаче тихо проглатывается.
-    # Логируем любой фатальный сбой polling, чтобы видеть причину молчания бота.
     _bot_polling_task.add_done_callback(_on_polling_done)
 
     try:
         yield
     finally:
-        # Shutdown
+        # Shutdown — закрываем ВСЕ ресурсы (code review HIGH #5)
         log.info("Остановка приложения…")
         if _bot_polling_task:
             _bot_polling_task.cancel()
@@ -122,6 +120,21 @@ async def lifespan(_app: FastAPI):
             except asyncio.CancelledError:
                 pass
         sched.shutdown(wait=False)
+        # Закрываем gelbooru client (aiohttp ClientSession)
+        try:
+            from app.services.parsers.gelbooru import gelbooru_client
+            await gelbooru_client.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("gelbooru_client.close: %s", e)
+        # Отменяем cache cleanup task
+        if _cache_cleanup_task and not _cache_cleanup_task.done():
+            _cache_cleanup_task.cancel()
+        # Закрываем bot (AiohttpSession)
+        try:
+            from app.bot import close_bot
+            await close_bot()
+        except Exception as e:  # noqa: BLE001
+            log.warning("close_bot: %s", e)
         await tags_db.close_tags_db()
         await close_db()
         log.info("Приложение остановлено")

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS queues (
     -- Блок B/C: настройки отправки (toggle в UI создания очереди)
     strip_caption      INTEGER NOT NULL DEFAULT 0,  -- удалять оригинальную подпись поста при отправке
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (channel_id) REFERENCES channels(id)
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 
 -- Посты в очередях (ТЗ §5.1 — обновлённая схема с поддержкой file_id и жизненного цикла)
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS posts (
     send_attempts      INTEGER NOT NULL DEFAULT 0,
     last_error         TEXT,
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (queue_id) REFERENCES queues(id)
+    FOREIGN KEY (queue_id) REFERENCES queues(id) ON DELETE CASCADE
 );
 
 -- Правила маршрутизации
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS routing_rules (
     priority        INTEGER NOT NULL DEFAULT 0,
     is_active        INTEGER NOT NULL DEFAULT 1,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (target_queue_id) REFERENCES queues(id)
+    FOREIGN KEY (target_queue_id) REFERENCES queues(id) ON DELETE CASCADE
 );
 
 -- Подписи для постов
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS duplicate_hashes (
     hash_value  TEXT NOT NULL,
     hash_type   TEXT NOT NULL CHECK(hash_type IN ('md5', 'phash')),
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (post_id) REFERENCES posts(id)
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );
 
 -- Подписки на теги (Gelbooru/Danbooru)
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS tag_subscriptions (
     last_checked_at      DATETIME,
     is_active            INTEGER NOT NULL DEFAULT 1,
     created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Очередь задач (task_queue) — персистентная очередь для worker'а (Фаза 3)
@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS task_queue (
                CHECK(status IN ('queued', 'in_progress', 'done', 'error')),
     error      TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (post_id) REFERENCES posts(id)
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );
 
 -- Настройки приложения (блок D — служебный канал, пороги уведомлений, и т.д.)
