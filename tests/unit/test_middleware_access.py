@@ -260,13 +260,16 @@ def test_event_without_from_user_passes_through(tmp_path):
     run_with_db(tmp_path, body)
 
 
-def test_start_at_botname_currently_blocks_guest(tmp_path):
-    """/start@my_bot — текущий middleware блокирует гостя (известная MEDIUM-проблема).
+def test_start_at_botname_is_allowed_after_fix(tmp_path):
+    """/start@botname — middleware ПРОПУСКАЕТ гостя (фикс CR-M-2 применён в PR #38/#40).
 
-    middleware проверяет `parts[0] in ("/start", "/help")`, где parts[0] после
-    text.split() — это "/start@my_test_bot" целиком. Это НЕ равно "/start",
-    поэтому гость блокируется. Тест документирует текущее поведение и фиксирует
-    регрессию (если кто-то исправит middleware, тест надо будет обновить).
+    До фикса: middleware проверял `parts[0] in ("/start", "/help")`, где parts[0]
+    после text.split() был "/start@my_test_bot" целиком. Это НЕ равно "/start",
+    поэтому гость блокировался. После фикса: parts[0].split("@")[0] извлекает
+    bare "/start" — гость проходит к handler (captured is not None).
+
+    Regression-тест: гарантирует что фикс /start@botname не откатится в будущем.
+    Если captured is None — фикс сломался, регрессия CR-M-2.
     """
     from conftest import run_with_db
 
@@ -280,13 +283,12 @@ def test_start_at_botname_currently_blocks_guest(tmp_path):
         with patch("app.bot.middleware.access.bootstrap_admin", new=AsyncMock()):
             captured = await _invoke_mw(msg)
 
-        assert captured is None, (
-            "Текущий middleware блокирует /start@botname (parts[0]='/start@my_test_bot' != '/start') "
-            "— это известная MEDIUM-проблема, зафиксированная в worklog."
+        assert captured is not None, (
+            "Middleware должен ПРОПУСКАТЬ /start@botname (фикс parts[0].split(@)[0] применён). "
+            "Если captured is None — фикс /start@botname откатился, регрессия CR-M-2."
         )
 
     run_with_db(tmp_path, body)
-
 
 def test_username_change_updates_db(tmp_path):
     """Смена @username существующим пользователем — обновляется в БД (upsert_user)."""
