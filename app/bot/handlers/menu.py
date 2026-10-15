@@ -74,14 +74,16 @@ class AddStates(StatesGroup):
 # Хелперы (code review M1: safe int parsing for callback data)
 # ===========================================================================
 
-def _safe_int(value: str, call: CallbackQuery | None = None, label: str = "ID") -> int | None:
-    """Безопасно парсит int из callback_data. При ошибке — call.answer + return None."""
+async def _safe_int(value: str, call: CallbackQuery | None = None, label: str = "ID") -> int | None:
+    """Безопасно парсит int из callback_data. При ошибке — call.answer + return None.
+
+    P2-14: async def (не sync с asyncio.ensure_future), ловит IndexError на bounds.
+    """
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, IndexError):
         if call:
-            import asyncio
-            asyncio.ensure_future(call.answer(f"Неверный {label}: {value}", show_alert=True))
+            await call.answer(f"Неверный {label}: {value}", show_alert=True)
         return None
 
 
@@ -165,7 +167,7 @@ async def cb_queues(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("menu:queue:"))
 async def cb_queue(call: CallbackQuery) -> None:
-    qid = _safe_int(call.data.split(":")[2], call, "queue_id")
+    qid = await _safe_int(call.data.split(":")[2], call, "queue_id")
     if qid is None:
         return
     posts = await posts_repo.list_queue_posts(qid, limit=15)
@@ -217,7 +219,7 @@ async def cb_create_rule_from_post(call: CallbackQuery, user_role: str | None = 
         await call.answer("Только admin", show_alert=True)
         return
     parts = call.data.split(":")
-    queue_id = _safe_int(parts[3], call, "queue_id")
+    queue_id = await _safe_int(parts[3], call, "queue_id")
     if queue_id is None:
         return
     source_id = ":".join(parts[4:])
@@ -232,12 +234,17 @@ async def cb_create_rule_from_post(call: CallbackQuery, user_role: str | None = 
         await call.answer("Правило уже существует", show_alert=True)
         return
 
-    rid = await routing_repo.create_rule(
-        source_type="telegram_channel",
-        source_pattern=source_id,
-        target_queue_id=queue_id,
-        priority=10,
-    )
+    # P2-27: try/except вокруг create_rule — не оставлять spinner при DB ошибке
+    try:
+        rid = await routing_repo.create_rule(
+            source_type="telegram_channel",
+            source_pattern=source_id,
+            target_queue_id=queue_id,
+            priority=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        await call.answer(f"⚠️ Ошибка создания правила: {e}", show_alert=True)
+        return
     await call.answer(f"✓ Правило #{rid} создано", show_alert=True)
     await call.message.edit_text(
         f"✓ Правило #{rid} создано!\n"
@@ -251,14 +258,14 @@ async def cb_create_rule_from_post(call: CallbackQuery, user_role: str | None = 
 @router.callback_query(F.data.startswith("menu:post:"))
 async def cb_post(call: CallbackQuery) -> None:
     parts = call.data.split(":")
-    post_id = _safe_int(parts[2], call, "post_id")
+    post_id = await _safe_int(parts[2], call, "post_id")
     if post_id is None:
         return
     action = parts[3] if len(parts) > 3 else None
 
     # Интерактивный выбор очереди (блок A): выбор канала → показ очередей канала
     if action == "pickch":
-        channel_id = _safe_int(parts[4], call, "channel_id")
+        channel_id = await _safe_int(parts[4], call, "channel_id")
         if channel_id is None:
             return
         # Проверяем, что пост ещё существует и во Входящих
@@ -306,7 +313,7 @@ async def cb_post(call: CallbackQuery) -> None:
         return
 
     if action == "toq":
-        queue_id = _safe_int(parts[4], call, "queue_id")
+        queue_id = await _safe_int(parts[4], call, "queue_id")
         if queue_id is None:
             return
         post = await posts_repo.get_post(post_id)
@@ -449,7 +456,7 @@ async def cb_channel_info(call: CallbackQuery, state: FSMContext) -> None:
 
     Также обрабатывает выбор канала при создании очереди (если в состоянии add_queue_pick_channel).
     """
-    ch_id = _safe_int(call.data.split(":")[2], call, "channel_id")
+    ch_id = await _safe_int(call.data.split(":")[2], call, "channel_id")
     if ch_id is None:
         return
 
@@ -520,6 +527,13 @@ async def add_channel_flow(message: Message, state: FSMContext, user_role: str |
             tg_chat_id = int(text)
         except ValueError:
             await message.answer("Нужно число вида -1002257882757. Попробуй ещё раз или /cancel")
+            return
+        # P2-22: валидация -100 prefix (Telegram channel/supergroup chat_id)
+        if not str(tg_chat_id).startswith("-100"):
+            await message.answer(
+                "⚠️ chat_id канала должен начинаться с -100 (например -1002257882757).\n"
+                "Проверь ID (узнать у @userinfobot). Попробуй ещё раз или /cancel"
+            )
             return
         await state.update_data(tg_chat_id=tg_chat_id, step="name")
         await message.answer("Шаг 2/3: Пришли название канала (например: МойКанал)", reply_markup=kb.confirm_cancel())
@@ -597,10 +611,10 @@ async def cb_add_queue_for_channel(call: CallbackQuery, state: FSMContext, user_
         await call.answer("Только admin", show_alert=True)
         return
     parts = call.data.split(":")
-    channel_id = _safe_int(parts[2], call, "channel_id")
+    channel_id = await _safe_int(parts[2], call, "channel_id")
     if channel_id is None:
         return
-    post_id = _safe_int(parts[3], call, "post_id")
+    post_id = await _safe_int(parts[3], call, "post_id")
     if post_id is None:
         return
     # Проверяем канал
@@ -724,8 +738,13 @@ async def add_queue_daily_window(message: Message, state: FSMContext) -> None:
                 reply_markup=kb.confirm_cancel(),
             )
             return
-        ws = f"{int(m.group(1)):02d}:{m.group(2)}"
-        we = f"{int(m.group(3)):02d}:{m.group(4)}"
+        # P2-23: валидация диапазонов часов 0-23 и минут 0-59
+        h1, mi1, h2, mi2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        if not (0 <= h1 <= 23 and 0 <= mi1 <= 59 and 0 <= h2 <= 23 and 0 <= mi2 <= 59):
+            await message.answer("⚠️ Часы 0-23, минуты 0-59. Попробуй ещё раз или /cancel")
+            return
+        ws = f"{h1:02d}:{mi1:02d}"
+        we = f"{h2:02d}:{mi2:02d}"
         await state.update_data(daily_window_start=ws, daily_window_end=we)
     # Дефолты для toggle-экрана (шаг 6/6)
     await state.update_data(
@@ -829,6 +848,10 @@ async def add_queue_signature(message: Message, state: FSMContext) -> None:
     if text == "-":
         await state.update_data(signature_template=None)
     else:
+        # P2-24: лимит 800 символов (оставляем запас для caption, Telegram limit 1024)
+        if len(text) > 800:
+            await message.answer("⚠️ Подпись слишком длинная (макс 800 символов). Сократи или /cancel")
+            return
         await state.update_data(signature_template=text)
     await state.set_state(AddStates.add_queue_end_strategy)
     await _render_queue_settings(message, state)
@@ -837,9 +860,16 @@ async def add_queue_signature(message: Message, state: FSMContext) -> None:
 async def _create_queue_from_state(call_or_msg: Message | CallbackQuery, state: FSMContext) -> None:
     """Финальное создание очереди из FSM-данных."""
     data = await state.get_data()
-    ch_id = data["channel_id"]
-    name = data["name"]
-    interval = data["interval"]
+    # P2-26: .get() вместо [] для защиты от corrupted state
+    ch_id = data.get("channel_id")
+    name = data.get("name")
+    interval = data.get("interval")
+    if ch_id is None or name is None or interval is None:
+        # Corrupted FSM state — не крашим, а показываем ошибку
+        answer_fn = getattr(call_or_msg, "answer", None) or call_or_msg.message.answer
+        await answer_fn("⚠️ Ошибка: данные очереди утеряны. Начни заново: /menu → ➕ Добавить → 📋 Очередь")
+        await state.clear()
+        return
     group_albums = data.get("group_albums", False)
     strip_caption = data.get("strip_caption", False)
     shuffle = data.get("shuffle_enabled", True)
@@ -1006,7 +1036,7 @@ async def add_rule_pattern(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(AddStates.add_rule_pick_queue, F.data.startswith("menu:rule:queue:"))
 async def add_rule_pick_queue(call: CallbackQuery, state: FSMContext) -> None:
-    qid = _safe_int(call.data.split(":")[3], call, "queue_id")
+    qid = await _safe_int(call.data.split(":")[3], call, "queue_id")
     if qid is None:
         return
     await state.update_data(target_queue_id=qid)
@@ -1053,7 +1083,7 @@ async def cb_rule_actions(call: CallbackQuery, user_role: str | None = None) -> 
         await call.answer("Только admin", show_alert=True)
         return
     parts = call.data.split(":")
-    rid = _safe_int(parts[2], call, "rule_id")
+    rid = await _safe_int(parts[2], call, "rule_id")
     if rid is None:
         return
     action = parts[3] if len(parts) > 3 else None
@@ -1174,7 +1204,7 @@ async def cb_user_actions(call: CallbackQuery, user_role: str | None = None) -> 
         await call.answer("Только admin", show_alert=True)
         return
     parts = call.data.split(":")
-    uid = _safe_int(parts[2], call, "user_id")
+    uid = await _safe_int(parts[2], call, "user_id")
     if uid is None:
         return
     if len(parts) > 3:

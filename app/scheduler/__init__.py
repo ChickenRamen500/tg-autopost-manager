@@ -42,7 +42,14 @@ _last_send: dict[int, float] = {}
 def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
-        _scheduler = AsyncIOScheduler(timezone="UTC")
+        _scheduler = AsyncIOScheduler(
+            timezone="UTC",
+            job_defaults={
+                "misfire_grace_time": 300,  # P1-5: 5 минут вместо дефолт 1 сек
+                "coalesce": True,
+                "max_instances": 1,
+            },
+        )
     return _scheduler
 
 
@@ -65,6 +72,9 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
         sig = queue.get("signature_template")
         if sig:
             caption = f"{sig}\n{caption}" if caption else sig
+    # P2-13: Telegram limit caption 1024 chars
+    if caption and len(caption) > 1024:
+        caption = caption[:1021] + "..."
 
     file_type = post["file_type"]
     tg_file_id = post.get("tg_file_id")
@@ -89,15 +99,10 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
         raise RuntimeError(
             f"Пост #{post['id']}: нет ни tg_file_id, ни file_path — отправить невозможно"
         )
-    # Чтение файла в потоке, чтобы не блокировать event loop (ТЗ §3.1: слабое железо)
-    from aiogram.types import BufferedInputFile
+    # P2-11: FSInputFile (streaming, не грузит файл в RAM) вместо BufferedInputFile (OOM на 2GB)
+    from aiogram.types import FSInputFile
 
-    def _read_bytes() -> bytes:
-        with open(file_path, "rb") as fh:  # выполняется в потоке через to_thread
-            return fh.read()
-
-    data = await asyncio.to_thread(_read_bytes)
-    doc = BufferedInputFile(data, filename=os.path.basename(file_path))
+    doc = FSInputFile(file_path, filename=os.path.basename(file_path))
     if file_type == "photo":
         await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
     elif file_type == "video":
@@ -203,10 +208,10 @@ async def send_post_from_queue(queue_id: int) -> None:
                 try:
                     await _send_album_group(album_posts, channel, queue)
                     _last_send[queue_id] = asyncio.get_event_loop().time()
-                    # Помечаем все посты альбома как sent
-                    for p in album_posts:
-                        await posts_repo.mark_sent(p["id"])
-                        sent_ids.append(p["id"])
+                    # Атомарно помечаем ВСЕ посты альбома как sent (P1-9: одна транзакция)
+                    post_ids = [p["id"] for p in album_posts]
+                    await posts_repo.bulk_mark_sent(post_ids)
+                    sent_ids = post_ids
                     log.info("Альбом отправлен: посты %s", sent_ids)
                     return
                 except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
@@ -245,12 +250,27 @@ async def send_post_from_queue(queue_id: int) -> None:
             return
         except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
             last_error = str(e)
-            attempts_done = await posts_repo.increment_attempt(post["id"])
+            # P2-6: permanent-error classification (ТЗ §2.5.2 п.5)
+            # Forbidden (bot kicked/blocked) и BadRequest (chat not found, entity_too_large)
+            # — НЕ retry, сразу mark_failed
+            error_str = str(e).lower()
+            is_permanent = any(keyword in error_str for keyword in [
+                "forbidden", "chat not found", "chat_id_invalid",
+                "entity_too_large", "bot was blocked", "not enough rights",
+            ])
+            if is_permanent:
+                await posts_repo.mark_failed(post["id"], last_error)
+                log.error("Пост #%s: permanent error → failed без retry: %s", post["id"], last_error)
+                from app.services.notifications import notify_send_error
+                await notify_send_error(queue_id, queue["name"], post["id"], last_error)
+                return
+            # 429 Too Many Requests — retry_after
             retry_after = getattr(e, "retry_after", None)
             if retry_after:
                 log.warning("429 rate limit на пост #%s: ждём %s сек", post["id"], retry_after)
                 await asyncio.sleep(float(retry_after))
                 continue
+            attempts_done = await posts_repo.increment_attempt(post["id"])
             log.warning("Ошибка отправки поста #%s (попытка %d/%d): %s", post["id"], attempts_done, max_attempts, e)
             if attempts_done >= max_attempts:
                 await posts_repo.mark_failed(post["id"], last_error)
