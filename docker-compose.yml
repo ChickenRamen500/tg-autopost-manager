@@ -1,7 +1,13 @@
 services:
   # Local Bot API Server (снимает лимиты 50 МБ upload / 20 МБ download) — ТЗ §3.2
   local-bot-api:
-    image: aiogram/telegram-bot-api:latest
+    # Билдим из docker/local-bot-api.Dockerfile — добавляем curl поверх
+    # официального aiogram/telegram-bot-api:latest (там нет curl, healthcheck
+    # падал с `command not found` exit 127 → контейнер unhealthy).
+    build:
+      context: .
+      dockerfile: docker/local-bot-api.Dockerfile
+    image: tg-autopost-manager/local-bot-api:latest   # локальное имя для кеша docker
     container_name: tg-lba          # короткое имя для `docker logs tg-lba` (гайд PHASE1_GUIDE.md)
     restart: always
     environment:
@@ -27,8 +33,17 @@ services:
     healthcheck:
       # Корневой GET возвращает HTTP 403 (сервер жив, просто отказал в доступе к `/`).
       # /getMe без токена не отвечает и подвешивает коннект — старый тест вешал healthcheck.
-      # Если telegram-bot-api стартует БЕЗ --local (например, из-за пустых TELEGRAM_API_ID/HASH),
-      # он не открывает 8081 → curl exit code 7 (Connection refused) ≠ 22 → unhealthy.
+      #
+      # curl exit codes (важные):
+      #   0  — HTTP 2xx (success)
+      #   22 — HTTP 4xx/5xx (сервер ответил, но с ошибкой) → для нас ЗДОРОВ
+      #   7  — Connection refused → НЕ здоров (порт не открыт)
+      #   28 — Timeout → НЕ здоров
+      #   127 — `command not found` → curl не установлен в образе (была причина unhealthy)
+      #
+      # Базовый образ aiogram/telegram-bot-api:latest НЕ содержит curl — поэтому
+      # раньше healthcheck падал с 127. Теперь мы билдим из docker/local-bot-api.Dockerfile
+      # который добавляет curl поверх официального образа.
       test: ["CMD-SHELL", "curl -fs http://localhost:8081/ || [ $$? -eq 22 ] || exit 1"]
       interval: 30s
       timeout: 5s
