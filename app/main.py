@@ -9,17 +9,20 @@ FastAPI lifespan:
  6. bot polling — приём медиа из ЛС (ТЗ §2.1.1)
 
 Endpoints:
- - /health             — статус приложения + проблемы конфигурации
- - /health/bot-api     — getMe через Local Bot API Server (ТЗ §3.3)
- - /health/scheduler   — список активных job'ов очередей (Фаза 2)
+ - /health             — liveness без auth (для Docker HEALTHCHECK / load balancer);
+                          возвращает только {"status":"ok"}, без раскрытия конфигурации.
+ - /health/bot-api     — getMe через Local Bot API Server (ТЗ §3.3), auth: X-Secret-Token.
+ - /health/scheduler   — список активных job'ов очередей (Фаза 2), auth: X-Secret-Token.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+import traceback
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from app.bot import get_bot, get_dispatcher
 from app.config.settings import settings
@@ -28,7 +31,9 @@ from app.scheduler import get_scheduler, setup_scheduler_async
 from app.services.parsers.gelbooru import cache, tags_db
 from app.utils.local_bot_api import get_me
 
-logging.basicConfig(level=logging.INFO)
+# НЕ используем logging.basicConfig — он перетирает handlers uvicorn/gunicorn.
+# Только поднимаем уровень корневого логгера, оставляя handlers изо всех мест.
+logging.getLogger().setLevel(logging.INFO)
 log = logging.getLogger("main")
 
 _bot_polling_task: asyncio.Task | None = None
@@ -42,8 +47,6 @@ def _on_polling_done(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc is not None:
         log.error("Bot polling задача упала с необработанным исключением: %r", exc)
-        # traceback
-        import traceback
         log.error("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
 
 
@@ -95,6 +98,12 @@ async def lifespan(_app: FastAPI):
     global _bot_polling_task
     log.info("Запуск приложения (Фаза 2)…")
 
+    if not settings.secret_token:
+        log.warning(
+            "SECRET_TOKEN не задан — /health/bot-api и /health/scheduler открыты без auth. "
+            "В production обязательно задайте SECRET_TOKEN (см. .env.example)."
+        )
+
     # 1. БД (ТЗ §5)
     await init_db()
 
@@ -122,7 +131,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        # Shutdown — закрываем ВСЕ ресурсы (code review HIGH #5)
+        # Shutdown — закрываем ВСЕ ресурсы (code review CRITICAL #1)
         log.info("Остановка приложения…")
         if _bot_polling_task:
             _bot_polling_task.cancel()
@@ -130,7 +139,25 @@ async def lifespan(_app: FastAPI):
                 await _bot_polling_task
             except asyncio.CancelledError:
                 pass
-        sched.shutdown(wait=False)
+        # CRITICAL: sched.shutdown(wait=True) даёт running jobs корректно завершиться,
+        # но bounded timeout 30с — иначе зависший job блокирует close_db и контейнер
+        # падает по SIGKILL с потерей данных.
+        #
+        # AsyncIOScheduler.shutdown(wait=True) — СИНХРОННЫЙ блокирующий вызов
+        # (APScheduler 3.x не возвращает coroutine). В async-контексте заворачиваем
+        # его в run_in_executor, чтобы не заморозить event loop, и ограничиваем 30с.
+        try:
+            loop = asyncio.get_event_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: sched.shutdown(wait=True)),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "APScheduler shutdown превысил 30с — принудительно завершаем (running jobs могут потерять состояние)"
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("APScheduler shutdown завершился с ошибкой: %s", e)
         # Закрываем gelbooru client (aiohttp ClientSession)
         try:
             from app.services.parsers.gelbooru import gelbooru_client
@@ -158,25 +185,31 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="TG Media Queue Bot", version="0.2.0-phase2", lifespan=lifespan)
 
 
-# P2-29: Простая авторизация для /health* endpoints через SECRET_TOKEN
-from fastapi import Depends, Header, HTTPException
-
-
+# P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.
+# Используем secrets.compare_digest — постоянное по времени сравнение,
+# чтобы исключить timing-атаку на SECRET_TOKEN (code review HIGH #1).
 async def verify_token(x_secret_token: str | None = Header(None)) -> None:
-    """Проверяет SECRET_TOKEN в заголовке X-Secret-Token для /health* endpoints."""
-    if settings.secret_token and x_secret_token != settings.secret_token:
-        raise HTTPException(status_code=403, detail="Forbidden: invalid or missing X-Secret-Token")
+    """Проверяет SECRET_TOKEN в заголовке X-Secret-Token.
+
+    - Если SECRET_TOKEN не задан в конфигурации — endpoint открыт (для локальной разработки).
+    - Если задан и не совпал — 401 Unauthorized (семантически правильно для auth: 403
+      подразумевает аутентифицированного пользователя без прав, здесь же токен именно
+      credential).
+    """
+    if settings.secret_token:
+        if not x_secret_token or not secrets.compare_digest(x_secret_token, settings.secret_token):
+            raise HTTPException(status_code=401, detail="Unauthorized: invalid or missing X-Secret-Token")
 
 
 @app.get("/health")
-async def health(_token: None = Depends(verify_token)) -> dict:
-    """Живость приложения + состояние конфигурации."""
-    return {
-        "status": "ok",
-        "phase": 2,
-        "bot_api_url": settings.bot_api_url,
-        "config_problems": settings.validate(),
-    }
+async def health() -> dict:
+    """Liveness probe БЕЗ auth — для Docker HEALTHCHECK и load balancer.
+
+    Не раскрывает конфигурацию (bot_api_url, config_problems) — этого достаточно,
+    чтобы сказать «контейнер жив», и не более. Подробности — в /health/bot-api
+    и /health/scheduler (за X-Secret-Token).
+    """
+    return {"status": "ok"}
 
 
 @app.get("/health/bot-api")

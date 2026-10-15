@@ -16,7 +16,12 @@ services:
     volumes:
       - bot-api-data:/var/lib/telegram-bot-api
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"   # только localhost: local-bot-api не имеет auth, не выставлять наружу
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       # корневой GET возвращает HTTP 403 (сервер жив); /getMe без токена не отвечает
       # и подвешивает коннект — старый тест вешал docker healthcheck и запросы из контейнера
@@ -35,25 +40,22 @@ services:
     depends_on:
       local-bot-api:
         condition: service_healthy
-    environment:
-      - BOT_API_URL=http://local-bot-api:8081
-      - BOT_TOKEN=${BOT_TOKEN}
-      - SECRET_TOKEN=${SECRET_TOKEN}
-      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
-      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
-      - DATABASE_URL=sqlite:///./data/bot.db
-      # TEST_CHAT_ID берётся из .env (строкой ниже) — иначе скрипты внутри контейнера его не видят
-      - TEST_CHAT_ID=${TEST_CHAT_ID}
-      - BOT_API_DATA_MOUNT=/app/bot-api-data
     env_file:
       - .env
     volumes:
       - ./data:/app/data
-      - E:\Media:/app/media   # Путь к диску с медиа
+      # Кросс-платформенный путь к медиа (Windows/Linux/macOS):
+      # переопределяется MEDIA_HOST_DIR в .env (по умолчанию ./data/media относительно compose-файла)
+      - ${MEDIA_HOST_DIR:-./data/media}:/app/media
       # Прямой доступ к файлам local-bot-api (файлы >20МБ нельзя скачать через облачное getFile)
       - bot-api-data:/app/bot-api-data:ro
     ports:
-      - "8000:8000"           # Веб-интерфейс
+      - "127.0.0.1:8000:8000"     # только localhost: веб-интерфейс за reverse-proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:

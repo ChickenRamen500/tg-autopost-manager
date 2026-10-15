@@ -61,7 +61,7 @@ def check_config() -> int:
     print(f"BOT_API_URL      = {settings.bot_api_url}")
     print(f"DATABASE_URL     = {settings.database_url}")
     print(f"TELEGRAM_API_ID  = {settings.telegram_api_id or '<не задан>'}")
-    print(f"BOT_TOKEN        = {'***' + settings.bot_token[-6:] if settings.bot_token else '<не задан>'}")
+    print(f"BOT_TOKEN        = {'<set>' if settings.bot_token else '<не задан>'}")
     if problems:
         for p in problems:
             print(f"[!] {p}")
