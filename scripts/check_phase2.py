@@ -41,37 +41,60 @@ from app.services.routing import route_post
 
 
 async def check_db() -> int:
+    """Проверка БД: схема + admin bootstrap + RBAC.
+
+    Обёрнута в try/finally с close_db (CR-C1): ранее check_db оставлял
+    открытое singleton-соединение на bot.db, и последующий check_routing()
+    с подменой settings.data_dir/db_path вызывал init_db(), который возвращал
+    СТАРОЕ соединение (init_db проверяет `if _db is not None: return _db`)
+    — демо-данные маршрутизации писались в продакшн bot.db.
+    """
     log.info("== Проверка БД ==")
     db = await init_db()
-    if settings.admin_tg_id:
-        await bootstrap_admin(settings.admin_tg_id, None)
+    try:
+        if settings.admin_tg_id:
+            await bootstrap_admin(settings.admin_tg_id, None)
 
-    admin = await users_repo.get_user_by_tg_id(settings.admin_tg_id) if settings.admin_tg_id else None
-    if admin and admin["role"] == "admin":
-        log.info("[OK] admin в БД: tg_id=%s role=%s", admin["tg_id"], admin["role"])
-    else:
-        log.warning("[!] ADMIN_TG_ID не задан или admin не создан")
+        admin = await users_repo.get_user_by_tg_id(settings.admin_tg_id) if settings.admin_tg_id else None
+        if admin and admin["role"] == "admin":
+            log.info("[OK] admin в БД: tg_id=%s role=%s", admin["tg_id"], admin["role"])
+        else:
+            log.warning("[!] ADMIN_TG_ID не задан или admin не создан")
 
-    cur = await db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = [r[0] for r in await cur.fetchall()]
-    await cur.close()
-    expected = {"users", "channels", "queues", "posts", "routing_rules", "signatures",
-                "duplicate_hashes", "tag_subscriptions", "task_queue", "app_settings"}
-    missing = expected - set(tables)
-    if missing:
-        log.error("[FAIL] Нет таблиц: %s", missing)
-        return 1
-    log.info("[OK] Все 10 таблиц из ТЗ §5 присутствуют: %s", ", ".join(sorted(expected)))
+        cur = await db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = [r[0] for r in await cur.fetchall()]
+        await cur.close()
+        expected = {"users", "channels", "queues", "posts", "routing_rules", "signatures",
+                    "duplicate_hashes", "tag_subscriptions", "task_queue", "app_settings"}
+        missing = expected - set(tables)
+        if missing:
+            log.error("[FAIL] Нет таблиц: %s", missing)
+            return 1
+        log.info("[OK] Все 10 таблиц из ТЗ §5 присутствуют: %s", ", ".join(sorted(expected)))
 
-    # RBAC (ТЗ §2.6)
-    mod = {"tg_id": 999999, "username": "test_mod", "role": "moderator", "is_active": 1}
-    assert users_repo.check_access(mod, "moderator") is True
-    assert users_repo.check_access(mod, "admin") is False
-    adm = {"tg_id": 1, "username": "test_adm", "role": "admin", "is_active": 1}
-    assert users_repo.check_access(adm, "moderator") is True  # admin >= moderator
-    assert users_repo.check_access(adm, "admin") is True
-    log.info("[OK] RBAC: admin >= moderator, moderator не проходит admin-проверку (ТЗ §2.6)")
-    return 0
+        # RBAC (ТЗ §2.6). Заменили assert на if/return 1 (M9 — code review infra):
+        # assert в CLI-скрипте молча отключается при `python -O`, давая rc=0 на
+        # реально проваленной проверке. Явная проверка + log.error + return 1.
+        mod = {"tg_id": 999999, "username": "test_mod", "role": "moderator", "is_active": 1}
+        if users_repo.check_access(mod, "moderator") is not True:
+            log.error("[FAIL] RBAC: moderator не проходит moderator-проверку")
+            return 1
+        if users_repo.check_access(mod, "admin") is not False:
+            log.error("[FAIL] RBAC: moderator ошибочно проходит admin-проверку")
+            return 1
+        adm = {"tg_id": 1, "username": "test_adm", "role": "admin", "is_active": 1}
+        if users_repo.check_access(adm, "moderator") is not True:
+            log.error("[FAIL] RBAC: admin не проходит moderator-проверку (admin >= moderator)")
+            return 1
+        if users_repo.check_access(adm, "admin") is not True:
+            log.error("[FAIL] RBAC: admin не проходит admin-проверку")
+            return 1
+        log.info("[OK] RBAC: admin >= moderator, moderator не проходит admin-проверку (ТЗ §2.6)")
+        return 0
+    finally:
+        # Закрываем singleton — иначе check_routing() подменит settings.db_path,
+        # но init_db() вернёт СТАРОЕ соединение на bot.db.
+        await close_db()
 
 
 async def check_routing() -> int:
@@ -90,6 +113,13 @@ async def check_routing() -> int:
 
     log.info("== Проверка маршрутизации (временная БД) ==")
     tmp_dir = Path(tempfile.mkdtemp(prefix="phase2_routing_"))
+    # ИЗОЛЯЦИЯ (CR-C1 — критика код-ревью): ранее check_db() оставлял открытым
+    # singleton _db на продакшн-боте. init_db() возвращал СТАРОЕ соединение
+    # несмотря на подмену settings.db_path — демо-данные маршрутизации
+    # (Demo Channel, Demo Queue, два правила) писались в продакшн bot.db.
+    # Сначала закрываем singleton, потом подменяем пути, потом открываем заново.
+    await database.close_db()
+
     # Подменяем пути на временные (frozen dataclass — через object.__setattr__)
     object.__setattr__(settings, "data_dir", tmp_dir)
     object.__setattr__(settings, "db_path", tmp_dir / "routing_demo.db")
@@ -102,19 +132,25 @@ async def check_routing() -> int:
         await routing_repo.create_rule("telegram_channel", "@anime_channel", qid, priority=10)
         await routing_repo.create_rule("gelbooru", r".*rating:safe.*", qid, priority=5)
 
-        # Тест 1: точное совпадение telegram_channel
+        # Тест 1: точное совпадение telegram_channel. assert → if/return 1 (M9).
         res = await route_post("telegram_channel", "@anime_channel")
-        assert res == qid, f"ожидали очередь {qid}, получили {res}"
+        if res != qid:
+            log.error("[FAIL] Точное совпадение: ожидали очередь %s, получили %s", qid, res)
+            return 1
         log.info("[OK] Точное совпадение telegram_channel/@anime_channel → queue %s", res)
 
         # Тест 2: regex по тегам gelbooru
         res2 = await route_post("gelbooru", "12345", tags=["1girl", "rating:safe", "smile"])
-        assert res2 == qid, f"ожидали очередь {qid} по тегу rating:safe, получили {res2}"
+        if res2 != qid:
+            log.error("[FAIL] Regex gelbooru: ожидали очередь %s, получили %s", qid, res2)
+            return 1
         log.info("[OK] Regex по тегам gelbooru (.*rating:safe.*) → queue %s", res2)
 
         # Тест 3: нет правила → Входящие (None)
         res3 = await route_post("x.com", "https://x.com/unknown")
-        assert res3 is None, f"ожидали None (Входящие), получили {res3}"
+        if res3 is not None:
+            log.error("[FAIL] Нет правила: ожидали None (Входящие), получили %s", res3)
+            return 1
         log.info("[OK] Нет правила для x.com → Входящие (None)")
     finally:
         await database.close_db()
@@ -137,11 +173,13 @@ async def check_scheduler_jobs() -> int:
                 for j in data.get("jobs", []):
                     log.info("     - %s next_run=%s", j["id"], j["next_run"])
                 return 0
-            log.warning("[!] Scheduler не запущен или нет активных очередей: %s", data)
-            return 0
+            log.error("[FAIL] Scheduler не запущен или нет активных очередей: %s", data)
+            return 1
     except Exception as e:  # noqa: BLE001 — широкий catch для CLI-скрипта проверки
-        log.warning("[!] /health/scheduler недоступен (%s) — приложение запущено?", e)
-        return 0
+        # M10: ранее возвращал 0 при недоступности /health/scheduler — скрипт
+        # завершался успехом даже если приложение не запущено. Теперь rc=1.
+        log.error("[FAIL] /health/scheduler недоступен (%s) — приложение запущено?", e)
+        return 1
 
 
 async def main() -> int:

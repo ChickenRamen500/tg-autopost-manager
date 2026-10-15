@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -126,6 +127,9 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
 
 
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
+    # Защита от SQL-инъекции через PRAGMA table_info(...) — f-string с именем таблицы.
+    # Идентификаторы в SQLite: [A-Za-z_][A-Za-z0-9_]* — проверяем isidentifier().
+    assert table.isidentifier() and column.isidentifier(), f"bad identifier: {table!r}.{column!r}"
     cur = await db.execute(f"PRAGMA table_info({table})")
     rows = await cur.fetchall()
     await cur.close()
@@ -133,12 +137,19 @@ async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> b
 
 
 async def close_db() -> None:
-    """Закрывает соединение (вызывается при shutdown)."""
+    """Закрывает соединение (вызывается при shutdown).
+
+    Обёрнуто в try/finally: даже если _db.close() упадёт (например, соединение
+    уже разрушено), singleton-ссылку _db гарантированно обнуляем — иначе
+    последующие init_db() будут думать, что соединение живо.
+    """
     global _db
     if _db is not None:
-        await _db.close()
-        _db = None
-        log.info("Соединение с БД закрыто")
+        try:
+            await _db.close()
+        finally:
+            _db = None
+            log.info("Соединение с БД закрыто")
 
 
 def get_db() -> aiosqlite.Connection:
@@ -148,32 +159,62 @@ def get_db() -> aiosqlite.Connection:
     return _db
 
 
+@asynccontextmanager
+async def transaction():
+    """Контекст для многошаговых операций: BEGIN IMMEDIATE ... COMMIT/ROLLBACK.
+
+    Для атомарной записи в несколько таблиц (например, set_phash_atomic:
+    posts.phash + duplicate_hashes). BEGIN IMMEDIATE захватывает write-lock
+    сразу — параллельные reader'ы увидят согласованное состояние.
+
+    Пример:
+        async with transaction() as db:
+            await db.execute("UPDATE posts SET ...")
+            await db.execute("INSERT INTO duplicate_hashes ...")
+    """
+    db = get_db()
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        yield db
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+
 async def bootstrap_admin(tg_id: int, username: str | None) -> bool:
     """Создаёт первого admin из .env (ADMIN_TG_ID), если его ещё нет в БД.
 
     Решает проблему «курицы и яйца»: команда /add_user требует admin-прав,
     но admin появляется только через БД. Возвращает True, если пользователь
     был добавлен (False — если уже существовал).
+
+    Атомарная реализация: один INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING
+    вместо SELECT-then-INSERT/UPDATE — закрывает race condition между
+    concurrent /start-запросами (два одновременных запроса могли дважды
+    вставить admin или потерять UPDATE — CR-H-R2).
     """
     db = get_db()
-    cur = await db.execute("SELECT id, role FROM users WHERE tg_id = ?", (tg_id,))
-    row = await cur.fetchone()
-    await cur.close()
-    if row is not None:
-        # Уже есть — повышаем до admin, если вдруг был moderator, и активируем
-        if row["role"] != "admin":
-            await db.execute(
-                "UPDATE users SET role = 'admin', is_active = 1, username = COALESCE(?, username) WHERE id = ?",
-                (username, row["id"]),
-            )
-            await db.commit()
-            log.info("Существующий пользователь tg_id=%s повышен до admin", tg_id)
-        return False
-
-    await db.execute(
-        "INSERT INTO users (tg_id, username, role, is_active) VALUES (?, ?, 'admin', 1)",
+    # RETURNING id вернёт строку, только если данные реально изменились
+    # (SQLite RETURNING отражает фактическое состояние после INSERT/UPDATE).
+    cur = await db.execute(
+        """
+        INSERT INTO users (tg_id, username, role, is_active)
+        VALUES (?, ?, 'admin', 1)
+        ON CONFLICT(tg_id) DO UPDATE SET
+            role = 'admin',
+            is_active = 1,
+            username = COALESCE(excluded.username, users.username)
+        WHERE users.role != 'admin' OR users.is_active = 0
+        RETURNING id
+        """,
         (tg_id, username),
     )
+    row = await cur.fetchone()
+    await cur.close()
     await db.commit()
+    if row is None:
+        # Пользователь уже admin и активен — ничего не менялось
+        return False
     log.info("Загружен admin из .env: tg_id=%s username=%s", tg_id, username or "<нет>")
     return True

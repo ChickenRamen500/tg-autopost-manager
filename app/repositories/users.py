@@ -30,16 +30,21 @@ async def get_user(user_id: int) -> dict[str, Any] | None:
 
 
 async def upsert_user(tg_id: int, username: str | None, role: str, is_active: bool = True) -> int:
-    """Вставляет или обновляет пользователя. Возвращает id строки."""
+    """Вставляет или обновляет пользователя. Возвращает id строки.
+
+    ВАЖНО (CR-H-R1): на конфликте по tg_id обновляем ТОЛЬКО username —
+    role/is_active не трогаем. Иначе вызов upsert_user из middleware
+    (где передаётся текущая БД-роль, а не новая) мог молча понизить admin
+    до moderator или деактивировать пользователя. Для смены роли/активности
+    используйте update_user_role() / set_active().
+    """
     db = get_db()
     cur = await db.execute(
         """
         INSERT INTO users (tg_id, username, role, is_active)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(tg_id) DO UPDATE SET
-            username = COALESCE(excluded.username, users.username),
-            role = excluded.role,
-            is_active = excluded.is_active
+            username = COALESCE(excluded.username, users.username)
         """,
         (tg_id, username, role, 1 if is_active else 0),
     )
@@ -53,6 +58,23 @@ async def upsert_user(tg_id: int, username: str | None, role: str, is_active: bo
     row = await cur.fetchone()
     await cur.close()
     return row["id"] if row else 0
+
+
+async def update_username(tg_id: int, username: str | None) -> bool:
+    """Обновляет только username пользователя (не трогает role/is_active).
+
+    Используется в AccessMiddleware для актуализации @username при входящем
+    апдейте (CR-H-R7). Атомарный UPDATE без гонки с concurrent upsert_user.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE users SET username = ? WHERE tg_id = ?",
+        (username, tg_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
 
 
 async def add_user(tg_id: int, username: str | None, role: str = "moderator") -> int:
@@ -91,10 +113,15 @@ async def list_users() -> list[dict[str, Any]]:
 
 
 async def find_by_username(username: str) -> dict[str, Any] | None:
-    """Поиск пользователя по @username (без @). Для /remove_user."""
+    """Поиск пользователя по @username (без @). Для /remove_user.
+
+    Регистронезависимый поиск через COLLATE NOCASE (CR-M-R6) — Telegram
+    usernames нечувствительны к регистру, и пользователь мог быть добавлен
+    с другой раскладкой, чем пришёл в команде.
+    """
     clean = username.lstrip("@")
     db = get_db()
-    cur = await db.execute("SELECT * FROM users WHERE username = ?", (clean,))
+    cur = await db.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (clean,))
     row = await cur.fetchone()
     await cur.close()
     return dict(row) if row else None

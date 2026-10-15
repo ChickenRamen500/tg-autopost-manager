@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
     tg_id       INTEGER UNIQUE NOT NULL,
     username    TEXT,
     role        TEXT NOT NULL CHECK(role IN ('admin', 'moderator')),
-    is_active   INTEGER NOT NULL DEFAULT 1,   -- BOOLEAN: 0/1
+    is_active   INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),   -- BOOLEAN: 0/1
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS channels (
     tg_chat_id  INTEGER UNIQUE NOT NULL,
     name        TEXT NOT NULL,
     username    TEXT,
-    is_active   INTEGER NOT NULL DEFAULT 1,
+    is_active   INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -29,8 +29,8 @@ CREATE TABLE IF NOT EXISTS queues (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id         INTEGER NOT NULL,
     name               TEXT NOT NULL,
-    interval_minutes   INTEGER NOT NULL DEFAULT 60,
-    is_active          INTEGER NOT NULL DEFAULT 1,
+    interval_minutes   INTEGER NOT NULL DEFAULT 60 CHECK(interval_minutes > 0),
+    is_active          INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     crop_video         INTEGER NOT NULL DEFAULT 0,
     signature_template TEXT,
     shuffle_enabled    INTEGER NOT NULL DEFAULT 1,
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS routing_rules (
     source_pattern  TEXT NOT NULL,
     target_queue_id INTEGER NOT NULL,
     priority        INTEGER NOT NULL DEFAULT 0,
-    is_active        INTEGER NOT NULL DEFAULT 1,
+    is_active        INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (target_queue_id) REFERENCES queues(id) ON DELETE CASCADE
 );
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS routing_rules (
 CREATE TABLE IF NOT EXISTS signatures (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     text        TEXT NOT NULL,
-    is_active   INTEGER NOT NULL DEFAULT 1,
+    is_active   INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS duplicate_hashes (
     hash_value  TEXT NOT NULL,
     hash_type   TEXT NOT NULL CHECK(hash_type IN ('md5', 'phash')),
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+    CONSTRAINT uq_dup_post_hash UNIQUE (post_id, hash_type)
 );
 
 -- Подписки на теги (Gelbooru/Danbooru)
@@ -125,9 +126,9 @@ CREATE TABLE IF NOT EXISTS tag_subscriptions (
     user_id              INTEGER NOT NULL,
     site                 TEXT NOT NULL CHECK(site IN ('gelbooru', 'danbooru')),
     tags                 TEXT NOT NULL,                -- JSON массив тегов
-    check_interval_hours INTEGER NOT NULL DEFAULT 6,
+    check_interval_hours INTEGER NOT NULL DEFAULT 6 CHECK(check_interval_hours > 0),
     last_checked_at      DATETIME,
-    is_active            INTEGER NOT NULL DEFAULT 1,
+    is_active            INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -163,4 +164,13 @@ CREATE INDEX IF NOT EXISTS idx_posts_media_group  ON posts(media_group_id);
 CREATE INDEX IF NOT EXISTS idx_routing_active      ON routing_rules(is_active, priority);
 CREATE INDEX IF NOT EXISTS idx_dup_hash_value      ON duplicate_hashes(hash_type, hash_value);
 CREATE INDEX IF NOT EXISTS idx_task_queue_status   ON task_queue(status);
-CREATE INDEX IF NOT EXISTS idx_users_tg_id          ON users(tg_id);
+-- idx_users_tg_id удалён: UNIQUE-индекс на users(tg_id) уже создаётся автоматически
+-- (избыточный индекс без выигрыша — CR-LOW-3).
+-- Unique index для TOCTOU-дедупликации по file_unique_id (CR-H-V1).
+-- В SQLite NULL-значения в UNIQUE-индексе считаются различными (NULL != NULL),
+-- поэтому partial-WHERE не нужен: несколько постов с file_unique_id=NULL
+-- могут сосуществовать, а ненулевые значения должны быть уникальны.
+-- Non-partial index, чтобы ON CONFLICT(file_unique_id) DO NOTHING матчило его
+-- без явного WHERE в conflict target (как требуют partial-индексы).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_file_unique_unique
+    ON posts(file_unique_id);
