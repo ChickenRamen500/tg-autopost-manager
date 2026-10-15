@@ -212,6 +212,26 @@ async def mark_sent(post_id: int) -> bool:
     return await update_status(post_id, "sent")
 
 
+async def bulk_mark_sent(post_ids: list[int]) -> int:
+    """Атомарно помечает несколько постов как sent (одна транзакция).
+
+    Возвращает количество обновлённых постов. Решает P1-9 (code review):
+    раньше каждый mark_sent был отдельным commit → crash между = partial-send дубликаты.
+    """
+    if not post_ids:
+        return 0
+    db = get_db()
+    placeholders = ",".join("?" * len(post_ids))
+    cur = await db.execute(
+        f"UPDATE posts SET status = 'sent', sent_at = CURRENT_TIMESTAMP, last_error = NULL WHERE id IN ({placeholders})",
+        post_ids,
+    )
+    await db.commit()
+    changed = cur.rowcount
+    await cur.close()
+    return changed
+
+
 async def mark_failed(post_id: int, error: str) -> bool:
     return await update_status(post_id, "failed", error=error)
 

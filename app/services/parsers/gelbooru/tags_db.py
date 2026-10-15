@@ -57,6 +57,9 @@ async def init_tags_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     _conn = await aiosqlite.connect(str(_db_path()))
     _conn.row_factory = aiosqlite.Row
+    # P2-16: WAL + busy_timeout для конкурентного доступа (populate_tags.py write + app read)
+    await _conn.execute("PRAGMA journal_mode=WAL")
+    await _conn.execute("PRAGMA busy_timeout=5000")
     await _conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS tags (

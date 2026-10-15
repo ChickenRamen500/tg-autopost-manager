@@ -70,12 +70,23 @@ async def _bot_polling() -> None:
             await bot.delete_webhook(drop_pending_updates=False)
     except Exception as e:  # noqa: BLE001 — не роняем старт из-за этой проверки
         log.warning("get_webhook_info/delete_webhook не прошли: %r (продолжаем)", e)
-    try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    except asyncio.CancelledError:
-        log.info("Bot polling остановлен")
-    except Exception:  # не роняем приложение, логируем
-        log.exception("Bot polling упал")
+    # P2-30: retry loop с exponential backoff для non-CancelledError
+    retry_delay = 5.0
+    max_retry_delay = 300.0  # 5 минут макс
+    while True:
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        except asyncio.CancelledError:
+            log.info("Bot polling остановлен")
+            return
+        except Exception:
+            log.exception("Bot polling упал — retry через %.0f сек", retry_delay)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_retry_delay)
+            continue
+        else:
+            # start_polling завершился нормально (shutdown)
+            return
 
 
 @asynccontextmanager
@@ -147,8 +158,18 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="TG Media Queue Bot", version="0.2.0-phase2", lifespan=lifespan)
 
 
+# P2-29: Простая авторизация для /health* endpoints через SECRET_TOKEN
+from fastapi import Depends, Header, HTTPException
+
+
+async def verify_token(x_secret_token: str | None = Header(None)) -> None:
+    """Проверяет SECRET_TOKEN в заголовке X-Secret-Token для /health* endpoints."""
+    if settings.secret_token and x_secret_token != settings.secret_token:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid or missing X-Secret-Token")
+
+
 @app.get("/health")
-async def health() -> dict:
+async def health(_token: None = Depends(verify_token)) -> dict:
     """Живость приложения + состояние конфигурации."""
     return {
         "status": "ok",
@@ -159,7 +180,7 @@ async def health() -> dict:
 
 
 @app.get("/health/bot-api")
-async def health_bot_api() -> dict:
+async def health_bot_api(_token: None = Depends(verify_token)) -> dict:
     """getMe через Local Bot API Server (ТЗ §3.3)."""
     me = await get_me()
     if me:
@@ -168,7 +189,7 @@ async def health_bot_api() -> dict:
 
 
 @app.get("/health/scheduler")
-async def health_scheduler() -> dict:
+async def health_scheduler(_token: None = Depends(verify_token)) -> dict:
     """Состояние планировщика: список активных job'ов очередей (Фаза 2)."""
     sched = get_scheduler()
     jobs = []
