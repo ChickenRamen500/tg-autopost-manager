@@ -59,19 +59,29 @@ async def init_db() -> aiosqlite.Connection:
     schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
     try:
         await _db.executescript(schema_sql)
-    except aiosqlite.OperationalError as e:
-        # Типичный случай: перенос старой БД (например, копия папки со старой
+    except (aiosqlite.OperationalError, aiosqlite.IntegrityError) as e:
+        # Типичный случай #1: перенос старой БД (например, копия папки со старой
         # машины) — executescript падает на CREATE INDEX по колонке, которой в
-        # старой таблице ещё нет ("no such column: media_group_id").
+        # старой таблице ещё нет ("no such column: media_group_id") — OperationalError.
+        #
+        # Типичный случай #2: в существующей БД есть дубликаты posts.file_unique_id
+        # (что было возможно до CR-H-V1 фикса — TOCTOU race condition в receive_media).
+        # executescript падает на `CREATE UNIQUE INDEX idx_posts_file_unique_unique`
+        # с IntegrityError: "UNIQUE constraint failed: posts.file_unique_id".
+        #
         # SQLite не откатывает уже выполненную часть скрипта, поэтому сначала
-        # накатываем миграции (ALTER TABLE ... ADD COLUMN), потом повторяем схему.
+        # накатываем миграции (ALTER TABLE + очистка дубликатов), потом повтор схемы.
         log.warning("Схема применена частично (%s) — запускаю миграции и повтор схемы", e)
         await _run_migrations(_db)
+        # Очистка дубликатов file_unique_id — должна выполняться ПОСЛЕ _run_migrations
+        # (который добавляет колонку file_unique_id в старые БД), но ДО повторного
+        # executescript (который создаёт UNIQUE index).
+        await _cleanup_duplicate_file_unique_ids(_db)
         try:
             await _db.executescript(schema_sql)
-        except aiosqlite.OperationalError as e2:
+        except (aiosqlite.OperationalError, aiosqlite.IntegrityError) as e2:
             raise RuntimeError(
-                f"Не удалось применить схему БД даже после миграций: {e2}. "
+                f"Не удалось применить схему БД даже после миграций и очистки дубликатов: {e2}. "
                 "Проверьте, что версия schema.sql соответствует вашей базе."
             ) from e2
     else:
@@ -124,6 +134,89 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             except aiosqlite.OperationalError as e:
                 # Кто-то добавил параллельно — не критично
                 log.debug("Колонка %s.%s уже существует: %s", table, column, e)
+
+
+async def _cleanup_duplicate_file_unique_ids(db: aiosqlite.Connection) -> int:
+    """Очищает дубликаты posts.file_unique_id перед созданием UNIQUE index.
+
+    Контекст: CR-H-V1 фикс добавил `CREATE UNIQUE INDEX idx_posts_file_unique_unique
+    ON posts(file_unique_id)` в schema.sql, чтобы TOCTOU-дедупликация через
+    `INSERT ... ON CONFLICT(file_unique_id) DO NOTHING` работала. Но в существующих
+    БД, созданных ДО этого фикса, уже могут быть дубликаты — race condition в
+    receive_media позволял создать несколько постов с одним file_unique_id
+    (два одновременных сообщения с одним файлом).
+
+    Создание UNIQUE index на колонке с дубликатами падает:
+        sqlite3.IntegrityError: UNIQUE constraint failed: posts.file_unique_id
+
+    Эта функция:
+      1. Ищет группы дубликатов (file_unique_id с COUNT(*) > 1, IS NOT NULL)
+      2. В каждой группе оставляет один пост (MIN(id) — самый старый, скорее
+         всего оригинал) с file_unique_id НЕтронутым
+      3. У остальных ОБНУЛЯЕТ file_unique_id (NULL в UNIQUE-индексе SQLite
+         считаются различными — конфликт снимается) и помечает status='possible_duplicate'
+         (кроме уже отправленных — status='sent' сохраняется, чтобы не исказить отчётность)
+      4. Физически НЕ удаляет посты — они видны в UI, могут быть обработаны вручную
+
+    Возвращает количество затронутых строк. Безопасно вызывать многократно —
+    если дубликатов нет, ничего не делает (идемпотентно).
+    """
+    # Сначала проверяем что колонка существует (на случай очень старой БД без неё)
+    if not await _column_exists(db, "posts", "file_unique_id"):
+        return 0  # колонки нет — нечего чистить
+
+    # Найти все группы дубликатов (file_unique_id, count, keep_id)
+    cur = await db.execute(
+        """
+        SELECT file_unique_id, COUNT(*) AS cnt, MIN(id) AS keep_id
+        FROM posts
+        WHERE file_unique_id IS NOT NULL
+        GROUP BY file_unique_id
+        HAVING COUNT(*) > 1
+        """
+    )
+    duplicates = await cur.fetchall()
+    await cur.close()
+
+    if not duplicates:
+        return 0  # дубликатов нет
+
+    total_nulled = 0
+    for row in duplicates:
+        fuid = row["file_unique_id"]
+        keep_id = row["keep_id"]
+        # Оставляем пост с MIN(id) (самый старый — скорее всего оригинал),
+        # у остальных ОБНУЛЯЕМ file_unique_id (NOT NULL → NULL).
+        # Это решает конфликт UNIQUE-констрейнта: остаётся одна строка с данным
+        # file_unique_id, остальные имеют NULL (NULL не нарушает UNIQUE в SQLite).
+        # Пост не удаляется физически — сохраняется в БД, виден в UI, может быть
+        # обработан вручную. Помечаем его как 'possible_duplicate' для видимости.
+        cur = await db.execute(
+            """
+            UPDATE posts
+            SET file_unique_id = NULL,
+                status = CASE WHEN status = 'sent' THEN status ELSE 'possible_duplicate' END
+            WHERE file_unique_id = ?
+              AND id != ?
+            """,
+            (fuid, keep_id),
+        )
+        nulled = cur.rowcount
+        total_nulled += nulled
+        await cur.close()
+        log.info(
+            "Дубликаты file_unique_id=%s: оставлен пост #%s, обнулено file_unique_id у %d дубликатов",
+            fuid, keep_id, nulled,
+        )
+
+    if total_nulled > 0:
+        await db.commit()
+        log.info(
+            "Очистка дубликатов file_unique_id: обнулено %d постов "
+            "(UNIQUE index теперь применится безопасно)",
+            total_nulled,
+        )
+    return total_nulled
 
 
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
