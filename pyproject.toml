@@ -12,13 +12,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# PR-40: asyncio_mode = "auto" — позволяет использовать `async def test_...`
-# без явного `@pytest.mark.asyncio`. Текущие тесты используют sync def + asyncio.run
-# (как в Фазе 1), но新模式 позволит добавлять async-тесты в будущем.
-asyncio_mode = "auto"
-# -p no:cacheprovider — отключает кеш pytest (для CI / reproducible runs).
-# Локально для `--lf` (last-failed) кеш нужен: можно убрать эту строку.
-# Оставляем для совместимости с CI (без polluted .pytest_cache).
 addopts = "-p no:cacheprovider"
 
 [tool.ruff]
