@@ -416,7 +416,7 @@ async def _render_post_card(call: CallbackQuery, post: dict, queues: list[dict])
         f"Очередь: {post.get('queue_id') or '— (Входящие)'}\n"
     )
     if post.get("original_caption"):
-        text += f"Подпись: {post['original_caption'][:100]}\n"
+        text += f"Подпись: {post['original_caption'][:97]}...\n" if len(post['original_caption']) > 100 else f"Подпись: {post['original_caption']}\n"
     if post.get("tg_file_id"):
         text += f"file_id: {post['tg_file_id'][:20]}...\n"
     if post.get("media_group_id"):

@@ -9,7 +9,7 @@
 | Шаг Фазы 2 (ТЗ) | Реализация |
 |---|---|
 | **44.** Миграция кода gbooru_tg | `app/services/parsers/gelbooru/` — `client.py` (GelbooruClient с rate limiting 8 req/s), `cache.py` (in-memory TTL кеш), `tags_db.py` (БД тегов, aiosqlite). `scripts/populate_tags.py` — bulk-наполнение |
-| **45.** Схема БД (все таблицы из §5) | `app/db/schema.sql` + `app/db/database.py` (aiosqlite, WAL, FK). 9 таблиц: users, channels, queues, posts, routing_rules, signatures, duplicate_hashes, tag_subscriptions, task_queue |
+| **45.** Схема БД (все таблицы из §5) | `app/db/schema.sql` + `app/db/database.py` (aiosqlite, WAL, FK). 10 таблиц: users, channels, queues, posts, routing_rules, signatures, duplicate_hashes, tag_subscriptions, task_queue |
 | **46.** Приём медиа из ЛС: file_id, метаданные, маршрутизация | `app/bot/handlers/media.py` — photo/video/gif/document, форварды (source_type=telegram_channel), сохранение tg_file_id+file_unique_id+size+mime, авто-маршрутизация, дедуп по file_unique_id |
 | **47.** APScheduler + отправка из очередей (file_id → файл) | `app/scheduler/__init__.py` — interval-job на каждую активную очередь, стратегия file_id→файл, 429 retry, троттлинг 1.1с, max 3 попытки → failed |
 
@@ -32,7 +32,7 @@ docker compose exec bot python scripts/init_db.py
 ```
 
 Что произойдёт при первом старте (lifespan `app/main.py`):
-1. `init_db()` — создаёт `data/bot.db`, применяет `app/db/schema.sql` (9 таблиц + индексы), включает WAL + foreign_keys.
+1. `init_db()` — создаёт `data/bot.db`, применяет `app/db/schema.sql` (10 таблиц + индексы), включает WAL + foreign_keys.
 2. `bootstrap_admin(ADMIN_TG_ID)` — создаёт первого admin из `.env` (роль `admin`, `is_active=1`). Без него никто не сможет управлять пользователями/каналами/очередями.
 3. `tags_db.init_tags_db()` — отдельная БД `data/tags.db` для метаданных тегов Gelbooru (ТЗ §10.1).
 4. `cache.start_cleanup_task()` — фоновая очистка in-memory кеша Gelbooru (каждые 10 мин).
@@ -42,7 +42,7 @@ docker compose exec bot python scripts/init_db.py
 Проверка:
 ```bash
 docker compose exec bot python scripts/check_phase2.py --db
-# [OK] Все 9 таблиц из ТЗ §5 присутствуют
+# [OK] Все 10 таблиц из ТЗ §5 присутствуют
 # [OK] admin в БД: tg_id=... role=admin
 # [OK] RBAC: admin >= moderator, moderator не проходит admin-проверку
 ```
@@ -301,7 +301,7 @@ VALUES ('telegram_channel', '@anime_channel', 1, 10);
 
 ## Критерии приёмки Фазы 2
 
-- [x] Схема БД содержит все 9 таблиц из ТЗ §5 (`check_phase2.py --db`)
+- [x] Схема БД содержит все 10 таблиц из ТЗ §5 (`check_phase2.py --db`)
 - [x] Приём медиа из ЛС сохраняет `tg_file_id`+`file_unique_id`+`file_size`+`mime_type` (стратегия file_id, ТЗ §2.1.1 п.4)
 - [x] Маршрутизация: точное совпадение + regex + правило `any` → Входящие (ТЗ §2.2.2)
 - [x] RBAC: admin ≥ moderator, гость блокируется, кроме `/start` (ТЗ §2.6)
@@ -309,13 +309,13 @@ VALUES ('telegram_channel', '@anime_channel', 1, 10);
 - [x] Стратегия отправки file_id → файл (ТЗ §2.5.1)
 - [x] 429 retry + троттлинг + max 3 попытки → failed (ТЗ §2.5.2)
 - [x] Миграция gbooru_tg: GelbooruClient + cache + tags_db (`aiosqlite`) (ТЗ §10)
-- [x] Юнит-тесты: 58 passed (`pytest tests/unit -q`), ruff: 0 ошибок
+- [x] Юнит-тесты: 61 passed (`pytest tests/unit -q`), ruff: 0 ошибок
 
 ## Тесты
 
 ```bash
 pytest tests/unit -q
-# 58 passed
+# 61 passed
 #   test_settings.py      (4)  — Фаза 1 + адаптация под ADMIN_TG_ID
 #   test_routing.py        (6)  — regex/exact/any, приоритеты
 #   test_repositories.py  (8)  — CRUD users/posts/task_queue, RBAC, дедуп
@@ -331,7 +331,7 @@ app/
 ├── main.py                      # FastAPI lifespan: init_db + bootstrap_admin + scheduler + polling
 ├── config/settings.py           # + ADMIN_TG_ID, GELBOORU_*, SEND_THROTTLE, MAX_SEND_ATTEMPTS
 ├── db/
-│   ├── schema.sql               # 9 таблиц ТЗ §5 + индексы
+│   ├── schema.sql               # 10 таблиц ТЗ §5 + индексы
 │   ├── database.py              # aiosqlite singleton, WAL, FK, bootstrap_admin
 │   └── __init__.py
 ├── repositories/                # CRUD-слой (без бизнес-логики)
@@ -417,7 +417,7 @@ tests/unit/                      # 22 теста (routing, repositories, schedul
 
 Проверка фиксов:
 ```bash
-pytest tests/unit -q                              # 58 passed (25 в test_regression.py)
+pytest tests/unit -q                              # 61 passed (30 в test_regression.py)
 ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 # /add_queue → "Планировщик перерегистрирован: активных очередей — 1. Перезапуск не нужен."
 ```
@@ -452,7 +452,7 @@ ruff check app/ scripts/ tests/ conftest.py      # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 58 passed
+pytest tests/unit -q   # 61 passed
 ruff check             # All checks passed!
 # /menu → главное меню с кнопками
 ```
@@ -470,7 +470,7 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 58 passed (25 в test_regression.py)
+pytest tests/unit -q   # 61 passed (30 в test_regression.py)
 ruff check             # All checks passed!
 # регрессионный тест: cmd_cancel зарегистрирован первым (test_cmd_cancel_registered_before_fsm_handlers)
 ```
@@ -487,7 +487,7 @@ ruff check             # All checks passed!
 
 Проверка:
 ```bash
-pytest tests/unit -q   # 58 passed (25 в test_regression.py)
+pytest tests/unit -q   # 61 passed (30 в test_regression.py)
 ruff check             # All checks passed!
 # новые тесты: test_create_post_with_media_group_id, test_find_album_posts_groups_by_media_group_id,
 #              test_delete_post_removes_from_db, test_queue_group_albums_setting,

@@ -50,7 +50,8 @@ def main() -> int:
     root = pathlib.Path(__file__).resolve().parent.parent
     bad = 0
     for p in sorted(root.rglob("*.py")):
-        if ".git" in p.parts or "node_modules" in p.parts:
+        # Исключаем служебные директории (code review L8)
+        if any(part in p.parts for part in (".git", "node_modules", ".venv", "venv", "__pycache__", "data")):
             continue
         msg = check_file(p, args.fix)
         if msg:
