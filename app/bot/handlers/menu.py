@@ -808,7 +808,13 @@ async def queue_settings_toggle(call: CallbackQuery, state: FSMContext) -> None:
     if action == "strategy":
         strategies = ["continue_next_day", "continue_after_end", "move_to_inbox", "delete"]
         current = data.get("end_strategy", "continue_next_day")
-        idx = strategies.index(current)
+        # Защита от ValueError при corrupted FSM state (CR-H-V3): если в state
+        # записано неизвестное значение (старая БД, ручная правка), .index()
+        # бросит ValueError → пользователь не сможет открыть настройки очереди.
+        try:
+            idx = strategies.index(current)
+        except ValueError:
+            idx = 0
         new_strategy = strategies[(idx + 1) % 4]
         await state.update_data(end_strategy=new_strategy)
 
@@ -1214,6 +1220,22 @@ async def cb_user_actions(call: CallbackQuery, user_role: str | None = None) -> 
             await call.answer("Не найден", show_alert=True)
             return
         if action == "toggle":
+            # Защита от потери единственного admin (CR-C1 — критика код-ревью):
+            # нельзя понизить последнего активного admin до moderator — иначе
+            # система останется без admin'а и /add_user перестанет работать.
+            # Также нельзя поменять свою роль (как и в action == "del").
+            current_tg = call.from_user.id if call.from_user else 0
+            if user["tg_id"] == current_tg:
+                await call.answer("Нельзя менять свою роль", show_alert=True)
+                return
+            if user["role"] == "admin":
+                users_list = await users_repo.list_users()
+                admin_count = sum(
+                    1 for u in users_list if u["role"] == "admin" and u.get("is_active")
+                )
+                if admin_count <= 1:
+                    await call.answer("Нельзя понизить последнего admin", show_alert=True)
+                    return
             new_role = "moderator" if user["role"] == "admin" else "admin"
             await users_repo.update_user_role(user["tg_id"], new_role)
             await call.answer(f"Роль → {new_role}", show_alert=True)

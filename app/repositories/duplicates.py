@@ -15,8 +15,11 @@ async def add_hash(post_id: int, hash_value: str, hash_type: str) -> int:
     if hash_type not in ("md5", "phash"):
         raise ValueError(f"Недопустимый hash_type: {hash_type!r}")
     db = get_db()
+    # INSERT OR IGNORE: защита от повторной вставки одинаковых хэшей для
+    # одного post_id+hash_type (благодаря UNIQUE(post_id, hash_type) в schema.sql).
+    # Возвращает lastrowid (0 при игноре). Без этого — IntegrityError на повторе.
     cur = await db.execute(
-        "INSERT INTO duplicate_hashes (post_id, hash_value, hash_type) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO duplicate_hashes (post_id, hash_value, hash_type) VALUES (?, ?, ?)",
         (post_id, hash_value, hash_type),
     )
     await db.commit()
@@ -50,8 +53,12 @@ async def find_phash_near(phash: str, max_distance: int = 5) -> list[dict[str, A
     (объём pHash-ов небольшой — быстродействие достаточно для слабого железа).
     """
     db = get_db()
+    # LIMIT 10000: защита от OOM на больших БД (CR-M-R5). Hamming-distance
+    # фильтрация в Python имеет O(N) по памяти и CPU — для >10k записей
+    # нужен SQL-side popcount (встроенной нет, см. INFO в code review).
     cur = await db.execute(
-        "SELECT post_id, hash_value FROM duplicate_hashes WHERE hash_type = 'phash' AND hash_value != ?",
+        "SELECT post_id, hash_value FROM duplicate_hashes "
+        "WHERE hash_type = 'phash' AND hash_value != ? LIMIT 10000",
         (phash,),
     )
     rows = await cur.fetchall()
@@ -74,3 +81,33 @@ def _hamming_hex(a: str, b: str) -> int:
     except ValueError:
         return -1
     return x.bit_count()
+
+
+async def set_phash_atomic(post_id: int, phash: str) -> None:
+    """Атомарно устанавливает pHash в posts И duplicate_hashes в одной транзакции.
+
+    Решает CR-H-R4: раньше set_phash (в posts) + add_hash (в duplicates)
+    были двумя отдельными commit'ами — crash между ними оставлял
+    рассинхрон: posts.phash обновлён, а duplicate_hashes пуст (или наоборот).
+    Теперь одна BEGIN IMMEDIATE ... COMMIT/ROLLBACK.
+
+    Idempotent: при повторном вызове для того же post_id старая phash-запись
+    в duplicate_hashes заменяется новой (DELETE + INSERT), а не дублируется.
+    """
+    db = get_db()
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute("UPDATE posts SET phash = ? WHERE id = ?", (phash, post_id))
+        # Удаляем старую запись phash для этого поста (для idempotency)
+        await db.execute(
+            "DELETE FROM duplicate_hashes WHERE post_id = ? AND hash_type = 'phash'",
+            (post_id,),
+        )
+        await db.execute(
+            "INSERT INTO duplicate_hashes (post_id, hash_value, hash_type) VALUES (?, ?, 'phash')",
+            (post_id, phash),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise

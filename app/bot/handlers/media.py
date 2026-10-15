@@ -211,37 +211,17 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     # для всех файлов альбома (ТЗ §2.1.1). Сохраняем для групповой отправки.
     media_group_id = getattr(message, "media_group_id", None)
 
-    # Дедупликация по file_unique_id (ТЗ §2.4.3 — точный уровень)
-    if media.get("file_unique_id"):
-        existing = await posts_repo.find_by_file_unique_id(media["file_unique_id"])
-        if existing:
-            await _safe_answer(message,
-                f"⚠️ Похоже на дубликат: file_unique_id уже есть в системе "
-                f"(пост #{existing[0]['id']}, статус: {existing[0]['status']}).\n"
-                "Пост всё равно добавлен во «Входящие» как possible_duplicate для ручной проверки."
-            )
-            # Помечаем как возможный дубликат, очередь не назначаем (входящие)
-            post_id = await posts_repo.create_post(
-                source_type=source["source_type"],
-                source_id=source["source_id"],
-                source_channel=source["source_channel"],
-                file_type=media["file_type"],
-                tg_file_id=media["tg_file_id"],
-                file_unique_id=media["file_unique_id"],
-                file_size=media["file_size"],
-                mime_type=media["mime_type"],
-                original_caption=caption,
-                tags=tags,
-                queue_id=None,
-                status="possible_duplicate",
-                media_group_id=media_group_id,
-            )
-            logger.info("Дубликат #%s (file_unique_id) — possible_duplicate", post_id)
-            return
-
-    # Маршрутизация (ТЗ §2.2.2)
+    # Дедупликация по file_unique_id (ТЗ §2.4.3 — точный уровень).
+    # Реализация: атомарный INSERT ... ON CONFLICT(file_unique_id) DO NOTHING
+    # (CR-H-V1 TOCTOU fix) — раньше SELECT-then-INSERT допускал гонку: два
+    # одновременных апдейта с одним file_unique_id могли оба пройти SELECT
+    # (оба увидели «нет дубликата»), затем оба INSERT'нуть — получали два
+    # одинаковых поста. Теперь один INSERT либо вставляет (rowcount=1), либо
+    # тихо игнорирует (rowcount=0, конфликт по partial UNIQUE index).
+    # Маршрутизацию выполняем ДО вставки (дёшево: один SELECT по routing_rules).
     queue_id = await route_post(source["source_type"], source["source_id"], tags)
 
+    has_file_unique = bool(media.get("file_unique_id"))
     post_id = await posts_repo.create_post(
         source_type=source["source_type"],
         source_id=source["source_id"],
@@ -256,7 +236,25 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         queue_id=queue_id,
         status="pending",
         media_group_id=media_group_id,
+        on_conflict_file_unique_do_nothing=has_file_unique,
     )
+
+    if has_file_unique and post_id == 0:
+        # Конфликт: пост с таким file_unique_id уже существует.
+        # Информируем пользователя (со ссылкой на существующий пост),
+        # но НЕ создаём дубликат — старый код создавал junk-пост со
+        # статусом possible_duplicate, что само по себе нарушало UNIQUE
+        # теперь (idx_posts_file_unique_unique в schema.sql).
+        existing = await posts_repo.find_by_file_unique_id(media["file_unique_id"])
+        existing_id = existing[0]["id"] if existing else "?"
+        existing_status = existing[0]["status"] if existing else "?"
+        await _safe_answer(message,
+            f"⚠️ Дубликат: file_unique_id уже в системе "
+            f"(пост #{existing_id}, статус: {existing_status}).\n"
+            "Пост не добавлен повторно. Если это новый файл — отправь его ещё раз."
+        )
+        logger.info("Дубликат отклонён (file_unique_id conflict) — существующий #%s", existing_id)
+        return
 
     # Альбом: Telegram присылает каждое фото отдельным сообщением с одинаковым media_group_id.
     is_album = bool(getattr(message, "media_group_id", None))

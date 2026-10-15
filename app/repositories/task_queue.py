@@ -92,15 +92,69 @@ async def mark_error(task_id: int, error: str) -> bool:
     return changed
 
 
-async def requeue(task_id: int) -> bool:
-    """Вернуть ошибочную задачу обратно в очередь (для ручного retry)."""
+async def requeue(task_id: int, reset_attempts: bool = False) -> bool:
+    """Вернуть ошибочную задачу обратно в очередь (для ручного retry).
+
+    По умолчанию (reset_attempts=False) счётчик attempts НЕ сбрасывается —
+    сохраняется видимая «история» количества неудачных попыток (CR-L-R3).
+    Если передать reset_attempts=True — счётчик обнулится (полный retry).
+    """
     db = get_db()
-    cur = await db.execute(
-        "UPDATE task_queue SET status = 'queued', error = NULL WHERE id = ?",
-        (task_id,),
-    )
+    if reset_attempts:
+        cur = await db.execute(
+            "UPDATE task_queue SET status = 'queued', error = NULL, attempts = 0 WHERE id = ?",
+            (task_id,),
+        )
+    else:
+        cur = await db.execute(
+            "UPDATE task_queue SET status = 'queued', error = NULL WHERE id = ?",
+            (task_id,),
+        )
     await db.commit()
     changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
+async def count_stale_in_progress(timeout_minutes: int = 30) -> int:
+    """Количество зависших in_progress задач (worker упал, не вернув done/error).
+
+    in_progress старше timeout_minutes считается «перевисшим» — его worker
+    уже не подтвердит (упал / рестарт контейнера / OOM-kill).
+
+    Сравнение <= (а не <): при timeout_minutes=0 все in_progress-задачи должны
+    считаться stale, а строгий < пропускал бы задачи, созданные в ту же
+    секунду (created_at == now, T < T = False). Это критично для тестов и
+    для случая «worker упал мгновенно после старта».
+    """
+    db = get_db()
+    cur = await db.execute(
+        "SELECT COUNT(*) AS c FROM task_queue "
+        "WHERE status = 'in_progress' "
+        "AND datetime(created_at, '+' || ? || ' minutes') <= datetime('now')",
+        (timeout_minutes,),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    return row["c"] if row else 0
+
+
+async def reset_stale_in_progress(timeout_minutes: int = 30) -> int:
+    """Сбрасывает зависшие in_progress задачи обратно в 'queued'.
+
+    Возвращает количество сброшенных задач. Idempotent: при повторном вызове
+    без новых stale-задач вернёт 0. Атомарный UPDATE ... RETURNING был бы
+    избыточен — фоновый cleanup запускается по расписанию, гонок нет.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE task_queue SET status = 'queued' "
+        "WHERE status = 'in_progress' "
+        "AND datetime(created_at, '+' || ? || ' minutes') <= datetime('now')",
+        (timeout_minutes,),
+    )
+    await db.commit()
+    changed = cur.rowcount
     await cur.close()
     return changed
 

@@ -147,9 +147,14 @@ async def cmd_add_user(message: Message, command: CommandObject, user_role: str 
         await message.answer("role должна быть admin или moderator.")
         return
 
-    # Способ 1: числовой tg_id
-    if identifier.lstrip("-").isdigit():
+    # Способ 1: числовой tg_id. Отклоняем отрицательные (CR-L-V2):
+    # Telegram tg_id всегда > 0; отрицательный свидетельствует об опечатке
+    # (например, "-100123" — пользователь перепутал с chat_id канала).
+    if identifier.isdigit():
         tg_id = int(identifier)
+        if tg_id <= 0:
+            await message.answer("❌ tg_id должен быть положительным числом (отрицательные/ноль не допускаются).")
+            return
         username = args[2] if len(args) > 2 else None
         await users_repo.add_user(tg_id, username, role)
         await message.answer(
@@ -343,6 +348,12 @@ async def cmd_add_queue(message: Message, command: CommandObject, user_role: str
         interval = int(args[2])
     except ValueError:
         await message.answer("channel_id и interval_min должны быть числами.")
+        return
+    # Валидация interval (CR-H-V2): интервал должен быть положительным.
+    # CHECK(interval_minutes > 0) в schema.sql всё равно отклонит, но без
+    # этой проверки пользователь получит IntegrityError вместо понятной ошибки.
+    if interval < 1:
+        await message.answer("❌ Интервал должен быть положительным числом (минуты).")
         return
     name = args[1]
     channel = await channels_repo.get_channel(ch_id)
