@@ -303,7 +303,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     logger.info("Принят пост #%s: type=%s source=%s queue=%s album=%s", post_id, media["file_type"], source["source_type"], queue_id, is_album)
 
 
-@router.message(F.text)
+@router.message(F.text & ~F.text.startswith("/"))
 async def receive_text(message: Message, user: dict | None = None) -> None:
     """Текст без команды — сохраняем как возможный caption-черновик во Входящие (ТЗ §2.1.1 п.1 'Текст')."""
     if message.text and message.text.startswith("/"):

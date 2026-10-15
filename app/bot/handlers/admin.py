@@ -230,7 +230,11 @@ async def cmd_remove_user(message: Message, command: CommandObject, user_role: s
     if target["role"] == "admin" and target["tg_id"] == getattr(message.from_user, "id", 0):
         await message.answer("Нельзя удалить самого себя.")
         return
-    await users_repo.remove_user(target["tg_id"])
+    try:
+        await users_repo.remove_user(target["tg_id"])
+    except Exception as e:  # noqa: BLE001 — FK constraint error
+        await message.answer(f"⚠️ Не удалось удалить пользователя (есть подписки?): {e}")
+        return
     await message.answer(f"✓ @{username} удалён.")
 
 
@@ -310,7 +314,14 @@ async def cmd_remove_channel(message: Message, command: CommandObject, user_role
     except (ValueError, IndexError):
         await message.answer("Использование: /remove_channel <channel_id>")
         return
-    ok = await channels_repo.remove_channel(cid)
+    try:
+        ok = await channels_repo.remove_channel(cid)
+    except Exception as e:  # noqa: BLE001 — FK constraint error
+        await message.answer(
+            f"⚠️ Не удалось удалить канал: у него есть очереди/посты. "
+            f"Сначала удалите очереди канала. (Ошибка: {e})"
+        )
+        return
     await message.answer("✓ Канал удалён." if ok else "Канал не найден.")
 
 
@@ -354,7 +365,14 @@ async def cmd_remove_queue(message: Message, command: CommandObject, user_role: 
     except (ValueError, IndexError):
         await message.answer("Использование: /remove_queue <queue_id>")
         return
-    ok = await queues_repo.remove_queue(qid)
+    try:
+        ok = await queues_repo.remove_queue(qid)
+    except Exception as e:  # noqa: BLE001 — FK constraint error
+        await message.answer(
+            f"⚠️ Не удалось удалить очередь: в ней есть посты. "
+            f"Сначала очистите посты. (Ошибка: {e})"
+        )
+        return
     if ok:
         from app.scheduler import reload_scheduler
         n = await reload_scheduler()

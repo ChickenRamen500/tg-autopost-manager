@@ -35,14 +35,16 @@ def get_dispatcher() -> Dispatcher:
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
 
-    # Порядок роутеров важен:
-    # 1. menu — inline-кнопки + FSM (основной интерфейс)
-    # 2. media — приём медиа из ЛС (file_id, маршрутизация)
-    # 3. admin — текстовые команды (обратная совместимость)
+    # Порядок роутеров важен (CRITICAL из code review):
+    # 1. menu — inline-кнопки + FSM (основной интерфейс) + /cancel /menu /start
+    # 2. admin — текстовые команды (/list_queues, /add_user и т.д.) — ДО media,
+    #    т.к. media.receive_text ловит F.text (любой текст) и return для команд,
+    #    что молча проглатывало бы все admin-команды
+    # 3. media — приём медиа из ЛС (file_id, маршрутизация)
     # 4. start — /help (fallback)
     dp.include_router(menu.router)
-    dp.include_router(media.router)
     dp.include_router(admin.router)
+    dp.include_router(media.router)
     dp.include_router(start.router)
     _dp = dp
     return dp
