@@ -113,6 +113,7 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "ALTER TABLE queues ADD COLUMN end_strategy TEXT NOT NULL DEFAULT 'continue_next_day' "
             "CHECK(end_strategy IN ('continue_next_day', 'continue_after_end', 'move_to_inbox', 'delete'))"
         )),
+        ("queues", "strip_caption", "ALTER TABLE queues ADD COLUMN strip_caption INTEGER NOT NULL DEFAULT 0"),
     ]
     for table, column, ddl in migrations:
         if not await _column_exists(db, table, column):

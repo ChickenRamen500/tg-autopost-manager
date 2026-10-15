@@ -825,32 +825,32 @@ def test_handle_end_strategy_delete(tmp_path):
     run_with_db(tmp_path, body)
 
 
-def test_parse_start_end_dash():
+def test_parse_dates_dash():
     """Парсинг '-' → (None, None) — без ограничений."""
-    from app.bot.handlers.menu import _parse_start_end
+    from app.bot.handlers.menu import _parse_dates
 
-    result = _parse_start_end("-")
+    result = _parse_dates("-")
     assert result == (None, None)
 
 
-def test_parse_start_end_valid():
+def test_parse_dates_valid():
     """Парсинг '14.10.26 06:00 - 16.10.26 22:00' → (start_utc, end_utc)."""
-    from app.bot.handlers.menu import _parse_start_end
+    from app.bot.handlers.menu import _parse_dates
 
-    result = _parse_start_end("14.10.26 06:00 - 16.10.26 22:00")
+    result = _parse_dates("14.10.26 - 16.10.26")
     assert result is not None
     assert result[0] is not None
     assert result[1] is not None
     # Проверяем, что это ISO-строки
-    assert "2026-10-14" in result[0]
+    assert "2026-10-13" in result[0]
     assert "2026-10-16" in result[1]
 
 
-def test_parse_start_end_invalid():
+def test_parse_dates_invalid():
     """Парсинг невалидной строки → None."""
-    from app.bot.handlers.menu import _parse_start_end
+    from app.bot.handlers.menu import _parse_dates
 
-    assert _parse_start_end("неправильный формат") is None
+    assert _parse_dates("неправильный формат") is None
 
 
 def test_format_queue_time_info():
@@ -858,8 +858,8 @@ def test_format_queue_time_info():
     from app.services.queue_time import format_queue_time_info
 
     queue = {
-        "start_at": "2026-10-14 06:00:00",
-        "end_at": "2026-10-16 22:00:00",
+        "start_at": "2026-10-13 06:00:00",
+        "end_at": "2026-10-15 22:00:00",
         "daily_window_start": "06:00",
         "daily_window_end": "22:00",
         "end_strategy": "continue_next_day",

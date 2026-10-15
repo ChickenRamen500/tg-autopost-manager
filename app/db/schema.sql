@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS queues (
     daily_window_end   TEXT,   -- "HH:MM"
     end_strategy       TEXT NOT NULL DEFAULT 'continue_next_day'
                               CHECK(end_strategy IN ('continue_next_day', 'continue_after_end', 'move_to_inbox', 'delete')),
+    -- Блок B/C: настройки отправки (toggle в UI создания очереди)
+    strip_caption      INTEGER NOT NULL DEFAULT 0,  -- удалять оригинальную подпись поста при отправке
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (channel_id) REFERENCES channels(id)
 );
@@ -142,6 +144,13 @@ CREATE TABLE IF NOT EXISTS task_queue (
     error      TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (post_id) REFERENCES posts(id)
+);
+
+-- Настройки приложения (блок D — служебный канал, пороги уведомлений, и т.д.)
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ==========================================================================

@@ -36,7 +36,8 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         kb.button(text="👥 Пользователи", callback_data="menu:users")
         kb.button(text="🔀 Маршрутизация", callback_data="menu:rules")
         kb.button(text="➕ Добавить", callback_data="menu:add")
-    kb.adjust(2, 1, 2, 1)
+        kb.button(text="⚙️ Настройки", callback_data="menu:settings")
+    kb.adjust(2, 1, 2, 2)
     return kb.as_markup()
 
 
@@ -50,6 +51,16 @@ def need_queue_menu() -> InlineKeyboardMarkup:
     """Экран «Нет очередей» для правил маршрутизации: создать очередь или назад."""
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Создать очередь", callback_data="menu:add_queue")
+    kb.button(text="🔙 Назад", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def settings_menu() -> InlineKeyboardMarkup:
+    """Меню настроек приложения (блок D)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📂 Служебный канал (архив)", callback_data="set:archive")
+    kb.button(text="🔔 Порог уведомлений", callback_data="set:threshold")
     kb.button(text="🔙 Назад", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
@@ -280,5 +291,47 @@ def pick_queue_for_post(post_id: int, channel_id: int, queues: list[dict]) -> In
     # Создать очередь для этого канала, затем вернуться к посту
     kb.button(text="➕ Создать очередь", callback_data=f"menu:addq_forch:{channel_id}:{post_id}")
     kb.button(text="🔙 К каналам", callback_data=f"menu:post:{post_id}:pickch_back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def queue_settings_menu(
+    strategy: str = "continue_next_day",
+    group_albums: bool = False,
+    strip_caption: bool = False,
+    shuffle: bool = True,
+    has_signature: bool = False,
+) -> InlineKeyboardMarkup:
+    """Экран настроек очереди с toggle-кнопками (шаг 6/6).
+
+    Кнопки-переключатели: стратегия (цикл), группировка альбомов, удаление подписей,
+    перемешивание, подпись, создать, отмена.
+    """
+    kb = InlineKeyboardBuilder()
+    strategy_labels = {
+        "continue_next_day": "🔄 Стратегия: продлить на след. день",
+        "continue_after_end": "🔄 Стратегия: продолжить после конца",
+        "move_to_inbox": "🔄 Стратегия: во Входящие",
+        "delete": "🔄 Стратегия: удалить",
+    }
+    kb.button(text=strategy_labels.get(strategy, "🔄 Стратегия"), callback_data="qset:strategy")
+    kb.button(
+        text=f"📸 Альбомы группой: {'✅ да' if group_albums else '❌ нет'}",
+        callback_data="qset:group_albums",
+    )
+    kb.button(
+        text=f"🗑 Удалять подписи: {'✅ да' if strip_caption else '❌ нет'}",
+        callback_data="qset:strip_caption",
+    )
+    kb.button(
+        text=f"🔀 Перемешать: {'✅ да' if shuffle else '❌ нет'}",
+        callback_data="qset:shuffle",
+    )
+    kb.button(
+        text=f"✍️ Подпись: {'✅ есть' if has_signature else '❌ нет'}",
+        callback_data="qset:signature",
+    )
+    kb.button(text="✅ Создать очередь", callback_data="qset:create")
+    kb.button(text="🔙 Отмена", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()

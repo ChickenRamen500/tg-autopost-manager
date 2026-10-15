@@ -56,10 +56,13 @@ class AddStates(StatesGroup):
     add_queue_pick_channel = State()
     add_queue_name = State()
     add_queue_interval = State()
-    add_queue_group_albums = State()
-    add_queue_start_end = State()    # start_at / end_at (блок B)
+    add_queue_start_end = State()    # start_at / end_at (блок B) — только даты
     add_queue_daily_window = State()  # daily_window (блок B)
-    add_queue_end_strategy = State()  # end_strategy (блок B)
+    add_queue_end_strategy = State()  # toggle-экран настроек (блок B фикс)
+    add_queue_signature = State()     # ввод signature_template
+    # Настройки приложения (блок D)
+    add_archive_channel = State()     # ввод chat_id архивного канала
+    add_threshold = State()            # ввод порога уведомлений
     # Правило маршрутизации
     add_rule_pattern = State()
     add_rule_pick_queue = State()
@@ -442,7 +445,7 @@ async def cb_add_queue(call: CallbackQuery, state: FSMContext, user_role: str | 
         return
     await state.set_state(AddStates.add_queue_pick_channel)
     await call.message.edit_text(
-        "📋 **Добавление очереди**\nШаг 1/7: Нажми на канал-получатель:",
+        "📋 **Добавление очереди**\nШаг 1/6: Нажми на канал-получатель:",
         reply_markup=kb.channels_list(channels),
     )
     await call.answer()
@@ -471,7 +474,7 @@ async def cb_add_queue_for_channel(call: CallbackQuery, state: FSMContext, user_
     await state.set_state(AddStates.add_queue_name)
     await call.message.edit_text(
         f"📋 **Добавление очереди** для канала «{channel['name']}»\n"
-        f"Шаг 2/7: Пришли название очереди (например: Утренние посты)",
+        f"Шаг 2/6: Пришли название очереди (например: Утренние посты)",
         reply_markup=kb.confirm_cancel(),
     )
     await call.answer()
@@ -483,7 +486,7 @@ async def add_queue_pick_channel(call: CallbackQuery, state: FSMContext) -> None
     await state.update_data(channel_id=ch_id)
     await state.set_state(AddStates.add_queue_name)
     await call.message.edit_text(
-        f"Канал #{ch_id} выбран.\nШаг 2/7: Пришли название очереди (например: Утренние посты)",
+        f"Канал #{ch_id} выбран.\nШаг 2/6: Пришли название очереди (например: Утренние посты)",
         reply_markup=kb.confirm_cancel(),
     )
     await call.answer()
@@ -497,7 +500,7 @@ async def add_queue_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(name=name)
     await state.set_state(AddStates.add_queue_interval)
-    await message.answer("Шаг 3/7: Пришли интервал публикации в минутах (например 60)", reply_markup=kb.confirm_cancel())
+    await message.answer("Шаг 3/6: Пришли интервал публикации в минутах (например 60)", reply_markup=kb.confirm_cancel())
 
 
 @router.message(AddStates.add_queue_interval, F.text)
@@ -511,42 +514,21 @@ async def add_queue_interval(message: Message, state: FSMContext) -> None:
         await message.answer("Нужно целое число минут (≥1). Введи ещё раз или /cancel")
         return
     await state.update_data(interval=interval)
-    await state.set_state(AddStates.add_queue_group_albums)
-    await message.answer(
-        "Шаг 4/7: Группировать альбомы при отправке?\n\n"
-        "• 'да' — альбом из N фото отправится в канал одним сообщением (send_media_group)\n"
-        "• 'нет' — каждое фото отдельным сообщением\n\n"
-        "Пришли 'да' или 'нет'.",
-        reply_markup=kb.confirm_cancel(),
-    )
-
-
-@router.message(AddStates.add_queue_group_albums, F.text)
-async def add_queue_group_albums(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip().lower()
-    if text in ("да", "yes", "1", "true", "д"):
-        group_albums = True
-    elif text in ("нет", "no", "0", "false", "н"):
-        group_albums = False
-    else:
-        await message.answer("Пришли 'да' или 'нет'. Введи ещё раз или /cancel")
-        return
-    await state.update_data(group_albums=group_albums)
     await state.set_state(AddStates.add_queue_start_end)
     await message.answer(
-        "Шаг 5/7: Время начала и конца очереди.\n\n"
-        "Формат: `дд.мм.гг чч:мм - дд.мм.гг чч:мм`\n"
-        "Пример: `14.10.26 06:00 - 16.10.26 22:00`\n\n"
+        "Шаг 4/6: Даты начала и конца очереди.\n\n"
+        "Формат: `дд.мм.гг - дд.мм.гг`\n"
+        "Пример: `14.10.26 - 16.10.26`\n\n"
         "Или `-` если без ограничений (сразу/бесконечно).",
         reply_markup=kb.confirm_cancel(),
     )
 
 
-def _parse_start_end(text: str) -> tuple[str | None, str | None] | None:
-    """Парсит 'дд.мм.гг чч:мм - дд.мм.гг чч:мм' → (start_at_utc, end_at_utc) ISO.
+def _parse_dates(text: str) -> tuple[str | None, str | None] | None:
+    """Парсит 'дд.мм.гг - дд.мм.гг' → (start_at_utc, end_at_utc) ISO (00:00:00 / 23:59:59).
 
     Возвращает (None, None) для '-', None если парсинг не удался.
-    Время вводится в локальном TZ (Asia/Yekaterinburg), хранится в UTC.
+    Даты в локальном TZ (Asia/Yekaterinburg), хранятся в UTC.
     """
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -554,7 +536,6 @@ def _parse_start_end(text: str) -> tuple[str | None, str | None] | None:
     text = text.strip()
     if text == "-":
         return (None, None)
-    # Разделяем по ' - '
     if " - " not in text and "-" not in text:
         return None
     parts = text.replace(" - ", "-").split("-", 1)
@@ -564,8 +545,8 @@ def _parse_start_end(text: str) -> tuple[str | None, str | None] | None:
         tz = ZoneInfo(settings.timezone)
         start_str = parts[0].strip()
         end_str = parts[1].strip()
-        start_local = datetime.strptime(start_str, "%d.%m.%y %H:%M").replace(tzinfo=tz)
-        end_local = datetime.strptime(end_str, "%d.%m.%y %H:%M").replace(tzinfo=tz)
+        start_local = datetime.strptime(start_str, "%d.%m.%y").replace(hour=0, minute=0, tzinfo=tz)
+        end_local = datetime.strptime(end_str, "%d.%m.%y").replace(hour=23, minute=59, tzinfo=tz)
         start_utc = start_local.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
         end_utc = end_local.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
         return (start_utc, end_utc)
@@ -579,10 +560,10 @@ async def add_queue_start_end(message: Message, state: FSMContext) -> None:
     if text == "-":
         await state.update_data(start_at=None, end_at=None)
     else:
-        parsed = _parse_start_end(text)
+        parsed = _parse_dates(text)
         if parsed is None:
             await message.answer(
-                "Не понял формат. Пример: `14.10.26 06:00 - 16.10.26 22:00`\n"
+                "Не понял формат. Пример: `14.10.26 - 16.10.26`\n"
                 "Или `-` если без ограничений.",
                 reply_markup=kb.confirm_cancel(),
             )
@@ -590,7 +571,7 @@ async def add_queue_start_end(message: Message, state: FSMContext) -> None:
         await state.update_data(start_at=parsed[0], end_at=parsed[1])
     await state.set_state(AddStates.add_queue_daily_window)
     await message.answer(
-        "Шаг 6/7: Ежедневное окно отправки (часы работы каждый день).\n\n"
+        "Шаг 5/6: Ежедневное окно отправки (часы работы каждый день).\n\n"
         "Формат: `чч:мм - чч:мм`\n"
         "Пример: `06:00 - 22:00` (посты только с 6:00 до 22:00)\n\n"
         "Или `-` если без окна (посты в любое время суток).",
@@ -604,7 +585,6 @@ async def add_queue_daily_window(message: Message, state: FSMContext) -> None:
     if text == "-":
         await state.update_data(daily_window_start=None, daily_window_end=None)
     else:
-        # Парсим "чч:мм - чч:мм"
         import re
 
         m = re.match(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", text)
@@ -617,48 +597,136 @@ async def add_queue_daily_window(message: Message, state: FSMContext) -> None:
         ws = f"{int(m.group(1)):02d}:{m.group(2)}"
         we = f"{int(m.group(3)):02d}:{m.group(4)}"
         await state.update_data(daily_window_start=ws, daily_window_end=we)
-    await state.set_state(AddStates.add_queue_end_strategy)
-    await message.answer(
-        "Шаг 7/7: Что делать с неотправленными постами, когда время очереди закончилось?\n\n"
-        "1 — продолжить на следующий день (по умолчанию)\n"
-        "2 — продолжить после конца (игнорировать end_at)\n"
-        "3 — перенести во Входящие\n"
-        "4 — удалить неотправленные\n\n"
-        "Пришли номер (1-4):",
-        reply_markup=kb.confirm_cancel(),
+    # Дефолты для toggle-экрана (шаг 6/6)
+    await state.update_data(
+        end_strategy="continue_next_day",
+        group_albums=False,
+        strip_caption=False,
+        shuffle_enabled=True,
+        signature_template=None,
     )
+    await state.set_state(AddStates.add_queue_end_strategy)
+    await _render_queue_settings(message, state)
 
 
-@router.message(AddStates.add_queue_end_strategy, F.text)
-async def add_queue_end_strategy(message: Message, state: FSMContext, user_role: str | None = None) -> None:
-    if user_role != "admin":
-        await state.clear()
-        return
-    text = (message.text or "").strip()
-    strategies = {
-        "1": "continue_next_day",
-        "2": "continue_after_end",
-        "3": "move_to_inbox",
-        "4": "delete",
+async def _render_queue_settings(message_or_call: Message | CallbackQuery, state: FSMContext) -> None:
+    """Шаг 6/6: экран настроек очереди с toggle-кнопками."""
+    data = await state.get_data()
+    strategy = data.get("end_strategy", "continue_next_day")
+    group_albums = data.get("group_albums", False)
+    strip_caption = data.get("strip_caption", False)
+    shuffle = data.get("shuffle_enabled", True)
+    sig = data.get("signature_template")
+
+    strategy_labels = {
+        "continue_next_day": "1) продлить на след. день",
+        "continue_after_end": "2) продолжить после конца",
+        "move_to_inbox": "3) во Входящие",
+        "delete": "4) удалить",
     }
-    if text not in strategies:
-        await message.answer("Пришли номер 1-4. Введи ещё раз или /cancel")
+    text = (
+        f"📋 **Настройки очереди «{data['name']}»**\n\n"
+        f"Что делать с постами, когда время закончилось:\n"
+        f"Стратегия: {strategy_labels.get(strategy, strategy)}\n\n"
+        f"Группировать альбомы: {'✅ да' if group_albums else '❌ нет'}\n"
+        f"Удалять подписи: {'✅ да' if strip_caption else '❌ нет'}\n"
+        f"Перемешать: {'✅ да' if shuffle else '❌ нет'}\n"
+        f"Подпись: {sig[:30] + '...' if sig else '— нет'}\n"
+    )
+    markup = kb.queue_settings_menu(
+        strategy=strategy,
+        group_albums=group_albums,
+        strip_caption=strip_caption,
+        shuffle=shuffle,
+        has_signature=bool(sig),
+    )
+    edit = getattr(message_or_call, "edit_text", None)
+    if edit:
+        await edit(text, reply_markup=markup)
+    else:
+        await message_or_call.answer(text, reply_markup=markup)
+
+
+# --- Callback-хендлеры toggle-экрана настроек очереди ---
+
+@router.callback_query(AddStates.add_queue_end_strategy, F.data.startswith("qset:"))
+async def queue_settings_toggle(call: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает нажатия toggle-кнопок на экране настроек очереди."""
+    action = call.data.split(":")[1]
+    data = await state.get_data()
+
+    if action == "strategy":
+        strategies = ["continue_next_day", "continue_after_end", "move_to_inbox", "delete"]
+        current = data.get("end_strategy", "continue_next_day")
+        idx = strategies.index(current)
+        new_strategy = strategies[(idx + 1) % 4]
+        await state.update_data(end_strategy=new_strategy)
+
+    elif action == "group_albums":
+        await state.update_data(group_albums=not data.get("group_albums", False))
+
+    elif action == "strip_caption":
+        await state.update_data(strip_caption=not data.get("strip_caption", False))
+
+    elif action == "shuffle":
+        await state.update_data(shuffle_enabled=not data.get("shuffle_enabled", True))
+
+    elif action == "signature":
+        # Переход к вводу подписи
+        await state.set_state(AddStates.add_queue_signature)
+        await call.message.edit_text(
+            "✍️ Пришли текст подписи (будет добавлен к каждому посту очереди):\n"
+            "Или `-` чтобы убрать подпись.",
+            reply_markup=kb.confirm_cancel(),
+        )
+        await call.answer()
         return
-    end_strategy = strategies[text]
+
+    elif action == "create":
+        # Создать очередь с текущими настройками
+        await _create_queue_from_state(call, state)
+        await call.answer()
+        return
+
+    await call.answer()
+    await _render_queue_settings(call, state)
+
+
+@router.message(AddStates.add_queue_signature, F.text)
+async def add_queue_signature(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text == "-":
+        await state.update_data(signature_template=None)
+    else:
+        await state.update_data(signature_template=text)
+    await state.set_state(AddStates.add_queue_end_strategy)
+    await _render_queue_settings(message, state)
+
+
+async def _create_queue_from_state(call_or_msg: Message | CallbackQuery, state: FSMContext) -> None:
+    """Финальное создание очереди из FSM-данных."""
     data = await state.get_data()
     ch_id = data["channel_id"]
     name = data["name"]
     interval = data["interval"]
     group_albums = data.get("group_albums", False)
+    strip_caption = data.get("strip_caption", False)
+    shuffle = data.get("shuffle_enabled", True)
+    sig = data.get("signature_template")
     start_at = data.get("start_at")
     end_at = data.get("end_at")
     daily_window_start = data.get("daily_window_start")
     daily_window_end = data.get("daily_window_end")
+    end_strategy = data.get("end_strategy", "continue_next_day")
+
     qid = await queues_repo.create_queue(
         ch_id,
         name,
         interval_minutes=interval,
         group_albums=group_albums,
+        strip_caption=strip_caption,
+        shuffle_enabled=shuffle,
+        signature_template=sig,
         start_at=start_at,
         end_at=end_at,
         daily_window_start=daily_window_start,
@@ -677,14 +745,14 @@ async def add_queue_end_strategy(message: Message, state: FSMContext, user_role:
         "end_strategy": end_strategy,
     })
 
-    # Если очередь создана из интерактивного выбора поста — вернёмся к выбору очереди
     return_to_post = data.get("return_to_post")
+    answer = getattr(call_or_msg, "message", call_or_msg).answer if hasattr(call_or_msg, "message") else call_or_msg.answer
     if return_to_post:
         post = await posts_repo.get_post(return_to_post)
         if post and post.get("queue_id") is None:
             all_queues = await queues_repo.list_queues(active_only=False)
             channel_queues = [q for q in all_queues if q["channel_id"] == ch_id]
-            await message.answer(
+            await answer(
                 f"✓ Очередь «{name}» создана (#{qid}, каждые {interval} мин, {group_label}).\n"
                 f"Время: {time_info}\n"
                 f"Теперь выбери её для поста #{return_to_post}:",
@@ -692,7 +760,7 @@ async def add_queue_end_strategy(message: Message, state: FSMContext, user_role:
             )
             await state.clear()
             return
-    await message.answer(
+    await answer(
         f"✓ Очередь «{name}» добавлена (id={qid}, каждые {interval} мин, {group_label}).\n"
         f"Время: {time_info}\n"
         f"✓ Планировщик: активных очередей {n}.",
@@ -1042,3 +1110,94 @@ async def cb_stats(call: CallbackQuery) -> None:
     )
     await call.message.edit_text(text, reply_markup=kb.back_button())
     await call.answer()
+
+
+# ===========================================================================
+# Настройки (блок D — служебный канал, пороги уведомлений)
+# ===========================================================================
+
+@router.callback_query(F.data == "menu:settings")
+async def cb_settings(call: CallbackQuery, user_role: str | None = None) -> None:
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    from app.repositories import app_settings as app_settings_repo
+
+    archive_id = await app_settings_repo.get_archive_channel_id()
+    threshold = await app_settings_repo.get_notify_threshold()
+    archive_text = f"Включён (chat_id={archive_id})" if archive_id else "выключен"
+    text = (
+        f"⚙️ **Настройки**\n\n"
+        f"📂 Служебный канал (архив): {archive_text}\n"
+        f"🔔 Порог «скоро закончится»: {threshold} постов\n"
+    )
+    await call.message.edit_text(text, reply_markup=kb.settings_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("set:"))
+async def settings_toggle(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    action = call.data.split(":")[1]
+
+    if action == "archive":
+        # Ввод chat_id архивного канала
+        await state.set_state(AddStates.add_archive_channel)
+        await call.message.edit_text(
+            "📂 **Служебный канал (архив)**\n\n"
+            "Пришли числовой chat_id канала (вида -1002257882757).\n"
+            "Бот должен быть админом в нём.\n\n"
+            "Или `-` чтобы выключить архив.",
+            reply_markup=kb.confirm_cancel(),
+        )
+        await call.answer()
+        return
+
+    if action == "threshold":
+        await state.set_state(AddStates.add_threshold)
+        await call.message.edit_text(
+            "🔔 Порог «скоро закончится»\n\nПришли число (по умолчанию 5):",
+            reply_markup=kb.confirm_cancel(),
+        )
+        await call.answer()
+        return
+
+    await call.answer()
+
+
+@router.message(AddStates.add_archive_channel, F.text)
+async def add_archive_channel(message: Message, state: FSMContext) -> None:
+    from app.repositories import app_settings as app_settings_repo
+
+    text = (message.text or "").strip()
+    if text == "-":
+        await app_settings_repo.set_archive_channel_id(None)
+        await message.answer("📂 Архив выключен.", reply_markup=kb.main_menu(is_admin=True))
+    else:
+        try:
+            chat_id = int(text)
+        except ValueError:
+            await message.answer("Нужно число (chat_id). Попробуй ещё раз или /cancel")
+            return
+        await app_settings_repo.set_archive_channel_id(chat_id)
+        await message.answer(f"✓ Архив включён: chat_id={chat_id}", reply_markup=kb.main_menu(is_admin=True))
+    await state.clear()
+
+
+@router.message(AddStates.add_threshold, F.text)
+async def add_threshold(message: Message, state: FSMContext) -> None:
+    from app.repositories import app_settings as app_settings_repo
+
+    text = (message.text or "").strip()
+    try:
+        n = int(text)
+        if n < 1:
+            raise ValueError
+    except ValueError:
+        await message.answer("Нужно целое число ≥1. Попробуй ещё раз или /cancel")
+        return
+    await app_settings_repo.set_notify_threshold(n)
+    await message.answer(f"✓ Порог «скоро закончится» = {n} постов", reply_markup=kb.main_menu(is_admin=True))
+    await state.clear()
