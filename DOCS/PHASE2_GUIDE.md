@@ -365,7 +365,7 @@ scripts/
 ├── check_phase2.py              # --db / --routing / --scheduler
 └── populate_tags.py             # bulk-наполнение tags.db из Gelbooru API
 
-tests/unit/                      # 22 теста (routing, repositories, scheduler, settings)
+tests/unit/                      # 61 тест (routing, repositories, scheduler, settings, regression)
 ```
 
 ## Расширения схемы сверх ТЗ §5 (обоснование)

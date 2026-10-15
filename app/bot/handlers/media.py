@@ -215,7 +215,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
     if media.get("file_unique_id"):
         existing = await posts_repo.find_by_file_unique_id(media["file_unique_id"])
         if existing:
-            await _safe_answer(message, 
+            await _safe_answer(message,
                 f"⚠️ Похоже на дубликат: file_unique_id уже есть в системе "
                 f"(пост #{existing[0]['id']}, статус: {existing[0]['status']}).\n"
                 "Пост всё равно добавлен во «Входящие» как possible_duplicate для ручной проверки."
@@ -317,7 +317,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         queue = await queues_repo.get_queue(queue_id)
         qname = queue["name"] if queue else f"#{queue_id}"
         pending_count = await queues_repo.count_pending(queue_id)
-        await _safe_answer(message, 
+        await _safe_answer(message,
             f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
             reply_to_message_id=message.message_id,
         )
