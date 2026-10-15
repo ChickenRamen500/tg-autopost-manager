@@ -1,25 +1,25 @@
-"""Интеграционные тесты FastAPI app + endpoints (PR-40 H-T2).
+"""Интеграционные тесты FastAPI app + endpoints (H-T2).
 
-PR-40 (H-T2): app/main.py lifespan + REST endpoints раньше не имели тестов — coverage = 0%.
-Покрываем:
-  1. /health без SECRET_TOKEN — отдаёт status='ok' без утечки чувствительных данных.
-  2. /health/scheduler без X-Secret-Token (когда SECRET_TOKEN задан) → 403.
-  3. /health/scheduler с неверным токеном → 403.
+Покрывает:
+  1. /health БЕЗ auth (всегда 200, только {"status":"ok"}) — Docker HEALTHCHECK endpoint.
+  2. /health/scheduler без X-Secret-Token (когда SECRET_TOKEN задан) → 401 Unauthorized.
+  3. /health/scheduler с неверным токеном → 401.
   4. /health/scheduler с верным токеном → 200 + список jobs (возможно пустой).
-  5. /health с заданным SECRET_TOKEN без токена → 403 (auth работает).
-  6. /health с верным токеном → 200 и config_problems список.
+  5. /health всегда 200 (auth не требуется) — даже с заданным SECRET_TOKEN.
+  6. /health НЕ раскрывает bot_api_url/config_problems (no config leakage).
 
 Технические решения:
 - ASGITransport(httpx) НЕ запускает lifespan — поэтому scheduler/bot не стартуют,
   что подходит для тестирования голых endpoints без heavyweight инициализации.
 - get_scheduler() возвращает lazily-created singleton (если None — создаст новый,
   не запущенный, .get_jobs() = []). shutdown не нужен.
-- SECRET_TOKEN выставляем через object.__setattr__ (frozen dataclass) —
+- SECRET_TOKEN выставываем через object.__setattr__ (frozen dataclass) —
   с восстановлением в finally (как в conftest.run_with_db).
 
-Примечание: existing verify_token возвращает 403 (не 401) при неверном/отсутствующем
-токене — это задокументированная LOW-проблема (worklog PR-40). Тесты проверяют 403
-как фактическое поведение; отдельный PR может поменять на 401.
+Соответствует актуальному поведению после PR #37 (security hardening):
+- /health — без auth (для load balancer / Docker HEALTHCHECK), без config leakage
+- verify_token: 401 Unauthorized (семантически правильно для auth), timing-safe compare
+- secrets.compare_digest для SECRET_TOKEN
 """
 from __future__ import annotations
 
@@ -71,22 +71,20 @@ def _reset_scheduler_singleton():
 # ---------------------------------------------------------------------------
 
 
-def test_health_without_secret_token_returns_ok_and_config_problems():
-    """/health без SECRET_TOKEN — отдаёт status='ok' + список проблем конфигурации.
+def test_health_without_secret_token_returns_ok_only():
+    """/health без SECRET_TOKEN — отдаёт ТОЛЬКО {"status": "ok"} без config leakage.
 
-    Без SECRET_TOKEN verify_token пропускает запрос (ранний return).
+    После PR #37: /health — это liveness probe БЕЗ auth, НЕ раскрывает конфигурацию
+    (no bot_api_url, no config_problems). Это для Docker HEALTHCHECK и load balancer.
     """
     with _temp_settings(secret_token=""):
         status, body = asyncio.run(_client_get("/health"))
 
     assert status == 200, f"Ожидали 200, получили {status}: {body}"
-    assert body["status"] == "ok"
-    assert body["phase"] == 2
-    # config_problems — список (может быть пустым или содержать BOT_TOKEN, SECRET_TOKEN, ADMIN_TG_ID)
-    assert "config_problems" in body
-    assert isinstance(body["config_problems"], list)
-    # /health отдаёт bot_api_url — это OK (он не секретный, это URL local bot api)
-    assert "bot_api_url" in body
+    assert body == {"status": "ok"}, (
+        f"/health должен возвращать только {{'status':'ok'}}, получил {body} — "
+        "нельзя утекать bot_api_url/config_problems через unauthenticated endpoint"
+    )
 
 
 def test_health_with_secret_token_and_correct_header():
@@ -98,22 +96,26 @@ def test_health_with_secret_token_and_correct_header():
     assert body["status"] == "ok"
 
 
-def test_health_with_secret_token_and_missing_header_returns_403():
-    """/health с заданным SECRET_TOKEN без X-Secret-Token → 403 (текущее поведение)."""
+def test_health_with_secret_token_and_missing_header_returns_200():
+    """/health ВСЕГДА 200 — endpoint не требует auth (liveness probe).
+
+    После PR #37: /health отделён от защищённых endpoints и не использует verify_token.
+    SECRET_TOKEN защищает только /health/bot-api и /health/scheduler.
+    """
     with _temp_settings(secret_token="my_secret_xyz"):
         status, body = asyncio.run(_client_get("/health"))
 
-    assert status == 403, f"Ожидали 403 без токена, получили {status}"
-    assert "Forbidden" in body["detail"]
+    assert status == 200, f"/health должен быть открыт всегда (liveness probe), получили {status}"
+    assert body == {"status": "ok"}
 
 
-def test_health_with_secret_token_and_wrong_header_returns_403():
-    """/health с заданным SECRET_TOKEN + неверный токен → 403."""
+def test_health_with_secret_token_and_wrong_header_returns_200():
+    """/health с неверным X-Secret-Token — всё равно 200 (liveness probe без auth)."""
     with _temp_settings(secret_token="my_secret_xyz"):
         status, body = asyncio.run(_client_get("/health", headers={"X-Secret-Token": "wrong_token"}))
 
-    assert status == 403
-    assert "Forbidden" in body["detail"]
+    assert status == 200, f"/health не должен требовать auth, получили {status}"
+    assert body == {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -121,24 +123,29 @@ def test_health_with_secret_token_and_wrong_header_returns_403():
 # ---------------------------------------------------------------------------
 
 
-def test_health_scheduler_without_token_returns_403():
-    """/health/scheduler без X-Secret-Token (когда SECRET_TOKEN задан) → 403."""
+def test_health_scheduler_without_token_returns_401():
+    """/health/scheduler без X-Secret-Token (когда SECRET_TOKEN задан) → 401 Unauthorized.
+
+    После PR #37: verify_token возвращает 401 (семантически правильно для auth-credentials,
+    403 подразумевает аутентифицированного пользователя без прав, здесь же именно
+    credential отсутствует/невалиден). Используется secrets.compare_digest (timing-safe).
+    """
     _reset_scheduler_singleton()
     with _temp_settings(secret_token="sched_secret"):
         status, body = asyncio.run(_client_get("/health/scheduler"))
 
-    assert status == 403, f"Ожидали 403 без токена, получили {status}"
-    assert "Forbidden" in body["detail"]
+    assert status == 401, f"Ожидали 401 без токена (auth required), получили {status}"
+    assert "Unauthorized" in body["detail"] or "Forbidden" in body["detail"]
 
 
-def test_health_scheduler_with_wrong_token_returns_403():
-    """/health/scheduler с неверным токеном → 403."""
+def test_health_scheduler_with_wrong_token_returns_401():
+    """/health/scheduler с неверным токеном → 401 (timing-safe compare)."""
     _reset_scheduler_singleton()
     with _temp_settings(secret_token="sched_secret"):
         status, body = asyncio.run(_client_get("/health/scheduler", headers={"X-Secret-Token": "wrong"}))
 
-    assert status == 403
-    assert "Forbidden" in body["detail"]
+    assert status == 401, f"Ожидали 401 с неверным токеном, получили {status}"
+    assert "Unauthorized" in body["detail"] or "Forbidden" in body["detail"]
 
 
 def test_health_scheduler_with_correct_token_returns_200():
