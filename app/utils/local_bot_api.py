@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -67,37 +68,52 @@ async def logout_from_cloud() -> bool:
     """
     url = f"https://api.telegram.org/bot{settings.bot_token}/logOut"
     async with aiohttp.ClientSession() as s, s.post(url) as r:
-        data = await r.json()
-        ok = bool(data.get("ok"))
+        data = await r.json(content_type=None)
+        ok = bool(data.get("ok")) if isinstance(data, dict) else False
         log.info("logOut облачного API: %s", data)
         return ok
 
 
 async def get_me() -> dict | None:
-    """GET /getMe на локальном сервере — базовый healthcheck."""
+    """GET /getMe на локальном сервере — базовый healthcheck.
+
+    Защищена от не-JSON ответов (HTML error page, пустое тело, таймаут, разрыв соединения):
+    aiohttp.ClientResponseError/ContentTypeError, json.JSONDecodeError, ValueError,
+    AttributeError, TypeError — все логируются как «некорректный ответ local-bot-api».
+    """
     url = f"{settings.bot_api_url}/bot{settings.bot_token}/getMe"
     try:
         # таймаут 15с: если local-bot-api ещё не готов (или токен отклонён),
         # запрос должен завершиться ошибкой, а не висеть бесконечно
         to = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=to) as s, s.get(url) as r:
-            data = await r.json()
-            if data.get("ok"):
-                return data["result"]
-            log.error("getMe вернул ошибку: %s", data)
+            # content_type=None — не требовать application/json в ответе
+            # (local-bot-api на ошибках отдаёт text/html или пустое тело)
+            data = await r.json(content_type=None)
+            if isinstance(data, dict) and data.get("ok"):
+                return data.get("result")
+            log.error("getMe вернул некорректный ответ: %r", data)
             return None
     except (TimeoutError, aiohttp.ClientError) as e:
         log.error("Local Bot API недоступен по %s: %s", settings.bot_api_url, e)
         return None
+    except (json.JSONDecodeError, ValueError, AttributeError, TypeError) as e:
+        # Тело пришло, но это не валидный JSON (HTML error page / пусто / битый JSON).
+        log.error("getMe: некорректный ответ local-bot-api (не JSON): %r", e)
+        return None
 
 
 def make_test_file(size_mb: int, dest_dir: Path) -> Path:
-    """Создаёт случайный файл заданного размера (не сжимается Telegram как документ)."""
+    """Создаёт случайный файл заданного размера (не сжимается Telegram как документ).
+
+    os.urandom быстрее secrets.token_bytes для крупных файлов; криптостойкость
+    для тестового мусорного файла не нужна (он не используется как ключ/секрет).
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = dest_dir / f"test_{size_mb}mb_{secrets.token_hex(4)}.bin"
     chunk = 1024 * 1024
     with open(path, "wb") as f:
-        f.writelines(secrets.token_bytes(chunk) for _ in range(size_mb))
+        f.writelines(os.urandom(chunk) for _ in range(size_mb))
     return path
 
 
@@ -134,18 +150,18 @@ async def test_big_upload_download(chat_id: int, size_mb: int = 300) -> bool:
             # api.telegram.org/file/bot<token>/ для таких файлов даёт "file is too big"
             # (лимит облака 20 МБ) — читаем файл напрямую из volume bot-api-data.
             log.info("getFile: file_path=%s", file.file_path)
-            downloaded_bytes = resolve_local_file_size(file.file_path)
-            if downloaded_bytes is None:
+            local_file_size = resolve_local_file_size(file.file_path)
+            if local_file_size is None:
                 log.warning(
                     "Файл недоступен для прямого чтения (volume bot-api-data не примонтирован "
                     "в контейнер bot). Убедитесь, что сообщение доставлено в чат — это и есть "
                     "подтверждение работы --local."
                 )
             else:
-                log.info("Прямое чтение из volume: %.1f МБ", downloaded_bytes / 1024 / 1024)
-                if downloaded_bytes < size_mb * 1024 * 1024 * 0.9:
+                log.info("Прямое чтение из volume: %.1f МБ", local_file_size / 1024 / 1024)
+                if local_file_size < size_mb * 1024 * 1024 * 0.9:
                     raise RuntimeError(
-                        f"Размер файла в volume ({downloaded_bytes}) не соответствует "
+                        f"Размер файла в volume ({local_file_size}) не соответствует "
                         f"отправленному ({size_mb} МБ)"
                     )
             await bot.send_message(chat_id, "✅ Фаза 1: upload>50МБ и getFile>20МБ прошли — --local работает.")
@@ -154,9 +170,14 @@ async def test_big_upload_download(chat_id: int, size_mb: int = 300) -> bool:
         tmp.unlink(missing_ok=True)  # временные файлы удаляем сразу (ТЗ §3.1)
     return ok
 
-# Volume bot-api-data примонтирован в контейнер bot по этому пути
-# (см. docker-compose.yml) — даёт прямое чтение файлов >20МБ, минуя облачное getFile.
-LOCAL_API_MOUNT = Path(os.getenv("BOT_API_DATA_MOUNT", "/app/bot-api-data"))
+
+def _local_api_mount() -> Path:
+    """Точка монтирования volume local-bot-api внутри контейнера bot.
+
+    Функция (а не module-level константа) — чтобы тесты могли патчить env
+    и получать разные пути между вызовами без reload модуля.
+    """
+    return Path(os.getenv("BOT_API_DATA_MOUNT", "/app/bot-api-data"))
 
 
 def resolve_local_file_size(file_path: str | None) -> int | None:
@@ -171,16 +192,17 @@ def resolve_local_file_size(file_path: str | None) -> int | None:
     """
     if not file_path:
         return None
+    local_mount = _local_api_mount()
     rel = file_path.lstrip("/")
     candidates = [
-        LOCAL_API_MOUNT / rel,
-        LOCAL_API_MOUNT / rel.removeprefix("var/lib/telegram-bot-api/"),
+        local_mount / rel,
+        local_mount / rel.removeprefix("var/lib/telegram-bot-api/"),
         Path(file_path),  # прямой путь (если скрипт запускается вне Docker)
     ]
     # новый формат относительного пути: "documents/file_0.bin" может лежать
     # и в подкаталоге с именем бота: "<bot_id>-<name>/documents/..."
-    if LOCAL_API_MOUNT.is_dir():
-        candidates += sorted(LOCAL_API_MOUNT.glob(f"*/{rel}"))
+    if local_mount.is_dir():
+        candidates += sorted(local_mount.glob(f"*/{rel}"))
     for c in candidates:
         try:
             if c.is_file():

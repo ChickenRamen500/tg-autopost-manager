@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,11 +22,30 @@ def _get(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def _get_int(name: str, default: int) -> int:
+    """Парсит int из env с обработкой невалидных значений.
+
+    Если переменная задана, но не парсится как int (например MAX_SEND_ATTEMPTS=abc),
+    логируем warning и возвращаем default — приложение продолжает работать,
+    а не падает на старте.
+    """
+    raw = _get(name, str(default))
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logging.getLogger("config").warning(
+            "Невалидное значение %s=%r, использую default=%d", name, raw, default
+        )
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- Telegram ---
     bot_token: str = field(default_factory=lambda: _get("BOT_TOKEN"))
-    telegram_api_id: int = field(default_factory=lambda: int(_get("TELEGRAM_API_ID", "0") or 0))
+    telegram_api_id: int = field(default_factory=lambda: _get_int("TELEGRAM_API_ID", 0))
     telegram_api_hash: str = field(default_factory=lambda: _get("TELEGRAM_API_HASH"))
 
     # --- Local Bot API Server (ТЗ §3.3) ---
@@ -41,7 +61,7 @@ class Settings:
     # --- Фаза 2: первичный admin (bootstrap RBAC, ТЗ §2.6) ---
     # tg_id владельца-админа. На первом /start он автоматически становится admin в БД,
     # иначе нельзя добавить пользователей (команда /add_user требует прав admin).
-    admin_tg_id: int = field(default_factory=lambda: int(_get("ADMIN_TG_ID", "0") or 0))
+    admin_tg_id: int = field(default_factory=lambda: _get_int("ADMIN_TG_ID", 0))
 
     # --- Фаза 2: миграция кода gbooru_tg (ТЗ §10) ---
     # Опциональные ключи Gelbooru API (нужны для автопарсинга подписок — Фаза 3).
@@ -53,12 +73,12 @@ class Settings:
     # Минимальная пауза между отправками в одну очередь (защита от 429, ТЗ §2.5.2 п.3)
     send_throttle_seconds: float = field(default_factory=lambda: float(_get("SEND_THROTTLE_SECONDS", "1.1") or 1.1))
     # Лимит попыток отправки поста до перевода в failed (ТЗ §2.5.2 п.4)
-    max_send_attempts: int = field(default_factory=lambda: int(_get("MAX_SEND_ATTEMPTS", "3") or 3))
+    max_send_attempts: int = field(default_factory=lambda: _get_int("MAX_SEND_ATTEMPTS", 3))
     # Часовой пояс для daily_window очередей (Asia/Yekaterinburg — TZ пользователя)
     timezone: str = field(default_factory=lambda: _get("TIMEZONE", "Asia/Yekaterinburg"))
 
     # --- Веб-интерфейс (ТЗ §7) ---
-    web_port: int = field(default_factory=lambda: int(_get("WEB_PORT", "8000") or 8000))
+    web_port: int = field(default_factory=lambda: _get_int("WEB_PORT", 8000))
 
     # --- Пути ---
     data_dir: Path = BASE_DIR / "data"
@@ -67,8 +87,13 @@ class Settings:
     media_dir: Path = Path(_get("MEDIA_DIR", str(data_dir / "media")))  # в Docker: /app/media
 
     def validate(self) -> list[str]:
-        """Возвращает список критических проблем конфигурации."""
-        problems = []
+        """Возвращает список критических проблем конфигурации.
+
+        Покрывает как обязательные значения (BOT_TOKEN, TELEGRAM_API_ID, SECRET_TOKEN,
+        ADMIN_TG_ID), так и диапазоны/форматы числовых и строковых полей
+        (web_port, timezone, send_throttle_seconds, max_send_attempts, bot_api_url).
+        """
+        problems: list[str] = []
         if not self.bot_token:
             problems.append("BOT_TOKEN не задан — бот не сможет работать ни с облачным, ни с локальным API")
         if not self.telegram_api_id or not self.telegram_api_hash:
@@ -83,6 +108,39 @@ class Settings:
                 "ADMIN_TG_ID не задан — никто не сможет стать admin при первом /start "
                 "(управление пользователями/каналами/очередями будет недоступно, ТЗ §2.6)"
             )
+
+        # --- Диапазоны числовых полей ---
+        if not (1 <= self.web_port <= 65535):
+            problems.append(f"WEB_PORT={self.web_port} вне диапазона 1-65535")
+        if self.send_throttle_seconds <= 0:
+            problems.append(
+                f"SEND_THROTTLE_SECONDS={self.send_throttle_seconds} должен быть > 0 "
+                "(защита от 429 не работает с неположительной паузой)"
+            )
+        if self.max_send_attempts <= 0:
+            problems.append(
+                f"MAX_SEND_ATTEMPTS={self.max_send_attempts} должен быть > 0 "
+                "(иначе посты никогда не перейдут в failed и будут крутиться в очереди бесконечно)"
+            )
+
+        # --- Часовой пояс: должен существовать в tzdata ---
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(self.timezone)
+        except Exception as e:  # noqa: BLE001 — ZoneInfoNotFoundError -> KeyError; OSError на битой tzdata
+            problems.append(
+                f"TIMEZONE={self.timezone!r} не распознан ({type(e).__name__}: {e}); "
+                "см. список IANA tz (https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)"
+            )
+
+        # --- bot_api_url: должен быть http(s)://... ---
+        url = self.bot_api_url.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            problems.append(
+                f"BOT_API_URL={self.bot_api_url!r} должен начинаться с http:// или https://"
+            )
+
         return problems
 
 
