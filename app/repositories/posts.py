@@ -315,6 +315,38 @@ async def assign_queue(post_id: int, queue_id: int | None) -> bool:
     return changed
 
 
+async def set_file_info(
+    post_id: int,
+    *,
+    file_path: str | None = None,
+    file_type: str | None = None,
+    file_size: int | None = None,
+    mime_type: str | None = None,
+) -> bool:
+    """Сохраняет метаданные скачанного файла в posts (ТЗ §4.2.2, Фаза 3).
+
+    Вызывается worker'ом после успешного download_media(). file_type может
+    обновляться (Content-Type точнее, чем предположение при создании поста).
+    Переданные None-поля не затрагиваются (COALESCE).
+    """
+    db = get_db()
+    cur = await db.execute(
+        """
+        UPDATE posts SET
+            file_path  = COALESCE(?, file_path),
+            file_type  = COALESCE(?, file_type),
+            file_size  = COALESCE(?, file_size),
+            mime_type  = COALESCE(?, mime_type)
+        WHERE id = ?
+        """,
+        (file_path, file_type, file_size, mime_type, post_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
 # Шаблон hex-строки: только 0-9a-f, чётной длины (байты). Длина произвольная,
 # т.к. pHash-алгоритмы дают разную битность (64 бита = 16 hex, 128 бит = 32 hex и т.д.).
 _PHEX_RE = re.compile(r"^(?:[0-9a-fA-F]{2})+$")
