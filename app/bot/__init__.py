@@ -50,14 +50,21 @@ def get_dispatcher() -> Dispatcher:
 
     # Глобальный error-handler: не роняем dispatcher из-за необработанной ошибки в хендлере.
     # Логируем и пытаемся сообщить пользователю.
+    #
+    # ВАЖНО: aiogram 3.x dp.errors() handler signature — (event: ErrorEvent).
+    # ErrorEvent содержит поля `update` и `exception`. НЕ передаём `update`
+    # отдельным параметром (старая сигнатура on_error(event, update) падала с
+    # TypeError: missing 1 required positional argument: 'update' при обработке
+    # исключения в handler'е — маскируя первичную ошибку).
     try:
         from aiogram.exceptions import TelegramRetryAfter
-        from aiogram.types import ErrorEvent, Update
+        from aiogram.types import ErrorEvent
 
         @dp.errors()
-        async def on_error(event: ErrorEvent, update: Update) -> None:  # type: ignore[unused-ignore]
+        async def on_error(event: ErrorEvent) -> None:  # type: ignore[unused-ignore]
             log.exception("Unhandled exception in handler: %s", event.exception)
             try:
+                update = event.update
                 if update.callback_query:
                     try:
                         await update.callback_query.answer(

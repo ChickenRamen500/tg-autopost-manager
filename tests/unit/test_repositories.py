@@ -167,7 +167,12 @@ def test_duplicate_detection(tmp_path):
 
 
 def test_create_post_invalid_file_type(tmp_path):
-    """create_post с невалидным file_type → ValueError (PR-40 edge case)."""
+    """create_post с невалидным file_type → ValueError (PR-40 edge case).
+
+    Примечание: PR #48 добавил 'audio' и 'voice' в список валидных file_type
+    (поддержка mp3/voice сообщений). Теперь валидные: photo/video/gif/document/audio/voice.
+    Для negative-теста используем заведомо невалидное значение 'invalid_type'.
+    """
     from conftest import run_with_db
 
     async def body():
@@ -176,8 +181,38 @@ def test_create_post_invalid_file_type(tmp_path):
         with pytest.raises(ValueError, match="file_type"):
             await posts_repo.create_post(
                 source_type="telegram_direct",
-                file_type="audio",  # НЕ валидном списке (photo/video/gif/document)
+                file_type="invalid_type",  # НЕ в списке photo/video/gif/document/audio/voice
             )
+
+    run_with_db(tmp_path, body)
+
+
+def test_create_post_accepts_audio_and_voice(tmp_path):
+    """create_post с file_type='audio' и 'voice' → OK (PR #48: поддержка mp3/voice)."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import posts as posts_repo
+
+        # audio (mp3)
+        post_id = await posts_repo.create_post(
+            source_type="telegram_direct",
+            file_type="audio",
+            tg_file_id="audio_file_id_1",
+            file_unique_id="audio_uniq_1",
+            file_size=1024 * 100,
+        )
+        assert post_id > 0, "create_post должен вернуть id новой записи для audio"
+
+        # voice
+        post_id2 = await posts_repo.create_post(
+            source_type="telegram_direct",
+            file_type="voice",
+            tg_file_id="voice_file_id_1",
+            file_unique_id="voice_uniq_1",
+            file_size=1024 * 50,
+        )
+        assert post_id2 > 0, "create_post должен вернуть id новой записи для voice"
 
     run_with_db(tmp_path, body)
 

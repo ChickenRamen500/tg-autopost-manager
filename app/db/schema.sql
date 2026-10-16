@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS posts (
     source_url         TEXT,
     source_channel     TEXT,
     file_path          TEXT,                           -- NULL, если пост только по file_id
-    file_type          TEXT NOT NULL CHECK(file_type IN ('photo', 'video', 'gif', 'document')),
+    file_type          TEXT NOT NULL CHECK(file_type IN ('photo', 'video', 'gif', 'document', 'audio', 'voice')),
     tg_file_id         TEXT,                           -- file_id Telegram (для телеграм-источников)
     file_unique_id     TEXT,                           -- стабильный id файла Telegram (дедуп)
     file_size          INTEGER,                        -- размер в байтах (логирование, лимиты)
