@@ -27,9 +27,11 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from app.bot import get_bot, get_dispatcher
 from app.config.settings import settings
 from app.db import bootstrap_admin, close_db, init_db
+from app.repositories import task_queue as tq_repo
 from app.scheduler import get_scheduler, setup_scheduler_async
 from app.services.parsers.gelbooru import cache, tags_db
 from app.utils.local_bot_api import get_me
+from app.worker import start_worker, stop_worker
 
 # НЕ используем logging.basicConfig — он перетирает handlers uvicorn/gunicorn.
 # Только поднимаем уровень корневого логгера, оставляя handlers изо всех мест.
@@ -124,7 +126,13 @@ async def lifespan(_app: FastAPI):
     sched.start()
     log.info("APScheduler запущен")
 
-    # 6. Bot polling (ТЗ §8)
+    # 6. Worker — обработка task_queue (ТЗ §4.2.2, Фаза 3)
+    # Запускается ПОСЛЕ scheduler, т.к. worker переводит посты new→pending, а
+    # scheduler уже должен быть готов их отправлять. Worker внутри uvicorn-процесса
+    # (как и scheduler) — отдельный процесс не нужен (SQLite single-writer).
+    start_worker()
+
+    # 7. Bot polling (ТЗ §8)
     _bot_polling_task = asyncio.create_task(_bot_polling())
     _bot_polling_task.add_done_callback(_on_polling_done)
 
@@ -133,6 +141,13 @@ async def lifespan(_app: FastAPI):
     finally:
         # Shutdown — закрываем ВСЕ ресурсы (code review CRITICAL #1)
         log.info("Остановка приложения…")
+        # Worker останавливаем ПЕРВЫМ — чтобы не было гонки между переводом постов
+        # в pending и закрытием БД/scheduler. Worker.cancel → in_progress задачи
+        # останутся (сбросятся cleanup'ом при следующем старте).
+        try:
+            await stop_worker()
+        except Exception as e:  # noqa: BLE001
+            log.warning("stop_worker: %s", e)
         if _bot_polling_task:
             _bot_polling_task.cancel()
             try:
@@ -152,7 +167,7 @@ async def lifespan(_app: FastAPI):
                 loop.run_in_executor(None, lambda: sched.shutdown(wait=True)),
                 timeout=30,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "APScheduler shutdown превысил 30с — принудительно завершаем (running jobs могут потерять состояние)"
             )
@@ -182,7 +197,7 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.2.0-phase2", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage1", lifespan=lifespan)
 
 
 # P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.
@@ -232,3 +247,24 @@ async def health_scheduler(_token: None = Depends(verify_token)) -> dict:
             "next_run": str(job.next_run_time) if job.next_run_time else None,
         })
     return {"status": "ok" if sched.running else "stopped", "jobs": jobs}
+
+
+@app.get("/health/worker")
+async def health_worker(_token: None = Depends(verify_token)) -> dict:
+    """Состояние worker'а (Фаза 3): running + счётчики + статистика task_queue."""
+    from app.worker import get_worker
+
+    w = get_worker()
+    stats = {
+        "queued": await tq_repo.count_by_status("queued"),
+        "in_progress": await tq_repo.count_by_status("in_progress"),
+        "done": await tq_repo.count_by_status("done"),
+        "error": await tq_repo.count_by_status("error"),
+    }
+    return {
+        "status": "ok" if w.running else "stopped",
+        "processed": w.processed,
+        "errors": w.errors,
+        "requeued": w.requeued,
+        "task_queue": stats,
+    }

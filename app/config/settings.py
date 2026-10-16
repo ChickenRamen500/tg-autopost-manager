@@ -77,6 +77,26 @@ class Settings:
     # Часовой пояс для daily_window очередей (Asia/Yekaterinburg — TZ пользователя)
     timezone: str = field(default_factory=lambda: _get("TIMEZONE", "Asia/Yekaterinburg"))
 
+    # --- Фаза 3: worker (ТЗ §4.2.2 — обработка task_queue) ---
+    # Интервал опроса task_queue на новые queued-задачи, сек. Короткий интервал = быстрая
+    # реакция, но больший расход CPU/БД; длинный = экономия, но задержка обработки.
+    worker_poll_interval_seconds: float = field(
+        default_factory=lambda: float(_get("WORKER_POLL_INTERVAL_SECONDS", "2.0") or 2.0)
+    )
+    # Лимит попыток выполнения задачи (download) до перевода в status='error'.
+    # task_queue.attempts инкрементируется в take_next(); по достижении лимита задача
+    # помечается error и больше не возвращается в очередь (требует ручного requeue).
+    worker_max_attempts: int = field(default_factory=lambda: _get_int("WORKER_MAX_ATTEMPTS", 3))
+    # Зависшие in_progress задачи старше этого количества минут считаются «перевисшими»
+    # (worker упал / рестарт контейнера / OOM-kill) и сбрасываются обратно в queued.
+    worker_stale_timeout_minutes: int = field(default_factory=lambda: _get_int("WORKER_STALE_TIMEOUT_MINUTES", 30))
+    # Таймаут HTTP-скачивания внешних файлов (Gelbooru/Pikabu/...), сек. Большие файлы
+    # на медленном канале могут требовать больше — но бесконечно ждать нельзя (worker
+    # блокируется на одной задаче). По умолчанию 120 сек — баланс для изображений/коротких видео.
+    worker_download_timeout_seconds: int = field(default_factory=lambda: _get_int("WORKER_DOWNLOAD_TIMEOUT_SECONDS", 120))
+    # Период запуска cleanup-процедуры (reset_stale_in_progress), сек.
+    worker_cleanup_interval_seconds: int = field(default_factory=lambda: _get_int("WORKER_CLEANUP_INTERVAL_SECONDS", 300))
+
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: _get_int("WEB_PORT", 8000))
 
@@ -121,6 +141,30 @@ class Settings:
             problems.append(
                 f"MAX_SEND_ATTEMPTS={self.max_send_attempts} должен быть > 0 "
                 "(иначе посты никогда не перейдут в failed и будут крутиться в очереди бесконечно)"
+            )
+
+        # --- Фаза 3: worker ---
+        if self.worker_poll_interval_seconds <= 0:
+            problems.append(
+                f"WORKER_POLL_INTERVAL_SECONDS={self.worker_poll_interval_seconds} должен быть > 0 "
+                "(неположительный интервал = busy-loop, грузит CPU/БД)"
+            )
+        if self.worker_max_attempts <= 0:
+            problems.append(
+                f"WORKER_MAX_ATTEMPTS={self.worker_max_attempts} должен быть > 0 "
+                "(иначе задачи никогда не перейдут в error и будут ретраиться бесконечно)"
+            )
+        if self.worker_stale_timeout_minutes < 0:
+            problems.append(
+                f"WORKER_STALE_TIMEOUT_MINUTES={self.worker_stale_timeout_minutes} должен быть >= 0"
+            )
+        if self.worker_download_timeout_seconds <= 0:
+            problems.append(
+                f"WORKER_DOWNLOAD_TIMEOUT_SECONDS={self.worker_download_timeout_seconds} должен быть > 0"
+            )
+        if self.worker_cleanup_interval_seconds <= 0:
+            problems.append(
+                f"WORKER_CLEANUP_INTERVAL_SECONDS={self.worker_cleanup_interval_seconds} должен быть > 0"
             )
 
         # --- Часовой пояс: должен существовать в tzdata ---
