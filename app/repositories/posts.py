@@ -73,7 +73,7 @@ async def create_post(
     """
     if status not in ("new", "downloading", "pending", "sent", "failed", "duplicate", "possible_duplicate"):
         raise ValueError(f"Недопустимый статус поста: {status!r}")
-    if file_type not in ("photo", "video", "gif", "document"):
+    if file_type not in ("photo", "video", "gif", "document", "audio", "voice"):
         raise ValueError(f"Недопустимый file_type: {file_type!r}")
 
     db = get_db()
