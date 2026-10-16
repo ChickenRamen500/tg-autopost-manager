@@ -97,6 +97,19 @@ class Settings:
     # Период запуска cleanup-процедуры (reset_stale_in_progress), сек.
     worker_cleanup_interval_seconds: int = field(default_factory=lambda: _get_int("WORKER_CLEANUP_INTERVAL_SECONDS", 300))
 
+    # --- Фаза 3: pHash-дедупликация (ТЗ §2.4.3) ---
+    # Включить визуальную дедупликацию (imagehash.phash + Hamming distance).
+    # False → посты никогда не помечаются possible_duplicate по pHash (только по file_unique_id).
+    phash_enabled: bool = field(default_factory=lambda: _get("PHASH_ENABLED", "1").strip() not in ("0", "false", "no", "off"))
+    # Порог расстояния Хэмминга: два изображения считаются дубликатами если
+    # distance ≤ phash_max_distance. 0 = точное совпадение, 5 = «похожие» (рекомендация
+    # imagehash для устойчивости к ресайзу/перекомпрессии). Выше 8 — много false positives.
+    phash_max_distance: int = field(default_factory=lambda: _get_int("PHASH_MAX_DISTANCE", 5))
+    # Скачивать thumbnail фото из ЛС для pHash-проверки при приёме (ТЗ §2.1.1: «файл
+    # НЕ скачивается при приёме» — thumbnail это минимальное исключение ради дедупликации).
+    # False → pHash при приёме не вычисляется, только после явной обработки (worker).
+    phash_check_on_receive: bool = field(default_factory=lambda: _get("PHASH_CHECK_ON_RECEIVE", "1").strip() not in ("0", "false", "no", "off"))
+
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: _get_int("WEB_PORT", 8000))
 
@@ -165,6 +178,18 @@ class Settings:
         if self.worker_cleanup_interval_seconds <= 0:
             problems.append(
                 f"WORKER_CLEANUP_INTERVAL_SECONDS={self.worker_cleanup_interval_seconds} должен быть > 0"
+            )
+
+        # --- Фаза 3: pHash ---
+        if self.phash_max_distance < 0:
+            problems.append(
+                f"PHASH_MAX_DISTANCE={self.phash_max_distance} должен быть >= 0 "
+                "(отрицательное расстояние Хэмминга не имеет смысла)"
+            )
+        if self.phash_max_distance > 32:
+            problems.append(
+                f"PHASH_MAX_DISTANCE={self.phash_max_distance} слишком большой (>32) — "
+                "практически все изображения будут считаться дубликатами (64-битный pHash)"
             )
 
         # --- Часовой пояс: должен существовать в tzdata ---
