@@ -12,12 +12,96 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import time
 from typing import Any
 
 from app.repositories import app_settings as app_settings_repo
 
 log = logging.getLogger("archive")
+
+# --- Throttle для отправки в служебный канал (защита от flood control) ---
+#
+# Контекст: при массовой отправке постов/альбомов (например, импорт 10 альбомов
+# или обработка нескольких постов из очереди подряд) бот шлёт много запросов в
+# служебный канал за короткое время. Telegram возвращает 429 Too Many Requests
+# с retry_after (часто 5 сек):
+#     "Flood control exceeded on method 'SendMediaGroup' in chat -100...
+#      Retry in 5 seconds. Original description: Too Many Requests: retry after 5"
+#
+# Решение: глобальный throttle (минимальная пауза ARCHIVE_SEND_INTERVAL между
+# запросами в служебный канал) + retry при TelegramRetryAfter (sleep retry_after
+# + 0.5 сек, повтор один раз). Throttle через asyncio.Lock — гарантирует, что
+# даже concurrent archive_post/archive_album вызовы идут последовательно.
+#
+# Лимит Telegram: ~30 сообщений в минуту в один chat → 2 сек между запросами
+# с запасом. ARCHIVE_SEND_INTERVAL=1.5 даёт ~40 запросов/мин (с учётом send_media_group
+# считается как 1 сообщение — безопасно).
+
+_archive_lock: asyncio.Lock | None = None
+_last_archive_send_time: float = 0.0
+ARCHIVE_SEND_INTERVAL: float = float(os.getenv("ARCHIVE_SEND_INTERVAL", "1.5"))
+
+
+def _get_archive_lock() -> asyncio.Lock:
+    """Lazy-init Lock (не на module-level — иначе event loop ещё не запущен при импорте)."""
+    global _archive_lock
+    if _archive_lock is None:
+        _archive_lock = asyncio.Lock()
+    return _archive_lock
+
+
+async def _throttled_archive_send(
+    send_callable,
+    *,
+    op_name: str,
+    post_id: int | None = None,
+) -> Any | None:
+    """Отправляет в служебный канал с throttle + retry на TelegramRetryAfter.
+
+    Гарантирует:
+    - Минимальная пауза ARCHIVE_SEND_INTERVAL между запросами (даже если concurrent callers)
+    - При 429 RetryAfter — sleep retry_after + 0.5 сек, retry 1 раз
+    - Любые другие ошибки — логируются, не роняют процесс (архив не критичен)
+
+    Возвращает результат send_callable или None при ошибке.
+    """
+    from aiogram.exceptions import TelegramRetryAfter
+
+    global _last_archive_send_time
+    lock = _get_archive_lock()
+
+    async with lock:
+        # Throttle: спим, если с последней отправки прошло меньше ARCHIVE_SEND_INTERVAL
+        elapsed = time.monotonic() - _last_archive_send_time
+        if elapsed < ARCHIVE_SEND_INTERVAL:
+            await asyncio.sleep(ARCHIVE_SEND_INTERVAL - elapsed)
+
+        try:
+            result = await send_callable()
+        except TelegramRetryAfter as e:
+            retry = float(e.retry_after) + 0.5
+            log.warning(
+                "Flood control на %s (пост #%s): ждём %.1f сек, retry",
+                op_name, post_id, retry,
+            )
+            await asyncio.sleep(retry)
+            try:
+                result = await send_callable()
+            except Exception as e2:  # noqa: BLE001 — архив не критичен
+                log.warning("Retry %s тоже упал (пост #%s): %s", op_name, post_id, e2)
+                return None
+        except Exception as e:  # noqa: BLE001 — архив не критичен
+            log.warning("Не удалось выполнить %s (пост #%s): %s", op_name, post_id, e)
+            return None
+
+        # Обновляем время последней отправки (даже если была RetryAfter — после
+        # успешного retry сервер Telegram уже не считает запрос flood'ом, но
+        # всё равно лучше выдержать паузу перед следующим)
+        _last_archive_send_time = time.monotonic()
+        return result
 
 # Маппинг типов файлов в теги
 TYPE_TAGS = {
@@ -91,21 +175,40 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
         if len(full_caption) > 1024:
             full_caption = full_caption[:1021] + "..."
 
+        post_id = post.get("id")
         if file_type == "photo":
-            await bot.send_photo(chat_id=archive_channel, photo=tg_file_id, caption=full_caption)
+            await _throttled_archive_send(
+                lambda: bot.send_photo(chat_id=archive_channel, photo=tg_file_id, caption=full_caption),
+                op_name="send_photo", post_id=post_id,
+            )
         elif file_type == "video":
-            await bot.send_video(chat_id=archive_channel, video=tg_file_id, caption=full_caption)
+            await _throttled_archive_send(
+                lambda: bot.send_video(chat_id=archive_channel, video=tg_file_id, caption=full_caption),
+                op_name="send_video", post_id=post_id,
+            )
         elif file_type == "gif":
-            await bot.send_animation(chat_id=archive_channel, animation=tg_file_id, caption=full_caption)
+            await _throttled_archive_send(
+                lambda: bot.send_animation(chat_id=archive_channel, animation=tg_file_id, caption=full_caption),
+                op_name="send_animation", post_id=post_id,
+            )
         elif file_type == "audio":
-            await bot.send_audio(chat_id=archive_channel, audio=tg_file_id, caption=full_caption)
+            await _throttled_archive_send(
+                lambda: bot.send_audio(chat_id=archive_channel, audio=tg_file_id, caption=full_caption),
+                op_name="send_audio", post_id=post_id,
+            )
         elif file_type == "voice":
-            await bot.send_voice(chat_id=archive_channel, voice=tg_file_id, caption=full_caption)
+            await _throttled_archive_send(
+                lambda: bot.send_voice(chat_id=archive_channel, voice=tg_file_id, caption=full_caption),
+                op_name="send_voice", post_id=post_id,
+            )
         else:
-            await bot.send_document(chat_id=archive_channel, document=tg_file_id, caption=full_caption)
-        log.info("Пост #%s архивирован в канал %s", post.get("id"), archive_channel)
+            await _throttled_archive_send(
+                lambda: bot.send_document(chat_id=archive_channel, document=tg_file_id, caption=full_caption),
+                op_name="send_document", post_id=post_id,
+            )
+        log.info("Пост #%s архивирован в канал %s", post_id, archive_channel)
         return True
-    except Exception as e:  # noqa: BLE001 — архив не критичен
+    except Exception as e:  # noqa: BLE001 — архив не критичен (fallback дляunexpected errors outside send)
         log.warning("Не удалось архивировать пост #%s: %s", post.get("id"), e)
         return False
 
@@ -149,7 +252,17 @@ async def archive_album(posts: list[dict[str, Any]], target_channel_id: int) -> 
         # Обрезаем подпись первого элемента до 1024 (лимит Telegram для album caption)
         if media and media[0].caption and len(media[0].caption) > 1024:
             media[0].caption = media[0].caption[:1021] + "..."
-        await bot.send_media_group(chat_id=archive_channel, media=media)
+
+        # post_id первого поста альбома — для логов
+        first_post_id = posts[0].get("id") if posts else None
+
+        result = await _throttled_archive_send(
+            lambda: bot.send_media_group(chat_id=archive_channel, media=media),
+            op_name="send_media_group", post_id=first_post_id,
+        )
+        if result is None:
+            log.warning("Не удалось архивировать альбом (первый пост #%s) — все retry исчерпаны", first_post_id)
+            return False
         log.info("Альбом (%d медиа) архивирован", len(media))
         return True
     except Exception as e:  # noqa: BLE001
