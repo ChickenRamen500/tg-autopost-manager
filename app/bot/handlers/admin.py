@@ -55,7 +55,7 @@ async def cmd_list_queues(message: Message, user: dict | None = None, user_role:
 @router.message(Command("queue"))
 async def cmd_queue(message: Message, command: CommandObject, user: dict | None = None) -> None:
     if not command.args:
-        await message.answer("Использование: /queue <queue_id>")
+        await message.answer("Использование: /queue <code>queue_id</code>")
         return
     try:
         qid = int(command.args.split()[0])
@@ -79,7 +79,7 @@ async def cmd_remove_from_queue(message: Message, command: CommandObject, user_r
         await message.answer("🔒 Доступ: admin/moderator.")
         return
     if not command.args:
-        await message.answer("Использование: /remove_from_queue <post_id>")
+        await message.answer("Использование: /remove_from_queue <code>post_id</code>")
         return
     try:
         pid = int(command.args.split()[0])
@@ -190,7 +190,7 @@ async def cmd_set_role(message: Message, command: CommandObject, user_role: str 
         return
     args = (command.args or "").split()
     if len(args) < 2:
-        await message.answer("Использование: /set_role @username <role> (ответом на пересланное сообщение юзера)")
+        await message.answer("Использование: /set_role @username <code>role</code> (ответом на пересланное сообщение юзера)")
         return
     username = args[0].lstrip("@")
     role = args[1].lower()
@@ -281,7 +281,7 @@ async def cmd_add_channel(message: Message, command: CommandObject, user_role: s
         return
     args = (command.args or "").split()
     if len(args) < 2:
-        await message.answer("Использование: /add_channel <tg_chat_id> <name> [@username]")
+        await message.answer("Использование: /add_channel <code>tg_chat_id</code> <code>name</code> [@username]")
         return
     try:
         tg_chat_id = int(args[0])
@@ -338,7 +338,7 @@ async def cmd_remove_channel(message: Message, command: CommandObject, user_role
     try:
         cid = int((command.args or "").split()[0])
     except (ValueError, IndexError):
-        await message.answer("Использование: /remove_channel <channel_id>")
+        await message.answer("Использование: /remove_channel <code>channel_id</code>")
         return
     try:
         ok = await channels_repo.remove_channel(cid)
@@ -358,7 +358,7 @@ async def cmd_add_queue(message: Message, command: CommandObject, user_role: str
         return
     args = (command.args or "").split()
     if len(args) < 3:
-        await message.answer("Использование: /add_queue <channel_id> <name> <interval_min>")
+        await message.answer("Использование: /add_queue <code>channel_id</code> <code>name</code> <code>interval_min</code>")
         return
     try:
         ch_id = int(args[0])
@@ -395,7 +395,7 @@ async def cmd_remove_queue(message: Message, command: CommandObject, user_role: 
     try:
         qid = int((command.args or "").split()[0])
     except (ValueError, IndexError):
-        await message.answer("Использование: /remove_queue <queue_id>")
+        await message.answer("Использование: /remove_queue <code>queue_id</code>")
         return
     try:
         ok = await queues_repo.remove_queue(qid)
@@ -435,7 +435,7 @@ async def cmd_add_to_queue(message: Message, command: CommandObject, user_role: 
         return
     args = (command.args or "").split()
     if len(args) < 2:
-        await message.answer("Использование: /add_to_queue <post_id> <queue_id>")
+        await message.answer("Использование: /add_to_queue <code>post_id</code> <code>queue_id</code>")
         return
     try:
         post_id = int(args[0])
@@ -486,7 +486,7 @@ async def cmd_subscribe(message: Message, command: CommandObject, user: dict | N
         return
     args = (command.args or "").split()
     if len(args) < 2 or args[0].lower() not in ("gelbooru", "danbooru"):
-        await message.answer("Использование: /subscribe gelbooru <tag1> <tag2> ...")
+        await message.answer("Использование: /subscribe gelbooru <code>tag1</code> <code>tag2</code> ...")
         return
     site = args[0].lower()
     tags = args[1:]

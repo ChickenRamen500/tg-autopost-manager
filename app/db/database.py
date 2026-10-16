@@ -77,6 +77,10 @@ async def init_db() -> aiosqlite.Connection:
         # (который добавляет колонку file_unique_id в старые БД), но ДО повторного
         # executescript (который создаёт UNIQUE index).
         await _cleanup_duplicate_file_unique_ids(_db)
+        # Миграция CHECK constraint на file_type — для БД, созданных между PR #40 и PR #48
+        # (старый CHECK без audio/voice). Иначе INSERT с file_type='audio' падает
+        # с IntegrityError: CHECK constraint failed: file_type IN ('photo','video','gif','document')
+        await _migrate_posts_file_type_check(_db)
         try:
             await _db.executescript(schema_sql)
         except (aiosqlite.OperationalError, aiosqlite.IntegrityError) as e2:
@@ -88,6 +92,10 @@ async def init_db() -> aiosqlite.Connection:
         # Обычный путь: схема легла целиком — миграции добирают колонки для
         # таблиц, которые IF NOT EXISTS не тронул (существующие старые БД).
         await _run_migrations(_db)
+        # Миграция CHECK constraint на file_type — даже если executescript прошёл
+        # успешно (CREATE TABLE IF NOT EXISTS пропускает существующую таблицу),
+        # старый CHECK мог остаться навязанным — проверяем и мигрируем если надо.
+        await _migrate_posts_file_type_check(_db)
     await _db.commit()
 
     log.info("БД инициализирована: %s (схема применена)", settings.db_path)
@@ -217,6 +225,112 @@ async def _cleanup_duplicate_file_unique_ids(db: aiosqlite.Connection) -> int:
             total_nulled,
         )
     return total_nulled
+
+
+async def _migrate_posts_file_type_check(db: aiosqlite.Connection) -> bool:
+    """Пересоздаёт таблицу posts если CHECK constraint на file_type не включает audio/voice.
+
+    Контекст: PR #40 добавил CHECK constraint `file_type IN ('photo','video','gif','document')`
+    в schema.sql. PR #48 расширил его до `('photo','video','gif','document','audio','voice')`.
+    Но CREATE TABLE IF NOT EXISTS в executescript НЕ обновляет существующую таблицу —
+    старый CHECK остаётся навязанным, и INSERT с file_type='audio' падает:
+        sqlite3.IntegrityError: CHECK constraint failed: file_type IN ('photo','video','gif','document')
+
+    Решение: проверить CHECK через sqlite_master.sql — если не содержит 'audio'/'voice',
+    пересоздать таблицу через CREATE+INSERT+DROP+RENAME.
+
+    Безопасность:
+    - PRAGMA foreign_keys=OFF на время операции — иначе DROP TABLE триггерит CASCADE
+      удаления из duplicate_hashes и task_queue (FK ON DELETE CASCADE)
+    - Все данные копируются INSERT INTO posts_new SELECT * FROM posts
+    - Все индексы пересоздаются
+    - PRAGMA foreign_keys=ON в finally — гарантирует включение обратно
+
+    Возвращает True если миграция выполнена, False если не нужна.
+    Идемпотентна: если CHECK уже правильный — ничего не делает.
+    """
+    # Проверяем нужна ли миграция — читаем CREATE TABLE statement
+    cur = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='posts'")
+    row = await cur.fetchone()
+    await cur.close()
+
+    if not row or not row[0]:
+        return False  # таблицы нет — init_db создаст с правильным CHECK
+
+    table_sql = row[0]
+    # Если в CREATE TABLE уже есть 'audio' И 'voice' в CHECK — миграция не нужна
+    if "'audio'" in table_sql and "'voice'" in table_sql:
+        return False  # CHECK уже правильный
+
+    log.warning(
+        "Миграция: таблица posts имеет старый CHECK на file_type (без audio/voice) — "
+        "пересоздаём таблицу для поддержки mp3/voice сообщений"
+    )
+
+    # 1. Временно отключаем foreign_keys — иначе DROP TABLEposts триггерит
+    #    ON DELETE CASCADE из duplicate_hashes и task_queue → потеря данных
+    await db.execute("PRAGMA foreign_keys=OFF")
+
+    try:
+        # 2. Создаём новую таблицу с правильным CHECK (копия схемы из schema.sql)
+        await db.execute("""
+            CREATE TABLE posts_new (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id           INTEGER,
+                source_type        TEXT NOT NULL,
+                source_id          TEXT,
+                source_url         TEXT,
+                source_channel     TEXT,
+                file_path          TEXT,
+                file_type          TEXT NOT NULL CHECK(file_type IN ('photo', 'video', 'gif', 'document', 'audio', 'voice')),
+                tg_file_id         TEXT,
+                file_unique_id     TEXT,
+                file_size          INTEGER,
+                mime_type          TEXT,
+                was_processed      INTEGER NOT NULL DEFAULT 0,
+                original_caption   TEXT,
+                processed_caption  TEXT,
+                tags               TEXT,
+                status             TEXT NOT NULL CHECK(status IN ('new', 'downloading', 'pending', 'sent',
+                                                                   'failed', 'duplicate', 'possible_duplicate')),
+                phash              TEXT,
+                media_group_id     TEXT,
+                scheduled_time     DATETIME,
+                sent_at            DATETIME,
+                send_attempts      INTEGER NOT NULL DEFAULT 0,
+                last_error         TEXT,
+                created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (queue_id) REFERENCES queues(id) ON DELETE SET NULL
+            )
+        """)
+
+        # 3. Копируем все данные (COLLATE-agnostic, просто COPY)
+        # ВАЖНО: column order в posts_new должен совпадать с posts (он совпадает — мы
+        # создавали новую таблицу с теми же колонками в том же порядке).
+        await db.execute("INSERT INTO posts_new SELECT * FROM posts")
+
+        # 4. Дропаем старую таблицу
+        await db.execute("DROP TABLE posts")
+
+        # 5. Переименовываем новую в posts
+        await db.execute("ALTER TABLE posts_new RENAME TO posts")
+
+        # 6. Пересоздаём все индексы (DROP TABLE их удалил)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_queue_status ON posts(queue_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_file_unique  ON posts(file_unique_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_source       ON posts(source_type, source_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_posts_media_group  ON posts(media_group_id)")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_file_unique_unique ON posts(file_unique_id)")
+
+        await db.commit()
+        log.info(
+            "Миграция posts завершена: CHECK на file_type обновлён — audio/voice теперь валидны. "
+            "Все данные и индексы сохранены."
+        )
+        return True
+    finally:
+        # PRAGMA foreign_keys=ON в finally — гарантированно включаем обратно
+        await db.execute("PRAGMA foreign_keys=ON")
 
 
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
