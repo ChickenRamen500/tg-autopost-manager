@@ -266,8 +266,32 @@ class Worker:
             file_size=result["file_size"],
             mime_type=result["mime_type"],
         )
-        await posts_repo.update_status(post_id, "pending")
-        log.info("Worker: пост #%s → pending (file_path=%s)", post_id, result["file_path"])
+
+        # pHash-дедупликация (ТЗ §2.4.3, Фаза 3 этап 2):
+        # После скачивания вычисляем pHash (только для изображений), сохраняем в БД,
+        # ищем визуальные дубликаты. Если найден → possible_duplicate (не pending),
+        # ручная проверка модератором. Иначе → pending (готов к отправке).
+        final_status = "pending"
+        try:
+            from app.services.dedup.phash import check_visual_duplicate, compute_and_store_phash
+
+            phash = await compute_and_store_phash(post_id, result["file_path"], result["file_type"])
+            if phash is not None:
+                dupes = await check_visual_duplicate(phash, exclude_post_id=post_id)
+                if dupes:
+                    dupe_ids = [d["post_id"] for d in dupes[:5]]
+                    log.warning(
+                        "Worker: пост #%s — визуальный дубликат (pHash=%s, distance≤%d): похожие посты %s",
+                        post_id, phash, settings.phash_max_distance, dupe_ids,
+                    )
+                    final_status = "possible_duplicate"
+                else:
+                    log.info("Worker: пост #%s — pHash уникален (%s)", post_id, phash)
+        except Exception as e:  # noqa: BLE001 — дедупликация не должна блокировать отправку
+            log.warning("Worker: pHash-проверка поста #%s не удалась (пропуск, → pending): %s", post_id, e)
+
+        await posts_repo.update_status(post_id, final_status)
+        log.info("Worker: пост #%s → %s (file_path=%s)", post_id, final_status, result["file_path"])
 
     # ------------------------------------------------------------------
     # Stale-cleanup цикл

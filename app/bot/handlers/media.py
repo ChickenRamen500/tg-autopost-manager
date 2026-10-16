@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from typing import Any
 
@@ -107,6 +108,18 @@ def _pick_photo(photos: list[PhotoSize]) -> tuple[str, str | None, int | None]:
     return best.file_id, best.file_unique_id, best.file_size
 
 
+def _pick_thumbnail(photos: list[PhotoSize]) -> PhotoSize | None:
+    """Выбирает минимальный размер фото для pHash-проверки (только thumbnail).
+
+    pHash устойчив к ресайзу, поэтому thumbnail (~80×80) даёт тот же хеш что и
+    оригинал. Скачивание thumbnail —几 KB вместо мегабайт, не нарушает принцип
+    «файл не скачивается при приёме» существенно.
+    """
+    if not photos:
+        return None
+    return min(photos, key=lambda p: (p.width or 0) * (p.height or 0))
+
+
 def _extract_media(message: Message) -> dict[str, Any] | None:
     """Извлекает медиа-данные из сообщения в единый словарь.
 
@@ -196,6 +209,74 @@ def _extract_source(message: Message) -> dict[str, Any]:
     }
 
 
+async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str, Any]) -> list[dict[str, Any]]:
+    """Проверяет визуальный дубликат по pHash для фото из ЛС (ТЗ §2.4.3, Фаза 3 этап 2).
+
+    Для photo: скачивает thumbnail (минимальный размер,几 KB), вычисляет pHash,
+    сохраняет в БД (set_phash_atomic), ищет дубликаты (find_phash_near).
+    Если найден → пост помечается possible_duplicate.
+
+    Возвращает список найденных дубликатов (пустой = дубликатов нет).
+    Никогда не падает — возвращает [] при любой ошибке (приём не должен роняться
+    из-за дедупликации).
+
+    Для video/gif/document — пропускается (pHash только для изображений;
+    для видео нужен ffmpeg-кадр — Фаза 5).
+    """
+    if media["file_type"] != "photo":
+        return []
+    if not message.photo:
+        return []
+    try:
+        from app.config.settings import settings
+
+        if not settings.phash_enabled or not settings.phash_check_on_receive:
+            return []
+
+        # Thumbnail — самый маленький размер (быстро скачать, pHash устойчив к ресайзу)
+        thumb = _pick_thumbnail(message.photo)
+        if thumb is None:
+            return []
+
+        from app.bot.runtime import get_bot
+
+        bot = get_bot()
+        buf = io.BytesIO()
+        # bot.download пишет в IO объект (destination=buf)
+        await bot.download(thumb.file_id, destination=buf)
+        data = buf.getvalue()
+        if not data:
+            logger.warning("pHash: thumbnail поста #%s скачан пустым — пропуск", post_id)
+            return []
+
+        from app.services.dedup.phash import check_visual_duplicate, compute_phash_from_bytes
+
+        phash = compute_phash_from_bytes(data)
+        if phash is None:
+            return []
+
+        # Атомарно сохраняем pHash в posts + duplicate_hashes
+        from app.repositories import duplicates as dup_repo
+
+        await dup_repo.set_phash_atomic(post_id, phash)
+        logger.info("pHash поста #%s (при приёме): %s", post_id, phash)
+
+        # Ищем визуальные дубликаты (исключая сам пост — он только что сохранён с этим pHash)
+        dupes = await check_visual_duplicate(phash, exclude_post_id=post_id)
+        if dupes:
+            # Помечаем пост как possible_duplicate для ручной проверки
+            await posts_repo.update_status(post_id, "possible_duplicate")
+            logger.warning(
+                "Пост #%s: визуальный дубликат (pHash=%s, distance≤%d): похожие %s",
+                post_id, phash, settings.phash_max_distance,
+                [d["post_id"] for d in dupes[:5]],
+            )
+        return dupes
+    except Exception as e:  # noqa: BLE001 — дедупликация не должна ронять приём
+        logger.warning("pHash-проверка поста #%s не удалась (пропуск): %s", post_id, e)
+        return []
+
+
 @router.message(F.photo | F.video | F.animation | F.document | F.audio | F.voice)
 async def receive_media(message: Message, user: dict | None = None) -> None:
     """Принимает медиа из ЛС, сохраняет пост, применяет маршрутизацию (ТЗ §4.2.1)."""
@@ -256,6 +337,20 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
         logger.info("Дубликат отклонён (file_unique_id conflict) — существующий #%s", existing_id)
         return
 
+    # pHash-дедупликация при приёме (ТЗ §2.4.3, Фаза 3 этап 2):
+    # Для фото — скачиваем thumbnail (мини-размер,几 KB) и вычисляем pHash.
+    # Если найден визуальный дубликат → пост помечается possible_duplicate
+    # (вместо pending) для ручной проверки модератором. pHash сохраняется в БД
+    # для будущих сравнений. Не роняет приём при ошибке.
+    phash_dupe = await _check_phash_duplicate(message, post_id, media)
+    if phash_dupe:
+        dupe_ids = [d["post_id"] for d in phash_dupe[:3]]
+        await _safe_answer(message,
+            f"⚠️ Пост #{post_id}: возможный визуальный дубликат (pHash). "
+            f"Похожие посты: {dupe_ids}. Пост помечен для проверки.",
+            reply_to_message_id=message.message_id,
+        )
+
     # Альбом: Telegram присылает каждое фото отдельным сообщением с одинаковым media_group_id.
     is_album = bool(getattr(message, "media_group_id", None))
 
@@ -288,7 +383,7 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
 
     if queue_id is None:
         # Пост во Входящих. Если источник — ЛС (telegram_direct/telegram_user),
-        # показываем интерактивный выбор очереди (блок A): кнопки каналов → очереди.
+        # показываем интерактивный выбор очереди (блок A): кнопки каналов → очередей.
         from app.bot.keyboards import builder as kb
         from app.repositories import channels as channels_repo
 
@@ -314,14 +409,24 @@ async def receive_media(message: Message, user: dict | None = None) -> None:
 
         queue = await queues_repo.get_queue(queue_id)
         qname = queue["name"] if queue else f"#{queue_id}"
-        pending_count = await queues_repo.count_pending(queue_id)
-        # Сбрасываем флаг «finished» — в очередь добавлен новый пост (CRITICAL C4)
-        from app.services import notifications
-        notifications.reset_finished(queue_id)
-        await _safe_answer(message,
-            f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
-            reply_to_message_id=message.message_id,
-        )
+        # Если пост помечен possible_duplicate (pHash-дедуп), он не встанет в
+        # отправку автоматически — нужен ручной разбор. Информируем об этом.
+        post_after = await posts_repo.get_post(post_id)
+        if post_after and post_after["status"] == "possible_duplicate":
+            await _safe_answer(message,
+                f"⚠️ Пост #{post_id} → очередь «{qname}», НО помечен как возможный дубликат. "
+                "Требует проверки (/menu → 📥 Входящие).",
+                reply_to_message_id=message.message_id,
+            )
+        else:
+            pending_count = await queues_repo.count_pending(queue_id)
+            # Сбрасываем флаг «finished» — в очередь добавлен новый пост (CRITICAL C4)
+            from app.services import notifications
+            notifications.reset_finished(queue_id)
+            await _safe_answer(message,
+                f"✓ Пост #{post_id} → очередь «{qname}» (позиция ~{pending_count})",
+                reply_to_message_id=message.message_id,
+            )
     logger.info("Принят пост #%s: type=%s source=%s queue=%s album=%s", post_id, media["file_type"], source["source_type"], queue_id, is_album)
 
 

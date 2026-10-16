@@ -475,3 +475,34 @@ Stage Summary:
 - Endpoint /health/worker для наблюдаемости (Docker healthcheck / отладка)
 - 20 новых тестов покрывают: чистые функции downloader, lifecycle постов (file_id/file_path/no-url/success/permanent/retryable/retry-exhausted), DB-констрейнты, stale cleanup, start/stop
 - Готов фундамент для этапов 2-5: pHash (этап 2 будет вызываться из _handle_download после скачивания), Gelbooru подписки (этап 3 будет создавать posts status=new + enqueue download), внешние парсеры (этап 5 будут создавать posts + enqueue download)
+
+---
+Task ID: phase3-stage2
+Agent: Phase 3 implementer
+Task: Фаза 3, Этап 2 — pHash дедупликация (визуальный поиск дубликатов)
+
+Work Log:
+- Изучил PR #51 (этап 1, слит в main): worker с _handle_download, downloader.py, task_queue репозиторий
+- Изучил duplicates.py: find_phash_near (Hamming distance), set_phash_atomic, _hamming_hex; обнаружил что find_phash_near исключает ТОЧНОЕ совпадение (hash_value != phash) — значит идентичные pHash не находятся
+- Создал ветку phase3/stage2-phash-dedup от свежего main (commit 4f735fd)
+- Добавил 3 phash-настройки в app/config/settings.py: PHASH_ENABLED (1), PHASH_MAX_DISTANCE (5), PHASH_CHECK_ON_RECEIVE (1) + валидация (max_distance 0..32)
+- Создал app/services/dedup/phash.py (новый): is_image_file (расширение/mime), compute_phash_from_image (PIL→imagehash.phash→16 hex), compute_phash (из файла), compute_phash_from_bytes (из байтов для thumbnail), compute_and_store_phash (полный цикл: вычислить + set_phash_atomic), check_visual_duplicate (объединяет find_by_hash для distance=0 + find_phash_near для distance 1..max, исключая exclude_post_id)
+- Ключевое архитектурное решение: check_visual_duplicate объединяет ДВА поиска — точный (find_by_hash, distance=0) и ближний (find_phash_near, distance 1..max). find_phash_near один не находит идентичные pHash (исключает hash_value=phash), поэтому нужен отдельный точный поиск
+- Интегрировал pHash в worker._handle_download: после скачивания → compute_and_store_phash → check_visual_duplicate(exclude_post_id=post_id) → если дубликат найден → possible_duplicate (не pending), иначе pending. Обёрнуто в try/except — pHash-ошибка не блокирует отправку
+- Интегрировал pHash в media.py handler (приём из ЛС): для photo — _pick_thumbnail (минимальный размер) → bot.download в BytesIO → compute_phash_from_bytes → set_phash_atomic → check_visual_duplicate → possible_duplicate. Финальное сообщение корректируется: если possible_duplicate, предупреждаем "требует проверки" вместо "позиция ~N"
+- Обновил .env.example блоком Фазы 3 этап 2 с комментариями
+- Создал tests/unit/test_phash.py: 29 тестов — is_image_file (extension/mime/negative), compute_phash_from_image (hex/disabled), compute_phash_from_bytes (real/empty/invalid), compute_phash (file/nonexistent/non-image/disabled/consistent/resize-invariant), compute_and_store_phash (success/non-image/disabled), check_visual_duplicate (exact/near/no-match/max_distance/excludes_self/disabled), worker (duplicate_detected/unique/disabled/video-no-phash), duplicates integration (atomic+find_near/idempotent)
+- ruff: мои файлы — 0 ошибок (baseline 33 → 33, не добавил новых)
+- pytest: 208 passed (29 новых + 179 существующих), 0 failed
+
+Stage Summary:
+- pHash дедупликация реализована на двух уровнях:
+  1. Worker (после скачивания внешних файлов) — полный цикл: download → compute_phash → set_phash_atomic → check_visual_duplicate → possible_duplicate/pending
+  2. Media handler (приём photo из ЛС) — thumbnail скачивается в BytesIO, pHash вычисляется, при дубликате → possible_duplicate вместо pending
+- Дедупликация теперь ДВУХУРОВНЕВАЯ (ТЗ §2.4.3): точная (file_unique_id, Фаза 2) + визуальная (pHash, Фаза 3 этап 2)
+- pHash устойчив к ресайзу/перекомпрессии — проверено тестом (круг 256→128, distance ≤ 10)
+- find_phash_near ограничение (исключает точное совпадение) обойдено через объединение с find_by_hash в check_visual_duplicate
+- Настройки: PHASH_ENABLED, PHASH_MAX_DISTANCE (≤5 = дубликат), PHASH_CHECK_ON_RECEIVE (можно выключить thumbnail-скачивание при приёме)
+- Видео/GIF: pHash не применяется (нужен ffmpeg-кадр — Фаза 5). Для них работает только file_unique_id дедупликация
+- 29 новых тестов покрывают: чистые функции, lifecycle (file/bytes/disabled/non-image), интеграцию с БД (atomic, find_near, idempotent), worker-интеграцию (duplicate detected/unique/disabled/video)
+- Готов фундамент для этапа 3 (Gelbooru подписки): worker уже умеет скачивать + pHash-дедуп, подписки будут создавать posts status=new + enqueue download
