@@ -259,13 +259,19 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
         # Скачиваем файл через HTTP от local-bot-api.
         # file_path при --local: /var/lib/telegram-bot-api/<token>/photos/file_N.jpg
         # URL для скачивания: {api_url}/file/bot{token}/{relative_path}
-        # relative_path = file_path БЕЗ префикса /var/lib/telegram-bot-api/
+        # где relative_path = photos/file_N.jpg (БЕЗ /var/lib/telegram-bot-api/<token>/)
+        # Если включён весь префикс — будет двойной token в URL → 404.
         import aiohttp
 
         relative_path = file_info.file_path
+        # Strip /var/lib/telegram-bot-api/<token>/ → оставляем photos/file_N.jpg
         prefix = "/var/lib/telegram-bot-api/"
         if relative_path.startswith(prefix):
             relative_path = relative_path[len(prefix):]
+            # relative_path теперь = <token>/photos/file_N.jpg — strip token
+            # token содержит ':', разделяем по первому /
+            if "/" in relative_path:
+                relative_path = relative_path.split("/", 1)[1]
         download_url = f"{settings.bot_api_url}/file/bot{settings.bot_token}/{relative_path}"
 
         data: bytes | None = None
