@@ -22,7 +22,6 @@ test_archive.py). Здесь оставлены ТОЛЬКО реальные р
 TODO (Phase 5): при росте файла дальше — разбить на test_regression_media.py,
 test_regression_routing.py, test_regression_db.py.
 """
-from datetime import UTC
 
 from app.repositories.channels import DuplicateChannelError
 
@@ -687,3 +686,61 @@ def test_db_migration_adds_time_columns(tmp_path):
 
 
 
+
+
+def test_render_queue_settings_no_undefined_names(tmp_path):
+    """Регрессия: _render_queue_settings не должен использовать undefined имена.
+
+    Баг (Phase 3 post-merge): в menu.py _render_queue_settings вызывала
+    `message_or_safe_edit_text(call.message, ...)` — функция не существует
+    (правильно `safe_edit_text`), и `call` не определён (правильно `message_or_call`).
+    Это блокировало создание очереди на шаге 6/6 (toggle-экран настроек).
+
+    Проверяем, что функция импортируется и вызывается без NameError.
+    """
+    import asyncio
+    import inspect
+
+    from app.bot.handlers.menu import _render_queue_settings
+
+    # Проверяем, что исходник не содержит undefined имён
+    source = inspect.getsource(_render_queue_settings)
+    assert "message_or_safe_edit_text" not in source, (
+        "_render_queue_settings всё ещё использует undefined message_or_safe_edit_text"
+    )
+    assert "safe_edit_text(message_or_call.message" in source or "safe_edit_text(message_or_call" in source, (
+        "_render_queue_settings должен использовать safe_edit_text(message_or_call.message, ...)"
+    )
+
+    # Smoke-тест: вызов с mock-объектом не должен падать с NameError.
+    # Используем AsyncMock для имитации CallbackQuery.
+    from unittest.mock import AsyncMock, MagicMock
+
+    async def _run():
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        # Mock state
+        storage = MemoryStorage()
+        state = FSMContext(storage=storage, key=MagicMock())
+
+        # Mock CallbackQuery с .message.edit_text
+        mock_call = MagicMock()
+        mock_call.message = MagicMock()
+        mock_call.message.edit_text = AsyncMock()
+        mock_call.answer = AsyncMock()
+
+        # Устанавливаем state-данные (нужны для _render_queue_settings)
+        await state.update_data(
+            name="Test",
+            end_strategy="continue_next_day",
+            group_albums=False,
+            strip_caption=False,
+            shuffle_enabled=True,
+            signature_template=None,
+        )
+
+        # Не должно падать с NameError
+        await _render_queue_settings(mock_call, state)
+
+    asyncio.run(_run())
