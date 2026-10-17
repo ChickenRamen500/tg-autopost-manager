@@ -258,7 +258,10 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
         await call.answer("Подписка не найдена", show_alert=True)
         return
 
-    if action == "toggle":
+    if action is None:
+        # gb:sub:<id> — открыть карточку подписки (без действий)
+        pass  # код ниже отрисует карточку
+    elif action == "toggle":
         new_active = not bool(sub["is_active"])
         await subs_repo.set_active(sub_id, new_active)
         sub["is_active"] = 1 if new_active else 0
@@ -365,8 +368,10 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
             await call.answer()
             return
     else:
-        await call.answer("Неизвестное действие")
-        return
+        # Неизвестный action — НЕ отвечаем alert (может быть None = открыть карточку)
+        if action is not None:
+            await call.answer(f"Неизвестное действие: {action}", show_alert=True)
+            return
 
     # Карточка подписки (default + после toggle/check/setqueue)
     sub = await subs_repo.get_subscription(sub_id)
