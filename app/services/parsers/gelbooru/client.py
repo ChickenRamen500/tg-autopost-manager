@@ -35,9 +35,13 @@ RATE_LIMIT_INTERVAL = 1.0 / RATE_LIMIT  # ~125 мс
 _UNCACHEABLE = object()
 
 # Дефолтные headers для запросов к gelbooru (анти-бот-защита)
+# UA — browser-like: gelbooru блокирует не-браузерные UA (возвращает 401/403).
+# Referer обязателен — без него gelbooru отдаёт 403 на file_url.
 _DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; tg-autopost-manager/1.0)",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://gelbooru.com/",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
@@ -108,6 +112,32 @@ class GelbooruClient:
                         if response.status == 404:
                             logger.info("Gelbooru response: status=404")
                             return None
+                        if response.status == 401:
+                            # 401 Unauthorized: gelbooru требует api_key+user_id ИЛИ
+                            # блокирует запрос по UA/IP. Логируем понятное сообщение.
+                            has_key = bool(settings.gelbooru_api_key)
+                            has_uid = bool(settings.gelbooru_user_id)
+                            if has_key and has_uid:
+                                logger.warning(
+                                    "Gelbooru 401: api_key и user_id передаются, но отклонены. "
+                                    "Проверьте правильность GELBOORU_API_KEY/GELBOORU_USER_ID "
+                                    "(user_id — числовой ID аккаунта, не tg_id). "
+                                    "Возможно ключ истёк или IP заблокирован."
+                                )
+                            else:
+                                logger.warning(
+                                    "Gelbooru 401:Unauthorized. Задайте GELBOORU_API_KEY и GELBOORU_USER_ID в .env "
+                                    "(получить на https://gelbooru.com/index.php?page=account&s=options). "
+                                    "Без ключей gelbooru может блокировать запросы (изменилась политика API)."
+                                )
+                            return _UNCACHEABLE
+                        if response.status == 403:
+                            # 403 Forbidden — gelbooru блокирует по UA/IP/Referer
+                            logger.warning(
+                                "Gelbooru 403: Forbidden. Возможно блокировка по IP/UA. "
+                                "Ретрай не поможет — пропускаем."
+                            )
+                            return _UNCACHEABLE
                         if response.status == 429:
                             retry_after = response.headers.get("Retry-After")
                             if attempt < max_retries:

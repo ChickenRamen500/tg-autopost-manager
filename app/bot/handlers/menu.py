@@ -482,7 +482,7 @@ async def cb_channel_info(call: CallbackQuery, state: FSMContext) -> None:
         f"Активен: {'да' if channel['is_active'] else 'нет'}\n"
         f"Очередей: {len(channel_queues)}"
     )
-    await safe_edit_text(call.message, text, reply_markup=kb.back_button())
+    await safe_edit_text(call.message, text, reply_markup=kb.channel_actions(ch_id))
     await call.answer()
 
 
@@ -1393,6 +1393,56 @@ async def add_threshold(message: Message, state: FSMContext) -> None:
 # Подтверждение/отмена удаления (двухшаговое подтверждение, MEDIUM из ревью)
 # ===========================================================================
 
+@router.callback_query(F.data.startswith("menu:del_queue:"))
+async def cb_del_queue_confirm(call: CallbackQuery, user_role: str | None = None) -> None:
+    """Шаг 1: показать подтверждение удаления очереди."""
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    qid = await _safe_int(call.data.split(":")[2], call, "queue_id")
+    if qid is None:
+        return
+    queue = await queues_repo.get_queue(qid)
+    if not queue:
+        await call.answer("Очередь не найдена", show_alert=True)
+        return
+    pending = await queues_repo.count_pending(qid)
+    total = len(await posts_repo.list_queue_posts(qid, limit=1000))
+    await safe_edit_text(
+        call.message,
+        f"🗑 <b>Удалить очередь #{qid} «{html.escape(queue['name'])}»?</b>\n\n"
+        f"Будет удалено: очередь + все {total} постов ({pending} pending).\n"
+        f"Это действие необратимо.",
+        reply_markup=kb.confirm_delete("queue", qid),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("menu:del_channel:"))
+async def cb_del_channel_confirm(call: CallbackQuery, user_role: str | None = None) -> None:
+    """Шаг 1: показать подтверждение удаления канала."""
+    if user_role != "admin":
+        await call.answer("Только admin", show_alert=True)
+        return
+    ch_id = await _safe_int(call.data.split(":")[2], call, "channel_id")
+    if ch_id is None:
+        return
+    channel = await channels_repo.get_channel(ch_id)
+    if not channel:
+        await call.answer("Канал не найден", show_alert=True)
+        return
+    all_queues = await queues_repo.list_queues(active_only=False)
+    channel_queues = [q for q in all_queues if q["channel_id"] == ch_id]
+    await safe_edit_text(
+        call.message,
+        f"🗑 <b>Удалить канал #{ch_id} «{html.escape(channel['name'])}»?</b>\n\n"
+        f"Будет удалено: канал + {len(channel_queues)} очередей (+ все их посты).\n"
+        f"Это действие необратимо.",
+        reply_markup=kb.confirm_delete("channel", ch_id),
+    )
+    await call.answer()
+
+
 @router.callback_query(F.data.startswith("confirm_del:"))
 async def cb_confirm_delete(call: CallbackQuery, user_role: str | None = None) -> None:
     """Второй шаг подтверждения удаления: выполняет удаление."""
@@ -1461,6 +1511,46 @@ async def cb_confirm_delete(call: CallbackQuery, user_role: str | None = None) -
             "🔀 <b>Правила маршрутизации</b>:" if rules else "🔀 Правил нет.",
             reply_markup=kb.rules_list(rules, queues_map) if rules else kb.back_button(),
         )
+        return
+
+    if kind == "queue":
+        queue = await queues_repo.get_queue(item_id)
+        if not queue:
+            await call.answer("Очередь не найдена", show_alert=True)
+            return
+        try:
+            await queues_repo.remove_queue(item_id)
+        except Exception as e:  # noqa: BLE001 — FK constraint
+            await call.answer(f"⚠️ Не удалось удалить: {e}", show_alert=True)
+            return
+        # Hot-reload scheduler (удалить job удалённой очереди)
+        try:
+            await reload_scheduler()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reload_scheduler после удаления очереди: %s", e)
+        await call.answer(f"Очередь #{item_id} удалена", show_alert=True)
+        queues = await queues_repo.list_queues(active_only=False)
+        await safe_edit_text(call.message, "📋 <b>Очереди</b>:", reply_markup=kb.queues_list(queues))
+        return
+
+    if kind == "channel":
+        channel = await channels_repo.get_channel(item_id)
+        if not channel:
+            await call.answer("Канал не найден", show_alert=True)
+            return
+        try:
+            await channels_repo.remove_channel(item_id)
+        except Exception as e:  # noqa: BLE001 — FK constraint (очереди ссылаются)
+            await call.answer(f"⚠️ Не удалось удалить: {e}", show_alert=True)
+            return
+        # Hot-reload scheduler (удалить job'ы очередей этого канала)
+        try:
+            await reload_scheduler()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reload_scheduler после удаления канала: %s", e)
+        await call.answer(f"Канал #{item_id} удалён", show_alert=True)
+        channels = await channels_repo.list_channels()
+        await safe_edit_text(call.message, "📢 <b>Каналы</b>:", reply_markup=kb.channels_list(channels))
         return
 
     await call.answer("Неизвестный тип", show_alert=True)

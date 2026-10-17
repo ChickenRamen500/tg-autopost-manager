@@ -192,6 +192,21 @@ def resolve_local_file_size(file_path: str | None) -> int | None:
     """
     if not file_path:
         return None
+    candidates = _resolve_local_file_candidates(file_path)
+    for c in candidates:
+        try:
+            if c.is_file():
+                return c.stat().st_size
+        except OSError:
+            continue
+    return None
+
+
+def _resolve_local_file_candidates(file_path: str) -> list[Path]:
+    """Возвращает список candidate-путей для файла local-bot-api.
+
+    Вынесено в отдельную функцию чтобы переиспользовать в read_local_file_bytes.
+    """
     local_mount = _local_api_mount()
     rel = file_path.lstrip("/")
     candidates = [
@@ -202,11 +217,30 @@ def resolve_local_file_size(file_path: str | None) -> int | None:
     # новый формат относительного пути: "documents/file_0.bin" может лежать
     # и в подкаталоге с именем бота: "<bot_id>-<name>/documents/..."
     if local_mount.is_dir():
-        candidates += sorted(local_mount.glob(f"*/{rel}"))
+        try:
+            candidates += sorted(local_mount.glob(f"*/{rel}"))
+        except OSError:
+            pass
+    return candidates
+
+
+def read_local_file_bytes(file_path: str | None) -> bytes | None:
+    """Читает файл с диска local-bot-api через проброшенный volume.
+
+    Используется вместо bot.download() для Local Bot API Server с --local:
+    bot.download() формирует HTTP URL {api_url}/file/bot{token}/{file_path},
+    но при --local file_path — абсолютный (/var/lib/telegram-bot-api/...),
+    что даёт двойной путь и 404.
+
+    Возвращает bytes файла или None если файл не найден / не читается.
+    """
+    if not file_path:
+        return None
+    candidates = _resolve_local_file_candidates(file_path)
     for c in candidates:
         try:
             if c.is_file():
-                return c.stat().st_size
+                return c.read_bytes()
         except OSError:
             continue
     return None

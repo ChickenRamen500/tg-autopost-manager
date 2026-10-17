@@ -83,7 +83,7 @@ def queues_list(queues: list[dict]) -> InlineKeyboardMarkup:
 
 
 def queue_posts(queue_id: int, posts: list[dict]) -> InlineKeyboardMarkup:
-    """Посты очереди — каждый пост кнопкой."""
+    """Посты очереди — каждый пост кнопкой + удаление очереди."""
     kb = InlineKeyboardBuilder()
     for p in posts[:15]:
         cap = (p.get("original_caption") or "")[:30]
@@ -91,6 +91,7 @@ def queue_posts(queue_id: int, posts: list[dict]) -> InlineKeyboardMarkup:
             text=f"#{p['id']} [{p['status']}] {p['file_type']} {cap}",
             callback_data=f"menu:post:{p['id']}",
         )
+    kb.button(text="🗑 Удалить очередь", callback_data=f"menu:del_queue:{queue_id}")
     kb.button(text="🔙 К очередям", callback_data="menu:queues")
     kb.adjust(1)
     return kb.as_markup()
@@ -144,6 +145,24 @@ def channels_list(channels: list[dict]) -> InlineKeyboardMarkup:
         )
     kb.button(text="➕ Добавить канал", callback_data="menu:add_channel")
     kb.button(text="🔙 Назад", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def channel_actions(channel_id: int) -> InlineKeyboardMarkup:
+    """Действия с каналом: удалить, назад к списку."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить канал", callback_data=f"menu:del_channel:{channel_id}")
+    kb.button(text="🔙 К каналам", callback_data="menu:channels")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def queue_actions(queue_id: int) -> InlineKeyboardMarkup:
+    """Действия с очередью: удалить, назад к списку."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить очередь", callback_data=f"menu:del_queue:{queue_id}")
+    kb.button(text="🔙 К очередям", callback_data="menu:queues")
     kb.adjust(1)
     return kb.as_markup()
 
