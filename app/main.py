@@ -120,6 +120,24 @@ async def lifespan(_app: FastAPI):
     cache.init_cache()
     _cache_cleanup_task = cache.start_cleanup_task()
 
+    # Логирование статуса ключей Gelbooru (для диагностики 401 ошибок).
+    # Важно: ключи читаются из .env через dotenv при импорте settings. Если .env
+    # не монтируется в Docker (env_file в docker-compose), ключи будут пустыми.
+    if settings.gelbooru_api_key and settings.gelbooru_user_id:
+        log.info(
+            "Gelbooru API: ключи загружены (api_key=%s***, user_id=%s***)",
+            settings.gelbooru_api_key[:4], settings.gelbooru_user_id[:4],
+        )
+    else:
+        log.warning(
+            "Gelbooru API: ключи НЕ заданы (api_key=%s, user_id=%s). "
+            "Gelbooru вернёт 401 на любой запрос. Задайте GELBOORU_API_KEY и "
+            "GELBOORU_USER_ID в .env (получить на https://gelbooru.com/index.php?page=account&s=options). "
+            "В Docker проверьте что .env монтируется через env_file в docker-compose.yml.",
+            "YES" if settings.gelbooru_api_key else "EMPTY",
+            "YES" if settings.gelbooru_user_id else "EMPTY",
+        )
+
     # 5. Планировщик (ТЗ §2.5)
     await setup_scheduler_async()
     sched = get_scheduler()

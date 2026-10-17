@@ -246,7 +246,7 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
         # Получаем file_path через getFile, затем читаем файл напрямую через volume mount.
         # bot.download() не работает с --local (двойной путь → 404).
         from app.bot.runtime import get_bot
-        from app.utils.local_bot_api import read_local_file_bytes
+        from app.utils.local_bot_api import read_local_file_bytes_with_retry
 
         bot = get_bot()
         file_info = await bot.get_file(thumb.file_id)
@@ -254,11 +254,14 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
             logger.warning("pHash: getFile вернул пустой file_path для поста #%s — пропуск", post_id)
             return []
 
-        data = read_local_file_bytes(file_info.file_path)
+        # Retry: local-bot-api может ещё сохранять файл на диск (особенно для
+        # только что присланного фото). Без retry файл не найдётся.
+        data = read_local_file_bytes_with_retry(file_info.file_path, max_retries=3, delay=0.5)
         if not data:
             logger.warning(
                 "pHash: файл %s не найден в volume mount для поста #%s — пропуск "
-                "(проверьте BOT_API_DATA_MOUNT в docker-compose)",
+                "(проверьте BOT_API_DATA_MOUNT в docker-compose и что volume bot-api-data "
+                "примонтирован в контейнер bot)",
                 file_info.file_path, post_id,
             )
             return []
