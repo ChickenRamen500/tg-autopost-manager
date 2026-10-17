@@ -123,6 +123,16 @@ class Settings:
     # Больше = больше постов за раз, но дольше запрос и больше расход кеша.
     gelbooru_search_limit: int = field(default_factory=lambda: _get_int("GELBOORU_SEARCH_LIMIT", 50))
 
+    # --- Фаза 3: внешние парсеры (ТЗ §2.1.4) ---
+    # Danbooru: опциональная аутентификация (без неё rate limit 1 req/s)
+    danbooru_login: str = field(default_factory=lambda: _get("DANBOORU_LOGIN", ""))
+    danbooru_api_key: str = field(default_factory=lambda: _get("DANBOORU_API_KEY", ""))
+    # X.com: путь к cookies-файлу (Netscape format, export из браузера).
+    # Без cookies большинство твитов недоступно (X требует логин).
+    xcom_cookies_path: str = field(default_factory=lambda: _get("XCOM_COOKIES_PATH", ""))
+    # Pixiv: опциональная аутентификация через PHPSESSID (для доступа к R-18 и поиску)
+    pixiv_session_id: str = field(default_factory=lambda: _get("PIXIV_SESSION_ID", ""))
+
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: _get_int("WEB_PORT", 8000))
 

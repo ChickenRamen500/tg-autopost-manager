@@ -179,6 +179,19 @@ async def lifespan(_app: FastAPI):
             await gelbooru_client.close()
         except Exception as e:  # noqa: BLE001
             log.warning("gelbooru_client.close: %s", e)
+        # Закрываем внешние парсеры (Фаза 3 этап 5 — aiohttp ClientSessions)
+        try:
+            from app.services.parsers.danbooru import close_danbooru_parser
+            from app.services.parsers.pikabu import close_pikabu_parser
+            from app.services.parsers.pixiv import close_pixiv_parser
+            from app.services.parsers.xcom import close_xcom_parser
+
+            await close_danbooru_parser()
+            await close_xcom_parser()
+            await close_pikabu_parser()
+            await close_pixiv_parser()
+        except Exception as e:  # noqa: BLE001
+            log.warning("external parsers close: %s", e)
         # Отменяем cache cleanup task
         if _cache_cleanup_task and not _cache_cleanup_task.done():
             _cache_cleanup_task.cancel()
@@ -197,7 +210,7 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage4", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage5", lifespan=lifespan)
 
 
 # P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.

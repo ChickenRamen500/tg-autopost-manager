@@ -587,3 +587,39 @@ Stage Summary:
 - Архитектура: роутер gelbooru включён ДО media (CRITICAL — media.receive_text ловит F.text, перехватил бы FSM-теги). GelbooruStates изолированы от AddStates menu.py
 - 17 новых тестов покрывают: построение всех 7 клавиатур (с валидацией callback_data), регистрацию роутера в dispatcher, FSM-состояния, конвенцию callback_data (все gb:* или menu:* или noop — нет конфликтов)
 - Фаза 3 этап 4 завершён. Остался этап 5 (внешние парсеры Danbooru/X.com/Pikabu/Pixiv)
+
+---
+Task ID: phase3-stage5
+Agent: Phase 3 implementer
+Task: Фаза 3, Этап 5 (финальный) — внешние парсеры (Danbooru, X.com, Pikabu, Pixiv)
+
+Work Log:
+- Изучил PR #51-54 (этапы 1-4, слиты в main): worker + pHash + gelbooru subs backend + UI
+- Изучил существующие stub'ы: app/services/parsers/{danbooru,xcom,pikabu,pixiv}/__init__.py — все пустые (0 байт контента)
+- Изучил downloader.py (этап 1) — download_media с Referer/UA, Content-Type→file_type, лимит 2000 МБ
+- Создал ветку phase3/stage5-external-parsers от свежего main (commit 632255f)
+- Создал app/services/parsers/base.py (новый): ExternalPost dataclass (source_type, source_id, source_url, file_type, preview_url, tags, rating, referer, extra_headers, caption), BaseParser (search/close), create_post_from_external (создаёт posts status='new' + enqueue download → worker скачает + pHash-дедуп), file_type_from_extension
+- Ключевая архитектура: парсеры НЕ скачивают файлы сами. Они возвращают ExternalPost с source_url, а скачивание делегируется worker'у (этап 1) через task_queue. Это переиспользует: retry, max attempts, stale cleanup, pHash-дедупликация (этап 2), file_size/mime из downloader.py
+- Danbooru (app/services/parsers/danbooru/client.py): aiohttp, API https://danbooru.donmai.us/posts.json?tags=...&limit=..., опциональная аутентификация (login+api_key), rating map (g/s→safe, q→questionable, e→explicit), Referer=https://danbooru.donmai.us/, _parse_post (file_url empty→None), singleton + close
+- X.com (app/services/parsers/xcom/client.py): yt-dlp в отдельном потоке (run_in_executor — yt-dlp синхронный), --skip-download --dump-json, cookies (Netscape format, settings.xcom_cookies_path), _parse_info (formats fallback, hashtags→tags), search интерпретирует URL как extract, parse_info_dict для тестов
+- Pikabu (app/services/parsers/pikabu/client.py): aiohttp, AJAX endpoint https://pikabu.ru/ajax/page.php?action=get_story&story_id=..., Referer=https://pikabu.ru/, _parse_story (images[0]→source_url, fallback videos, tags→list, title→caption), URL regex pikabu.ru/story/<slug>_<id>, parse_story_dict для тестов
+- Pixiv (app/services/parsers/pixiv/client.py): aiohttp, AJAX https://www.pixiv.net/ajax/illust/<id>, Referer=https://www.pixiv.net/ (обязателен для i.pximg.net), опциональная PHPSESSID, _parse_illust (urls.original/regular/small fallback, illustType=2→ugoira→gif, xRestrict r-18→explicit), URL regex pixiv.net/(artworks/|member_illust.php.*illust_id=), parse_illust_dict для тестов
+- Настройки (app/config/settings.py): danbooru_login, danbooru_api_key, xcom_cookies_path, pixiv_session_id
+- Обновил .env.example блоком Фазы 3 этап 5 с комментариями (как получить cookies/keys)
+- Интегрировал закрытие парсеров в main.py lifespan shutdown (close_danbooru_parser, close_xcom_parser, close_pikabu_parser, close_pixiv_parser)
+- Версия → 0.3.0-phase3-stage5
+- Создал tests/unit/test_external_parsers.py: 33 теста — base (ExternalPost dataclass, file_type_from_extension, create_post_from_external создаёт posts+enqueue), Danbooru (_parse_post: photo/video/no_file_url/no_id/rating_map/search_empty), X.com (parse_info_dict: photo/video/gif/no_id/no_url/formats_fallback/search_with_url/search_non_url), Pikabu (parse_story_dict: image/video/no_media/no_response/search_with_url/search_non_url), Pixiv (parse_illust_dict: photo/ugoira→gif/r18/no_urls/no_body/url_fallback/search_with_url/member_illust_url/search_non_url), settings fields
+- Баг-фикс: Pixiv URL regex — не хватало `/` после `artworks` (artworks/ вместо artworks), тест выявил
+- ruff: мои файлы — 0 ошибок (исправил F401 unused import, F821 undefined name, F401 unused json; baseline 33 → 33, не добавил новых)
+- pytest: 300 passed (33 новых + 267 существующих), 0 failed
+
+Stage Summary:
+- Фаза 3 ПОЛНОСТЬЮ завершена (все 5 этапов): worker + pHash + gelbooru subs + gelbooru UI + внешние парсеры
+- 4 внешних парсера реализованы: Danbooru (API), X.com (yt-dlp+cookies), Pikabu (AJAX), Pixiv (AJAX+Referer)
+- Единый интерфейс BaseParser.search() + ExternalPost — каждый парсер возвращает унифицированный формат
+- create_post_from_external — общий цикл: posts.create_post(status='new') + task_queue.enqueue(download) → worker скачает (этап 1) + pHash-дедуп (этап 2)
+- 3 парсера (X.com/Pikabu/Pixiv) поддерживают extract(url) для парсинга конкретного поста (поиск по тегам не реализован — нет публичного API)
+- Danbooru поддерживает полный search(query) по тегам (как Gelbooru)
+- Безопасность: Referer/UA для каждого источника (pixiv/gelbooru 403 без Referer), опциональная аутентификация
+- 33 новых теста покрывают: парсинг ответов API (без HTTP — через parse_*_dict хелперы), URL detection, create_post_from_external (с БД), rating mapping, edge cases (no url, no id, empty response)
+- Фаза 3 готова к код-ревью и тестированию на реальном железе
