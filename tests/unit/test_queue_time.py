@@ -76,8 +76,9 @@ def test_is_in_time_window_daily_window_overnight():
     Этот edge-case раньше не покрывался. Если ws > we — окно «ночное»
     (local_now >= ws OR local_now < we).
     """
-    from app.services.queue_time import is_in_time_window
     from unittest.mock import patch
+
+    from app.services.queue_time import is_in_time_window
 
     queue = {
         "id": 1, "start_at": None, "end_at": None,
@@ -95,8 +96,9 @@ def test_is_in_time_window_daily_window_overnight():
 
 def test_is_in_time_window_daily_window_overnight_outside():
     """Вне ночного окна (12:00, окно 22:00..06:00) — не в окне."""
-    from app.services.queue_time import is_in_time_window
     from unittest.mock import patch
+
+    from app.services.queue_time import is_in_time_window
 
     queue = {
         "id": 1, "start_at": None, "end_at": None,

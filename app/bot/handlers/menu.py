@@ -120,7 +120,7 @@ async def cmd_menu(message: Message, state: FSMContext, user: dict | None = None
 async def cb_main(call: CallbackQuery, state: FSMContext, user_role: str | None = None) -> None:
     await state.clear()
     is_admin = user_role == "admin"
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         "🏠 <b>Главное меню</b>\n\nИспользуй кнопки ниже.",
         reply_markup=kb.main_menu(is_admin),
     )
@@ -247,7 +247,7 @@ async def cb_create_rule_from_post(call: CallbackQuery, user_role: str | None = 
         await call.answer(f"⚠️ Ошибка создания правила: {e}", show_alert=True)
         return
     await call.answer(f"✓ Правило #{rid} создано", show_alert=True)
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         f"✓ Правило #{rid} создано!\n"
         f"Источник: telegram_channel <code>{html.escape(source_id)}</code>\n"
         f"→ Очередь: #{queue_id} (priority 10)\n\n"
@@ -283,13 +283,13 @@ async def cb_post(call: CallbackQuery) -> None:
         channel = await channels_repo.get_channel(channel_id)
         ch_name = channel["name"] if channel else f"#{channel_id}"
         if not channel_queues:
-            await safe_edit_text(call.message, 
+            await safe_edit_text(call.message,
                 f"📢 Канал «{html.escape(ch_name)}» выбран.\n\n"
                 f"⚠️ В этом канале нет очередей. Создай очередь для него:",
                 reply_markup=kb.pick_queue_for_post(post_id, channel_id, []),
             )
         else:
-            await safe_edit_text(call.message, 
+            await safe_edit_text(call.message,
                 f"📢 Канал «{html.escape(ch_name)}». Выбери очередь:",
                 reply_markup=kb.pick_queue_for_post(post_id, channel_id, channel_queues),
             )
@@ -306,7 +306,7 @@ async def cb_post(call: CallbackQuery) -> None:
             await call.answer("Пост уже в очереди", show_alert=True)
             return
         channels = await channels_repo.list_channels(active_only=True)
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             f"📥 Пост #{post_id} → Входящие. Куда отправить?",
             reply_markup=kb.pick_channel_for_post(post_id, channels),
         )
@@ -390,7 +390,7 @@ async def cb_post(call: CallbackQuery) -> None:
         if not post:
             await call.answer("Пост не найден", show_alert=True)
             return
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             f"🗑 <b>Удалить пост #{post_id}?</b>\n"
             f"Тип: <code>{html.escape(post.get('file_type') or '?')}</code>\n"
             f"Статус: <code>{html.escape(post.get('status') or '?')}</code>\n\n"
@@ -460,7 +460,7 @@ async def cb_channel_info(call: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddStates.add_queue_name)
         channel = await channels_repo.get_channel(ch_id)
         ch_name = channel["name"] if channel else f"#{ch_id}"
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             f"Канал #{ch_id} «{html.escape(ch_name)}» выбран.\nШаг 2/6: Пришли название очереди (например: Утренние посты)",
             reply_markup=kb.confirm_cancel(),
         )
@@ -493,7 +493,7 @@ async def cb_add_channel(call: CallbackQuery, state: FSMContext, user_role: str 
         return
     await state.set_state(AddStates.add_channel_flow)
     await state.update_data(step="chat_id")
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         "📢 <b>Добавление канала</b>\n\n"
         "Шаг 1/3: Пришли числовой ID канала (вида -1002257882757).\n\n"
         "Как узнать ID:\n"
@@ -578,14 +578,14 @@ async def cb_add_queue(call: CallbackQuery, state: FSMContext, user_role: str | 
         return
     channels = await channels_repo.list_channels(active_only=True)
     if not channels:
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "Сначала добавь канал (кнопка «Каналы» → «Добавить»).",
             reply_markup=kb.back_button(),
         )
         await call.answer()
         return
     await state.set_state(AddStates.add_queue_pick_channel)
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         "📋 <b>Добавление очереди</b>\nШаг 1/6: Нажми на канал-получатель:",
         reply_markup=kb.channels_list(channels),
     )
@@ -617,7 +617,7 @@ async def cb_add_queue_for_channel(call: CallbackQuery, state: FSMContext, user_
         return
     await state.update_data(channel_id=channel_id, return_to_post=post_id)
     await state.set_state(AddStates.add_queue_name)
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         f"📋 <b>Добавление очереди</b> для канала «{html.escape(channel['name'])}»\n"
         f"Шаг 2/6: Пришли название очереди (например: Утренние посты)",
         reply_markup=kb.confirm_cancel(),
@@ -785,7 +785,7 @@ async def _render_queue_settings(message_or_call: Message | CallbackQuery, state
     # CallbackQuery → редактируем сообщение бота (call.message.edit_text).
     # Message → отправляем новое сообщение (нельзя редактировать сообщение пользователя).
     if isinstance(message_or_call, CallbackQuery):
-        await message_or_safe_edit_text(call.message, text, reply_markup=markup)
+        await safe_edit_text(message_or_call.message, text, reply_markup=markup)
     else:
         await message_or_call.answer(text, reply_markup=markup)
 
@@ -823,7 +823,7 @@ async def queue_settings_toggle(call: CallbackQuery, state: FSMContext) -> None:
     elif action == "signature":
         # Переход к вводу подписи
         await state.set_state(AddStates.add_queue_signature)
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "✍️ Пришли текст подписи (будет добавлен к каждому посту очереди):\n"
             "Или `-` чтобы убрать подпись.",
             reply_markup=kb.confirm_cancel(),
@@ -944,7 +944,7 @@ async def cb_rules(call: CallbackQuery, user_role: str | None = None) -> None:
     if not rules:
         # Если очередей тоже нет — подсказываем создать очередь (правило без очереди не нужно)
         if not queues:
-            await safe_edit_text(call.message, 
+            await safe_edit_text(call.message,
                 "🔀 <b>Правила маршрутизации</b>\n\n"
                 "Правил пока нет. Посты без правила идут во «Входящие».\n\n"
                 "⚠️ Чтобы создать правило, нужна хотя бы одна очередь —\n"
@@ -954,7 +954,7 @@ async def cb_rules(call: CallbackQuery, user_role: str | None = None) -> None:
             )
             await call.answer()
             return
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "🔀 <b>Правила маршрутизации</b>\n\n"
             "Правил пока нет. Посты без правила идут во «Входящие».\n\n"
             "Добавь правило кнопкой «➕ Добавить» → «🔀 Правило».",
@@ -977,7 +977,7 @@ async def cb_add_rule(call: CallbackQuery, state: FSMContext, user_role: str | N
     # выдать «Нет очередей» (плохой UX из фидбека пользователя).
     queues = await queues_repo.list_queues(active_only=False)
     if not queues:
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "🔀 <b>Добавление правила маршрутизации</b>\n\n"
             "⚠️ Чтобы создать правило, нужна хотя бы одна очередь —\n"
             "правило указывает, в КАКУЮ очередь направлять посты.\n\n"
@@ -988,7 +988,7 @@ async def cb_add_rule(call: CallbackQuery, state: FSMContext, user_role: str | N
         return
     await state.set_state(AddStates.add_rule_pattern)
     await state.update_data(step="source_type")
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         "🔀 <b>Добавление правила маршрутизации</b>\n\n"
         "Шаг 1/4: Выбери тип источника:",
         reply_markup=kb.source_type_picker(),
@@ -1000,7 +1000,7 @@ async def cb_add_rule(call: CallbackQuery, state: FSMContext, user_role: str | N
 async def add_rule_pick_source(call: CallbackQuery, state: FSMContext) -> None:
     source_type = call.data.split(":")[3]
     await state.update_data(source_type=source_type)
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         f"Тип: <b>{source_type}</b>\n\n"
         "Шаг 2/4: Пришли паттерн для source_id.\n\n"
         "Примеры:\n"
@@ -1040,7 +1040,7 @@ async def add_rule_pick_queue(call: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(target_queue_id=qid)
     await state.set_state(AddStates.add_rule_priority)
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         f"Очередь #{qid} выбрана.\n"
         "Шаг 4/4: Пришли приоритет (целое число, выше = важнее, например 10).\n"
         "Или 0 для правила по умолчанию.",
@@ -1093,7 +1093,7 @@ async def cb_rule_actions(call: CallbackQuery, user_role: str | None = None) -> 
         if not rule:
             await call.answer("Не найдено", show_alert=True)
             return
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             f"🗑 <b>Удалить правило #{rid}?</b>\n"
             f"Тип: <code>{html.escape(rule['source_type'])}</code>\n"
             f"Паттерн: <code>{html.escape(rule['source_pattern'])}</code>\n\n"
@@ -1131,7 +1131,7 @@ async def cb_add_user(call: CallbackQuery, state: FSMContext, user_role: str | N
         await call.answer("Только admin", show_alert=True)
         return
     await state.set_state(AddStates.add_user_tg_id)
-    await safe_edit_text(call.message, 
+    await safe_edit_text(call.message,
         "👤 <b>Добавление пользователя</b>\n\n"
         "Шаг 1/2: Пришли числовой tg_id или перешли сообщение от пользователя.\n\n"
         "Как узнать tg_id:\n"
@@ -1331,7 +1331,7 @@ async def settings_toggle(call: CallbackQuery, state: FSMContext, user_role: str
     if action == "archive":
         # Ввод chat_id архивного канала
         await state.set_state(AddStates.add_archive_channel)
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "📂 <b>Служебный канал (архив)</b>\n\n"
             "Пришли числовой chat_id канала (вида -1002257882757).\n"
             "Бот должен быть админом в нём.\n\n"
@@ -1343,7 +1343,7 @@ async def settings_toggle(call: CallbackQuery, state: FSMContext, user_role: str
 
     if action == "threshold":
         await state.set_state(AddStates.add_threshold)
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "🔔 Порог «скоро закончится»\n\nПришли число (по умолчанию 5):",
             reply_markup=kb.confirm_cancel(),
         )
@@ -1417,7 +1417,7 @@ async def cb_confirm_delete(call: CallbackQuery, user_role: str | None = None) -
         # Возврат туда, откуда пришли: Входящие или очередь
         if post.get("queue_id") is None:
             posts = await posts_repo.list_inbox(limit=15)
-            await safe_edit_text(call.message, 
+            await safe_edit_text(call.message,
                 "📥 <b>Входящие</b> (посты без очереди)" if posts else "📥 Входящие пусты",
                 reply_markup=kb.inbox_posts(posts),
             )
@@ -1426,7 +1426,7 @@ async def cb_confirm_delete(call: CallbackQuery, user_role: str | None = None) -
             posts = await posts_repo.list_queue_posts(qid, limit=15)
             queue = await queues_repo.get_queue(qid)
             qname = queue["name"] if queue else f"#{qid}"
-            await safe_edit_text(call.message, 
+            await safe_edit_text(call.message,
                 f"📋 Очередь #{qid} «{html.escape(qname)}» (постов: {len(posts)})",
                 reply_markup=kb.queue_posts(qid, posts),
             )
@@ -1457,7 +1457,7 @@ async def cb_confirm_delete(call: CallbackQuery, user_role: str | None = None) -
         rules = await routing_repo.list_rules(active_only=False)
         queues = await queues_repo.list_queues(active_only=False)
         queues_map = {q["id"]: q["name"] for q in queues}
-        await safe_edit_text(call.message, 
+        await safe_edit_text(call.message,
             "🔀 <b>Правила маршрутизации</b>:" if rules else "🔀 Правил нет.",
             reply_markup=kb.rules_list(rules, queues_map) if rules else kb.back_button(),
         )

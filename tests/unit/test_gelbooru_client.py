@@ -12,11 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from app.services.parsers.gelbooru import cache
 from app.services.parsers.gelbooru.client import GelbooruClient
-
 
 # ---------------------------------------------------------------------------
 # _parse_tag_response — 6 веток

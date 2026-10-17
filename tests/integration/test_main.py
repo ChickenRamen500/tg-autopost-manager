@@ -193,9 +193,7 @@ def test_health_bot_api_returns_error_when_local_api_unreachable():
     Здесь тестируем что endpoint не падает 500 — даже без сети.
     """
     # Мокаем app.utils.local_bot_api.get_me — без реальной сети
-    from unittest.mock import AsyncMock
-
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
 
     with _temp_settings(secret_token=""):
         with patch("app.main.get_me", new=AsyncMock(return_value=None)):

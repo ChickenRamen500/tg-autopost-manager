@@ -205,10 +205,11 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
         )
         return
     elif action == "check":
-        # Ручная проверка — запускаем check_subscription синхронно
+        # Ручная проверка — запускаем check_subscription синхронно.
+        # НЕ вызываем call.answer("🔄...") здесь — Telegram разрешает только ОДИН
+        # answer на callback; второй бросит TelegramRetryAfter. Финальный answer ниже.
         from app.services.gelbooru_subscriptions import check_subscription
 
-        await call.answer("🔄 Проверка запущена...")
         try:
             new_count = await check_subscription(sub)
             await subs_repo.mark_checked(sub_id)
