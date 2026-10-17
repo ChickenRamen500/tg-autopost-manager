@@ -309,6 +309,21 @@ class Worker:
         await posts_repo.update_status(post_id, final_status)
         log.info("Worker: пост #%s → %s (file_path=%s)", post_id, final_status, result["file_path"])
 
+        # Архивация в служебный канал (ТЗ §2.4.5, блок D).
+        # После скачивания файла — дублируем в служебный канал (если задан).
+        # archive_post теперь поддерживает file_path (через FSInputFile).
+        try:
+            from app.services.archive import archive_post
+
+            # Достаём обновлённый пост с file_path
+            post_with_file = await posts_repo.get_post(post_id)
+            if post_with_file and post_with_file.get("file_path"):
+                # target_channel_id: 0 = нет целевого канала (архивация все равно
+                # использует archive_channel из app_settings). Передаём 0.
+                await archive_post(post_with_file, 0, [result["file_type"]])
+        except Exception as e:  # noqa: BLE001 — архивация не критична
+            log.warning("Worker: архивация поста #%s не удалась: %s", post_id, e)
+
     # ------------------------------------------------------------------
     # Stale-cleanup цикл
     # ------------------------------------------------------------------

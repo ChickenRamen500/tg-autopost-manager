@@ -164,6 +164,36 @@ async def set_default_queue(subscription_id: int, queue_id: int | None) -> bool:
     return changed
 
 
+async def set_check_interval(subscription_id: int, hours: int) -> bool:
+    """Устанавливает интервал проверки (часы). Должно быть > 0."""
+    if hours <= 0:
+        raise ValueError("check_interval_hours должен быть > 0")
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE tag_subscriptions SET check_interval_hours = ? WHERE id = ?",
+        (hours, subscription_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
+async def set_notify_interval(subscription_id: int, minutes: int) -> bool:
+    """Устанавливает интервал уведомлений (минуты). 0 = при каждом чеке."""
+    if minutes < 0:
+        raise ValueError("notify_interval_minutes должен быть >= 0")
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE tag_subscriptions SET notify_interval_minutes = ? WHERE id = ?",
+        (minutes, subscription_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
 async def is_due_for_notify(subscription_id: int) -> bool:
     """True если подошло время уведомления (с учётом notify_interval_minutes).
 

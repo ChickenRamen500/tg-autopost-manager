@@ -129,28 +129,46 @@ async def _send_seen_card(call: CallbackQuery, seen_id: int, list_ctx: dict | No
     text = _format_seen_card(seen)
     markup = kb.gelbooru_seen_card(seen_id, has_prev, has_next)
 
-    # Если есть preview_url — отправляем фото. answer_photo создаёт новое сообщение,
-    # старое удаляем (нельзя edit_text в фото).
+    # Если есть preview_url — скачиваем его (с Referer/UA, т.к. gelbooru блокирует
+    # прямые URL для Telegram) и отправляем как BufferedInputFile. send_photo с URL
+    # даёт "wrong type of the web page content" — Telegram не может достучаться.
     preview_url = seen.get("preview_url")
     if preview_url:
         try:
-            from app.bot.runtime import get_bot
+            import aiohttp
+            from aiogram.types import BufferedInputFile
 
-            bot = get_bot()
-            await bot.send_photo(
-                call.message.chat.id,
-                photo=preview_url,
-                caption=text,
-                reply_markup=markup,
-            )
-            # Удаляем старое сообщение (текстовое или предыдущее фото)
-            try:
-                await call.message.delete()
-            except Exception:  # noqa: BLE001 — сообщение уже удалено или нет прав
-                pass
-            await call.answer()
-            return
-        except Exception as e:  # noqa: BLE001 — fallback на текст если фото не отправилось
+            # Скачиваем preview через aiohttp с Referer (gelbooru требует)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Referer": "https://gelbooru.com/",
+            }
+            img_data: bytes | None = None
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(preview_url, headers=headers) as resp:
+                    if resp.status == 200:
+                        img_data = await resp.read()
+                    else:
+                        logger.warning("Превью %s: HTTP %d", preview_url, resp.status)
+
+            if img_data:
+                from app.bot.runtime import get_bot
+
+                bot = get_bot()
+                await bot.send_photo(
+                    call.message.chat.id,
+                    photo=BufferedInputFile(img_data, filename=f"preview_{seen_id}.jpg"),
+                    caption=text,
+                    reply_markup=markup,
+                )
+                # Удаляем старое сообщение
+                try:
+                    await call.message.delete()
+                except Exception:  # noqa: BLE001
+                    pass
+                await call.answer()
+                return
+        except Exception as e:  # noqa: BLE001 — fallback на текст
             logger.warning("Не удалось отправить превью для поста #%s: %s — показываю текст", seen_id, e)
 
     # Fallback: только текст (если нет preview_url или ошибка отправки фото)
@@ -279,6 +297,29 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
         )
         await call.answer()
         return
+    elif action == "setcheck":
+        # Показать picker для выбора интервала проверки (часы)
+        current = sub.get("check_interval_hours", 6)
+        await safe_edit_text(
+            call.message,
+            f"⏱ <b>Интервал проверки подписки #{sub_id}</b>\n\n"
+            "Как часто worker опрашивает gelbooru на новые посты.",
+            reply_markup=kb.gelbooru_interval_picker(sub_id, "setcheck", current),
+        )
+        await call.answer()
+        return
+    elif action == "setnotify":
+        # Показать picker для выбора интервала уведомлений (минуты)
+        current = sub.get("notify_interval_minutes", 60)
+        await safe_edit_text(
+            call.message,
+            f"🔔 <b>Интервал уведомлений подписки #{sub_id}</b>\n\n"
+            "Как часто присылать уведомление о новых постах. "
+            "0 = при каждом чеке (может спамить).",
+            reply_markup=kb.gelbooru_interval_picker(sub_id, "setnotify", current),
+        )
+        await call.answer()
+        return
     elif action == "setqueue" and len(call.data.split(":")) > 3:
         # gb:sub:<id>:setqueue:<qid> — установлен default queue
         # (обрабатывается в отдельном elif ниже, т.к. action уже "setqueue")
@@ -294,6 +335,31 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
             await subs_repo.set_default_queue(sub_id, None if qid == 0 else qid)
             await call.answer("✅ Очередь по умолчанию обновлена")
             sub = await subs_repo.get_subscription(sub_id)
+
+    # Проверяем gb:sub:<id>:setcheck:<hours>
+    if len(full_parts) >= 5 and full_parts[3] == "setcheck":
+        hours_raw = full_parts[4]
+        hours = await _safe_int(hours_raw, call, "hours")
+        if hours is not None and hours > 0:
+            try:
+                await subs_repo.set_check_interval(sub_id, hours)
+                await call.answer(f"✅ Интервал проверки: {hours}ч")
+                sub = await subs_repo.get_subscription(sub_id)
+            except ValueError as e:
+                await call.answer(f"⚠️ {e}", show_alert=True)
+
+    # Проверяем gb:sub:<id>:setnotify:<minutes>
+    if len(full_parts) >= 5 and full_parts[3] == "setnotify":
+        minutes_raw = full_parts[4]
+        minutes = await _safe_int(minutes_raw, call, "minutes")
+        if minutes is not None and minutes >= 0:
+            try:
+                await subs_repo.set_notify_interval(sub_id, minutes)
+                label = "при каждом чеке" if minutes == 0 else f"{minutes}мин"
+                await call.answer(f"✅ Интервал уведомлений: {label}")
+                sub = await subs_repo.get_subscription(sub_id)
+            except ValueError as e:
+                await call.answer(f"⚠️ {e}", show_alert=True)
 
     # Карточка подписки (default + после toggle/check/setqueue)
     sub = await subs_repo.get_subscription(sub_id)

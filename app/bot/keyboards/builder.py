@@ -445,11 +445,20 @@ def gelbooru_subs_list(subs: list[dict], new_counts: dict[int, int] | None = Non
 
 
 def gelbooru_sub_card(sub: dict, new_count: int = 0, default_queue_name: str | None = None) -> InlineKeyboardMarkup:
-    """Карточка подписки: проверить сейчас, вкл/выкл, удалить, новые посты, default queue."""
+    """Карточка подписки: проверить, настройки интервалов, default queue, вкл/выкл, удалить."""
     kb = InlineKeyboardBuilder()
     if new_count > 0:
         kb.button(text=f"🆕 Новые посты ({new_count})", callback_data=f"gb:seen:{sub['id']}")
     kb.button(text="🔄 Проверить сейчас", callback_data=f"gb:sub:{sub['id']}:check")
+    # Настройки интервалов
+    kb.button(
+        text=f"⏱ Интервал проверки: {sub['check_interval_hours']}ч",
+        callback_data=f"gb:sub:{sub['id']}:setcheck",
+    )
+    kb.button(
+        text=f"🔔 Интервал уведомлений: {sub['notify_interval_minutes']}мин",
+        callback_data=f"gb:sub:{sub['id']}:setnotify",
+    )
     # Default queue — показать текущую или «не задана»
     q_label = f"📥 Очередь по умолчанию: {default_queue_name}" if default_queue_name else "📥 Очередь по умолчанию: не задана"
     kb.button(text=q_label, callback_data=f"gb:sub:{sub['id']}:setqueue")
@@ -458,6 +467,28 @@ def gelbooru_sub_card(sub: dict, new_count: int = 0, default_queue_name: str | N
     kb.button(text="🗑 Удалить подписку", callback_data=f"gb:sub:{sub['id']}:del")
     kb.button(text="🔙 К подпискам", callback_data="gb:subs")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def gelbooru_interval_picker(sub_id: int, kind: str, current: int) -> InlineKeyboardMarkup:
+    """Выбор интервала (check/notify) — пресет кнопок + назад.
+
+    kind: 'setcheck' (часы) или 'setnotify' (минуты).
+    """
+    kb = InlineKeyboardBuilder()
+    if kind == "setcheck":
+        # Часы: 1, 3, 6, 12, 24
+        for h in [1, 3, 6, 12, 24]:
+            mark = "✅ " if h == current else ""
+            kb.button(text=f"{mark}{h}ч", callback_data=f"gb:sub:{sub_id}:setcheck:{h}")
+    else:
+        # Минуты: 0 (при каждом чеке), 15, 30, 60, 180, 360
+        for m in [0, 15, 30, 60, 180, 360]:
+            mark = "✅ " if m == current else ""
+            label = f"{mark}{'при каждом чеке' if m == 0 else f'{m}мин'}"
+            kb.button(text=label, callback_data=f"gb:sub:{sub_id}:setnotify:{m}")
+    kb.button(text="🔙 К подписке", callback_data=f"gb:sub:{sub_id}")
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
