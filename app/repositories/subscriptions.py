@@ -146,6 +146,24 @@ async def set_last_notified(subscription_id: int) -> bool:
     return changed
 
 
+async def set_default_queue(subscription_id: int, queue_id: int | None) -> bool:
+    """Устанавливает очередь по умолчанию для подписки.
+
+    queue_id=None = всегда спрашивать при отправке (старое поведение).
+    Используется в UI карточки поста: если default_queue_id задан, «Отправить»
+    сразу отправляет в неё без выбора очереди.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE tag_subscriptions SET default_queue_id = ? WHERE id = ?",
+        (queue_id, subscription_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
 async def is_due_for_notify(subscription_id: int) -> bool:
     """True если подошло время уведомления (с учётом notify_interval_minutes).
 

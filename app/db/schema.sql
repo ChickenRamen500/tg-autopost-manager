@@ -131,11 +131,16 @@ CREATE TABLE IF NOT EXISTS tag_subscriptions (
     -- 0 = уведомлять при каждом чеке; иначе — не чаще раза в N минут
     -- (throttle, чтобы не спамить при частом check_interval).
     notify_interval_minutes  INTEGER NOT NULL DEFAULT 60 CHECK(notify_interval_minutes >= 0),
+    -- Фаза 3 этап 4: очередь по умолчанию для отправки постов из подписки.
+    -- При нажатии «Отправить» в карточке поста используется эта очередь
+    -- (не нужно каждый раз выбирать). NULL = всегда спрашивать (старое поведение).
+    default_queue_id         INTEGER,
     last_checked_at          DATETIME,
     last_notified_at         DATETIME,                       -- когда последний раз шло уведомление
     is_active                INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
     created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (default_queue_id) REFERENCES queues(id) ON DELETE SET NULL
 );
 
 -- Просмотренные посты Gelbooru (Фаза 3, ТЗ §2.1.4)

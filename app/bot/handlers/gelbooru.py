@@ -27,6 +27,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.keyboards import builder as kb
 from app.bot.utils.safe_send import safe_edit_text
@@ -87,6 +88,10 @@ def _format_seen_card(seen: dict) -> str:
 async def _send_seen_card(call: CallbackQuery, seen_id: int, list_ctx: dict | None = None) -> None:
     """Рисует карточку seen_post + кнопки навигации.
 
+    Если есть preview_url — отправляет НОВОЕ сообщение с фото (call.message.answer_photo),
+    затем удаляет старое. safe_edit_text не умеет превращать текстовое сообщение
+    в фото-сообщение, поэтому используем answer_photo + delete.
+
     list_ctx — контекст списка для навигации (sub_id или None=все).
     Определяет has_prev/has_next по позиции в списке.
     """
@@ -122,7 +127,34 @@ async def _send_seen_card(call: CallbackQuery, seen_id: int, list_ctx: dict | No
     has_next = 0 <= idx < len(items) - 1
 
     text = _format_seen_card(seen)
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_seen_card(seen_id, has_prev, has_next))
+    markup = kb.gelbooru_seen_card(seen_id, has_prev, has_next)
+
+    # Если есть preview_url — отправляем фото. answer_photo создаёт новое сообщение,
+    # старое удаляем (нельзя edit_text в фото).
+    preview_url = seen.get("preview_url")
+    if preview_url:
+        try:
+            from app.bot.runtime import get_bot
+
+            bot = get_bot()
+            await bot.send_photo(
+                call.message.chat.id,
+                photo=preview_url,
+                caption=text,
+                reply_markup=markup,
+            )
+            # Удаляем старое сообщение (текстовое или предыдущее фото)
+            try:
+                await call.message.delete()
+            except Exception:  # noqa: BLE001 — сообщение уже удалено или нет прав
+                pass
+            await call.answer()
+            return
+        except Exception as e:  # noqa: BLE001 — fallback на текст если фото не отправилось
+            logger.warning("Не удалось отправить превью для поста #%s: %s — показываю текст", seen_id, e)
+
+    # Fallback: только текст (если нет preview_url или ошибка отправки фото)
+    await safe_edit_text(call.message, text, reply_markup=markup)
     await call.answer()
 
 
@@ -218,24 +250,77 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
         except Exception as e:  # noqa: BLE001
             logger.warning("Ручная проверка подписки #%s: %s", sub_id, e)
             await call.answer(f"⚠️ Ошибка проверки: {e}", show_alert=True)
+    elif action == "setqueue":
+        # Показать список очередей для выбора default_queue_id
+        from app.repositories import queues as queues_repo
 
-    # Карточка подписки (default + после toggle/check)
+        queues = await queues_repo.list_queues(active_only=True)
+        # Текущий default_queue_id
+        current_qid = sub.get("default_queue_id")
+        kb_buttons = InlineKeyboardBuilder()
+        kb_buttons.button(
+            text="🚫 Всегда спрашивать (сбросить)" if current_qid else "✅ Всегда спрашивать (текущее)",
+            callback_data=f"gb:sub:{sub_id}:setqueue:0",
+        )
+        for q in queues[:10]:
+            mark = "✅ " if q["id"] == current_qid else "📋 "
+            kb_buttons.button(
+                text=f"{mark}«{q['name']}» (#{q['id']})",
+                callback_data=f"gb:sub:{sub_id}:setqueue:{q['id']}",
+            )
+        kb_buttons.button(text="🔙 К подписке", callback_data=f"gb:sub:{sub_id}")
+        kb_buttons.adjust(1)
+        await safe_edit_text(
+            call.message,
+            f"📥 <b>Очередь по умолчанию для подписки #{sub_id}</b>\n\n"
+            "При нажатии «Отправить» в карточке поста — пост сразу отправляется в эту очередь "
+            "(без выбора каждый раз).",
+            reply_markup=kb_buttons.as_markup(),
+        )
+        await call.answer()
+        return
+    elif action == "setqueue" and len(call.data.split(":")) > 3:
+        # gb:sub:<id>:setqueue:<qid> — установлен default queue
+        # (обрабатывается в отдельном elif ниже, т.к. action уже "setqueue")
+        pass
+
+    # Проверяем расширенный action: gb:sub:<id>:setqueue:<qid>
+    full_parts = call.data.split(":")
+    if len(full_parts) >= 5 and full_parts[3] == "setqueue":
+        qid_raw = full_parts[4]
+        qid = await _safe_int(qid_raw, call, "queue_id")
+        if qid is not None:
+            # qid=0 = сброс (None), иначе реальный queue_id
+            await subs_repo.set_default_queue(sub_id, None if qid == 0 else qid)
+            await call.answer("✅ Очередь по умолчанию обновлена")
+            sub = await subs_repo.get_subscription(sub_id)
+
+    # Карточка подписки (default + после toggle/check/setqueue)
     sub = await subs_repo.get_subscription(sub_id)
     if sub is None:
         return
     new_count = await gs_repo.count_new_posts(sub_id)
     tags_str = " ".join(sub.get("tags") or [])
+    # Имя default queue для отображения
+    default_queue_name = None
+    if sub.get("default_queue_id"):
+        from app.repositories import queues as queues_repo
+
+        q = await queues_repo.get_queue(sub["default_queue_id"])
+        if q:
+            default_queue_name = q["name"]
     text = (
         f"📋 <b>Подписка #{sub['id']}</b>\n"
         f"Теги: <code>{html.escape(tags_str)}</code>\n"
         f"Сайт: {sub['site']}\n"
         f"Интервал проверки: {sub['check_interval_hours']}ч\n"
         f"Интервал уведомлений: {sub['notify_interval_minutes']}мин\n"
+        f"Очередь по умолчанию: {default_queue_name or 'не задана (спрашивать)'}\n"
         f"Активна: {'✅ да' if sub['is_active'] else '❌ нет'}\n"
         f"Последняя проверка: {sub.get('last_checked_at') or 'никогда'}\n"
         f"🆕 Новых постов: {new_count}"
     )
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_sub_card(sub, new_count))
+    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_sub_card(sub, new_count, default_queue_name))
     if not action:
         await call.answer()
 
@@ -289,12 +374,27 @@ async def fsm_add_sub_tags(message: Message, state: FSMContext, user: dict | Non
         return
 
     await state.clear()
-    await message.answer(
-        f"✅ Подписка #{sub_id} создана.\nТеги: <code>{html.escape(' '.join(tags))}</code>\n\n"
-        "Первичная проверка произойдёт в течение минуты (worker). "
-        "Или нажми «🔄 Проверить сейчас» в карточке.",
-        reply_markup=kb.back_button(),
+    # Показываем карточку подписки сразу — пользователь видит настройки
+    # (check_interval, notify_interval, default_queue) и может изменить их.
+    from app.repositories import gelbooru_subs as gs_repo
+
+    sub = await subs_repo.get_subscription(sub_id)
+    new_count = await gs_repo.count_new_posts(sub_id)
+    tags_str = " ".join(sub.get("tags") or [])
+    text = (
+        f"✅ <b>Подписка #{sub_id} создана</b>\n\n"
+        f"Теги: <code>{html.escape(tags_str)}</code>\n"
+        f"Сайт: {sub['site']}\n"
+        f"Интервал проверки: {sub['check_interval_hours']}ч\n"
+        f"Интервал уведомлений: {sub['notify_interval_minutes']}мин\n"
+        f"Очередь по умолчанию: не задана (спрашивать)\n"
+        f"Активна: ✅ да\n\n"
+        f"📡 Первичная проверка произойдёт автоматически (worker каждые 60с).\n"
+        f"Или нажми «🔄 Проверить сейчас» для ручного запуска.\n\n"
+        f"📥 Настрой «Очередь по умолчанию» — тогда «Отправить» в карточке поста "
+        f"будет сразу отправлять в неё без выбора."
     )
+    await message.answer(text, reply_markup=kb.gelbooru_sub_card(sub, new_count, None))
 
 
 # ===========================================================================
@@ -364,7 +464,18 @@ async def cb_gelbooru_seen_dispatch(call: CallbackQuery, state: FSMContext, user
                 return
             await _do_send(call, seen_id, queue_id=None if qid == 0 else qid)
             return
-        # Показываем выбор очереди
+        # Проверяем default_queue_id у подписки — если задан, отправляем сразу
+        from app.repositories import gelbooru_subs as gs_repo
+        from app.repositories import subscriptions as subs_repo
+
+        seen = await gs_repo.get_seen_post(seen_id)
+        if seen:
+            sub = await subs_repo.get_subscription(seen["subscription_id"])
+            if sub and sub.get("default_queue_id"):
+                # Отправляем сразу в default queue без выбора
+                await _do_send(call, seen_id, queue_id=sub["default_queue_id"])
+                return
+        # Нет default_queue_id — показываем выбор очереди
         await _show_queue_picker(call, seen_id)
         return
 
@@ -413,18 +524,35 @@ async def _do_send(call: CallbackQuery, seen_id: int, queue_id: int | None) -> N
 
     queue_label = "очередь" if queue_id else "Входящие"
     await call.answer(f"✅ Отправлено в {queue_label} (пост #{post_pk})", show_alert=True)
-    # Возвращаемся к списку новых постов
+    # После отправки переходим к следующему посту (как «Далее»), а не к списку.
     from app.repositories import gelbooru_subs as gs_repo
 
-    items = await gs_repo.list_new_posts_all(limit=15)
-    await safe_edit_text(
-        call.message, f"🆕 <b>Новые посты Gelbooru</b> ({len(items)})",
-        reply_markup=kb.gelbooru_seen_list(items, sub_id=None),
-    )
+    seen = await gs_repo.get_seen_post(seen_id)
+    sub_id = seen.get("subscription_id") if seen else None
+    if sub_id:
+        items = await gs_repo.list_new_posts(sub_id, limit=50)
+    else:
+        items = await gs_repo.list_new_posts_all(limit=50)
+
+    if items:
+        next_seen_id = items[0]["id"]
+        await _send_seen_card(call, next_seen_id, list_ctx={"sub_id": sub_id})
+    else:
+        all_items = await gs_repo.list_new_posts_all(limit=15)
+        await safe_edit_text(
+            call.message,
+            f"🆕 <b>Новые посты Gelbooru</b> ({len(all_items)})\n\nВсе посты просмотрены!",
+            reply_markup=kb.gelbooru_seen_list(all_items, sub_id=None),
+        )
 
 
 async def _do_skip(call: CallbackQuery, seen_id: int) -> None:
-    """Пропускает seen_post (mark_ignored)."""
+    """Пропускает seen_post (mark_ignored) и переходит к следующему посту.
+
+    ТЗ §2.1.4: «Пропустить» работает как «Далее» — после пропуска показывается
+    следующий пост (а не список). Это удобнее: не нужно искать где остановился.
+    Если следующего поста нет — возвращаемся к списку.
+    """
     from app.repositories import gelbooru_subs as gs_repo
 
     ok = await gs_repo.mark_ignored(seen_id)
@@ -432,12 +560,29 @@ async def _do_skip(call: CallbackQuery, seen_id: int) -> None:
         await call.answer("❌ Пост уже обработан или не найден", show_alert=True)
         return
     await call.answer("⏭ Пропущен")
-    # Возвращаемся к списку
-    items = await gs_repo.list_new_posts_all(limit=15)
-    await safe_edit_text(
-        call.message, f"🆕 <b>Новые посты Gelbooru</b> ({len(items)})",
-        reply_markup=kb.gelbooru_seen_list(items, sub_id=None),
-    )
+
+    # Получаем список, чтобы найти следующий пост.
+    # Используем подписку текущего поста если она есть, иначе общий список.
+    seen = await gs_repo.get_seen_post(seen_id)
+    sub_id = seen.get("subscription_id") if seen else None
+    if sub_id:
+        items = await gs_repo.list_new_posts(sub_id, limit=50)
+    else:
+        items = await gs_repo.list_new_posts_all(limit=50)
+
+    # Текущий пост уже ignored — его не будет в списке new.
+    # Берём ПЕРВЫЙ пост из оставшихся новых (он следующий по порядку).
+    if items:
+        next_seen_id = items[0]["id"]
+        await _send_seen_card(call, next_seen_id, list_ctx={"sub_id": sub_id})
+    else:
+        # Посты закончились — возвращаемся к списку
+        all_items = await gs_repo.list_new_posts_all(limit=15)
+        await safe_edit_text(
+            call.message,
+            f"🆕 <b>Новые посты Gelbooru</b> ({len(all_items)})\n\nВсе посты просмотрены!",
+            reply_markup=kb.gelbooru_seen_list(all_items, sub_id=None),
+        )
 
 
 async def _navigate(call: CallbackQuery, seen_id: int, direction: int) -> None:

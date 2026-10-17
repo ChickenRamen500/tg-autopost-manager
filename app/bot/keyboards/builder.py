@@ -444,12 +444,15 @@ def gelbooru_subs_list(subs: list[dict], new_counts: dict[int, int] | None = Non
     return kb.as_markup()
 
 
-def gelbooru_sub_card(sub: dict, new_count: int = 0) -> InlineKeyboardMarkup:
-    """Карточка подписки: проверить сейчас, вкл/выкл, удалить, новые посты."""
+def gelbooru_sub_card(sub: dict, new_count: int = 0, default_queue_name: str | None = None) -> InlineKeyboardMarkup:
+    """Карточка подписки: проверить сейчас, вкл/выкл, удалить, новые посты, default queue."""
     kb = InlineKeyboardBuilder()
     if new_count > 0:
         kb.button(text=f"🆕 Новые посты ({new_count})", callback_data=f"gb:seen:{sub['id']}")
     kb.button(text="🔄 Проверить сейчас", callback_data=f"gb:sub:{sub['id']}:check")
+    # Default queue — показать текущую или «не задана»
+    q_label = f"📥 Очередь по умолчанию: {default_queue_name}" if default_queue_name else "📥 Очередь по умолчанию: не задана"
+    kb.button(text=q_label, callback_data=f"gb:sub:{sub['id']}:setqueue")
     toggle_label = "⏸ Выключить" if sub.get("is_active") else "▶ Включить"
     kb.button(text=toggle_label, callback_data=f"gb:sub:{sub['id']}:toggle")
     kb.button(text="🗑 Удалить подписку", callback_data=f"gb:sub:{sub['id']}:del")
