@@ -540,3 +540,50 @@ Stage Summary:
 - Архитектура: один worker-процесс, три asyncio-таска (poll + cleanup + subs), SQLite single-writer. Subscription loop не блокирует task_queue (отдельная задача)
 - 42 новых теста покрывают: CRUD подписок/seen_posts/blacklist, дедупликация (3 уровня), бизнес-логику check_subscription (mock gelbooru client), send_seen_post_to_queue (полный цикл), worker lifecycle (subs loop enabled/disabled)
 - Готов фундамент для этапа 4 (UI): keyboard кнопка Gelbooru → список подписок + blacklist → карточки новых постов [Назад][Отправить][Пропустить][Далее] → send_seen_post_to_queue/mark_ignored
+
+---
+Task ID: phase3-stage4
+Agent: Phase 3 implementer
+Task: Фаза 3, Этап 4 — Gelbooru подписки UI (inline-меню: подписки, blacklist, карточки постов)
+
+Work Log:
+- Изучил PR #51-53 (этапы 1-3, слиты в main): worker + pHash + gelbooru subs backend (check_subscription, send_seen_post_to_queue)
+- Изучил паттерны UI: menu.py (FSM AddStates, callback_data-конвенция menu:*, safe_edit_text), builder.py (InlineKeyboardBuilder, adjust), app/bot/__init__.py (порядок роутеров CRITICAL)
+- Создал ветку phase3/stage4-gelbooru-subs-ui от свежего main (commit cbb3191)
+- Добавил кнопку «🖼 Gelbooru» (callback gb:menu) в main_menu для admin (builder.py)
+- Создал 7 функций клавиатур в builder.py: gelbooru_main_menu (подписки/новые посты/blacklist), gelbooru_subs_list (с бейджем N новых), gelbooru_sub_card (проверить/вкл/удалить), gelbooru_seen_list (список новых постов, rating-emoji), gelbooru_seen_card (два режима: основное меню [Отправить][Пропустить][Назад][Далее] + режим выбора очереди), gelbooru_blacklist_list (с URL-encoded тегами для callback_data)
+- Callback-конвенция gb:* (не конфликтует с menu:/rule:/qset:): gb:menu, gb:subs, gb:sub:<id>[:toggle|:del|:check], gb:add_sub, gb:seen, gb:seen:<sub_id>, gb:seen_card:<seen_id>, gb:seen:<seen_id>:send[:<qid>], gb:seen:<seen_id>:skip, gb:seen:<seen_id>:next|:prev, gb:blacklist, gb:bl_add, gb:bl:<tag_encoded>:del
+- Создал app/bot/handlers/gelbooru.py (новый, ~600 строк): роутер Router(name="gelbooru") + GelbooruStates (add_sub_tags, add_bl_tag)
+  * cb_gelbooru_menu — главное меню (счётчик новых постов)
+  * cb_gelbooru_subs — список подписок с бейджами
+  * cb_gelbooru_sub_card — карточка подписки (toggle/del/check + ручная проверка через check_subscription)
+  * cb_gelbooru_add_sub + fsm_add_sub_tags — FSM добавления подписки (теги через пробел)
+  * cb_gelbooru_seen_all — список всех новых постов
+  * cb_gelbooru_seen_dispatch — диспетчер gb:seen:* (список подписки / send / send:<qid> / skip / next / prev)
+  * cb_gelbooru_seen_card — открытие карточки из списка
+  * _show_queue_picker — режим выбора очереди (gb:seen:<id>:send → кнопки очередей)
+  * _do_send — вызов send_seen_post_to_queue (queue_id=0 → Входящие)
+  * _do_skip — mark_ignored
+  * _navigate — next/prev по списку новых постов
+  * cb_gelbooru_blacklist — список blacklist-тегов
+  * cb_gelbooru_bl_action — удаление тега (URL-decode)
+  * cb_gelbooru_bl_add + fsm_add_bl_tag — FSM добавления blacklist-тега
+  * fsm_non_text_in_gelbooru_state — catch-all для фото/видео в FSM
+- Зарегистрировал роутер в app/bot/__init__.py: порядок menu → gelbooru → admin → media → start (gelbooru ДО media, т.к. media.receive_text ловит F.text — без этого FSM-теги gelbooru попадали бы в media)
+- RBAC: каждый handler проверяет _require_admin (дублирует проверку кнопки — защита от прямых callback_data)
+- _format_seen_card: HTML-экранирование (html.escape) для тегов/rating/url
+- Версия → 0.3.0-phase3-stage4
+- Создал tests/unit/test_gelbooru_ui.py: 17 тестов — main_menu (кнопка для admin/moderator), gelbooru_main_menu (с/без count), gelbooru_subs_list (с бейджем/empty), gelbooru_sub_card (с/без новых постов), gelbooru_seen_list (с sub_id/empty), gelbooru_seen_card (основное меню + режим выбора очереди), gelbooru_blacklist_list (с URL-encoded/empty), router_exists, router_registered_in_dispatcher, gelbooru_states_defined, handlers_callbacks_registered, callback_data_convention_no_conflicts (все gb:* или menu:* или noop)
+- ruff: мои файлы — 0 ошибок (исправил F841 unused sub_id, F541 f-string без плейсхолдера, I001 импорты; baseline 33 → 33, не добавил новых)
+- pytest: 267 passed (17 новых + 250 существующих), 0 failed
+
+Stage Summary:
+- Gelbooru UI полностью реализован: кнопка «🖼 Gelbooru» в главном меню admin → главное меню (новые посты/подписки/blacklist) → CRUD подписок + ручная проверка + карточки постов [Отправить][Пропустить][Назад][Далее] → выбор очереди → send_seen_post_to_queue (этап 3)
+- Полный user flow: /menu → 🖼 Gelbooru → 📋 Подписки → ➕ Добавить подписку → ввод тегов → ✅ создано → 🔄 Проверить сейчас → 🆕 Новые посты → карточка → 📤 Отправить → выбор очереди → ✅ пост в очереди (worker скачает + pHash-дедуп)
+- Карточка поста (ТЗ §2.1.4): [📤 Отправить][⏭ Пропустить][⬅ Назад][Далее ➡] + [📋 К списку]. Режим выбора очереди: [📥 Во Входящие][📋 Очередь 1]...[📋 Очередь N][🔙 Отмена]
+- Ручная проверка подписки: cb_gelbooru_sub_card с action=check → check_subscription(sub) + mark_checked → alert с количеством новых
+- Blacklist UI: список тегов с кнопками удаления (URL-encoded для callback_data 64 байта лимит) + FSM добавления
+- Безопасность: _require_admin в каждом handler (дублирует RBAC кнопки), html.escape на всех пользовательских данных в _format_seen_card
+- Архитектура: роутер gelbooru включён ДО media (CRITICAL — media.receive_text ловит F.text, перехватил бы FSM-теги). GelbooruStates изолированы от AddStates menu.py
+- 17 новых тестов покрывают: построение всех 7 клавиатур (с валидацией callback_data), регистрацию роутера в dispatcher, FSM-состояния, конвенцию callback_data (все gb:* или menu:* или noop — нет конфликтов)
+- Фаза 3 этап 4 завершён. Остался этап 5 (внешние парсеры Danbooru/X.com/Pikabu/Pixiv)

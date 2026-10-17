@@ -197,7 +197,7 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage3", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage4", lifespan=lifespan)
 
 
 # P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.
