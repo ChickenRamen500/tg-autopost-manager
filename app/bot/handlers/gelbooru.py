@@ -116,12 +116,12 @@ async def _send_seen_card(call: CallbackQuery, seen_id: int, list_ctx: dict | No
 
     seen = await gs_repo.get_seen_post(seen_id)
     if seen is None:
-        await safe_edit_text(call.message, "❌ Пост не найден (возможно, уже обработан).", reply_markup=kb.back_button())
+        await _replace_message(call, "❌ Пост не найден (возможно, уже обработан).", reply_markup=kb.back_button())
         await call.answer()
         return
     if seen["status"] != "new":
-        await safe_edit_text(
-            call.message,
+        await _replace_message(
+            call,
             f"ℹ️ Пост #{seen_id} уже обработан (статус: {seen['status']}).",
             reply_markup=kb.back_button(),
         )
@@ -213,7 +213,7 @@ async def cb_gelbooru_menu(call: CallbackQuery, user_role: str | None = None) ->
         "Подписки автоматически опрашиваются worker'ом. "
         "Новые посты появляются здесь для ручного разбора."
     )
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_main_menu(new_count))
+    await _replace_message(call, text, reply_markup=kb.gelbooru_main_menu(new_count))
     await call.answer()
 
 
@@ -235,7 +235,7 @@ async def cb_gelbooru_subs(call: CallbackQuery, user_role: str | None = None) ->
     for s in subs:
         new_counts[s["id"]] = await gs_repo.count_new_posts(s["id"])
     text = f"📋 <b>Подписки Gelbooru</b> ({len(subs)}):"
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_subs_list(subs, new_counts))
+    await _replace_message(call, text, reply_markup=kb.gelbooru_subs_list(subs, new_counts))
     await call.answer()
 
 
@@ -269,116 +269,104 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
         # Возвращаемся к списку
         subs = await subs_repo.list_subscriptions(active_only=False)
         new_counts = {s["id"]: await gs_repo.count_new_posts(s["id"]) for s in subs}
-        await safe_edit_text(
-            call.message, "📋 <b>Подписки Gelbooru</b>:", reply_markup=kb.gelbooru_subs_list(subs, new_counts)
-        )
+        await _replace_message(call, "📋 <b>Подписки Gelbooru</b>:", reply_markup=kb.gelbooru_subs_list(subs, new_counts))
         return
     elif action == "check":
         # Ручная проверка — запускаем check_subscription синхронно.
-        # НЕ вызываем call.answer("🔄...") здесь — Telegram разрешает только ОДИН
-        # answer на callback; второй бросит TelegramRetryAfter. Финальный answer ниже.
         from app.services.gelbooru_subscriptions import check_subscription
 
         try:
             new_count = await check_subscription(sub)
             await subs_repo.mark_checked(sub_id)
-            sub = await subs_repo.get_subscription(sub_id)  # обновлённый
+            sub = await subs_repo.get_subscription(sub_id)
             await call.answer(f"✅ Проверено: {new_count} новых постов", show_alert=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("Ручная проверка подписки #%s: %s", sub_id, e)
             await call.answer(f"⚠️ Ошибка проверки: {e}", show_alert=True)
     elif action == "setqueue":
-        # Показать список очередей для выбора default_queue_id
-        from app.repositories import queues as queues_repo
+        # setqueue (4 parts) = показать picker
+        # setqueue:<qid> (5 parts) = применить значение
+        if len(parts) >= 5:
+            qid = await _safe_int(parts[4], call, "queue_id")
+            if qid is not None:
+                await subs_repo.set_default_queue(sub_id, None if qid == 0 else qid)
+                await call.answer("✅ Очередь по умолчанию обновлена")
+                sub = await subs_repo.get_subscription(sub_id)
+        else:
+            # Показать picker
+            from app.repositories import queues as queues_repo
 
-        queues = await queues_repo.list_queues(active_only=True)
-        # Текущий default_queue_id
-        current_qid = sub.get("default_queue_id")
-        kb_buttons = InlineKeyboardBuilder()
-        kb_buttons.button(
-            text="🚫 Всегда спрашивать (сбросить)" if current_qid else "✅ Всегда спрашивать (текущее)",
-            callback_data=f"gb:sub:{sub_id}:setqueue:0",
-        )
-        for q in queues[:10]:
-            mark = "✅ " if q["id"] == current_qid else "📋 "
+            queues = await queues_repo.list_queues(active_only=True)
+            current_qid = sub.get("default_queue_id")
+            kb_buttons = InlineKeyboardBuilder()
             kb_buttons.button(
-                text=f"{mark}«{q['name']}» (#{q['id']})",
-                callback_data=f"gb:sub:{sub_id}:setqueue:{q['id']}",
+                text="🚫 Всегда спрашивать (сбросить)" if current_qid else "✅ Всегда спрашивать (текущее)",
+                callback_data=f"gb:sub:{sub_id}:setqueue:0",
             )
-        kb_buttons.button(text="🔙 К подписке", callback_data=f"gb:sub:{sub_id}")
-        kb_buttons.adjust(1)
-        await safe_edit_text(
-            call.message,
-            f"📥 <b>Очередь по умолчанию для подписки #{sub_id}</b>\n\n"
-            "При нажатии «Отправить» в карточке поста — пост сразу отправляется в эту очередь "
-            "(без выбора каждый раз).",
-            reply_markup=kb_buttons.as_markup(),
-        )
-        await call.answer()
-        return
+            for q in queues[:10]:
+                mark = "✅ " if q["id"] == current_qid else "📋 "
+                kb_buttons.button(
+                    text=f"{mark}«{q['name']}» (#{q['id']})",
+                    callback_data=f"gb:sub:{sub_id}:setqueue:{q['id']}",
+                )
+            kb_buttons.button(text="🔙 К подписке", callback_data=f"gb:sub:{sub_id}")
+            kb_buttons.adjust(1)
+            await _replace_message(
+                call,
+                f"📥 <b>Очередь по умолчанию для подписки #{sub_id}</b>\n\n"
+                "При нажатии «Отправить» в карточке поста — пост сразу отправляется в эту очередь.",
+                reply_markup=kb_buttons.as_markup(),
+            )
+            await call.answer()
+            return
     elif action == "setcheck":
-        # Показать picker для выбора интервала проверки (часы)
-        current = sub.get("check_interval_hours", 6)
-        await safe_edit_text(
-            call.message,
-            f"⏱ <b>Интервал проверки подписки #{sub_id}</b>\n\n"
-            "Как часто worker опрашивает gelbooru на новые посты.",
-            reply_markup=kb.gelbooru_interval_picker(sub_id, "setcheck", current),
-        )
-        await call.answer()
-        return
+        # setcheck (4 parts) = показать picker
+        # setcheck:<hours> (5 parts) = применить значение
+        if len(parts) >= 5:
+            hours = await _safe_int(parts[4], call, "hours")
+            if hours is not None and hours > 0:
+                try:
+                    await subs_repo.set_check_interval(sub_id, hours)
+                    await call.answer(f"✅ Интервал проверки: {hours}ч")
+                    sub = await subs_repo.get_subscription(sub_id)
+                except ValueError as e:
+                    await call.answer(f"⚠️ {e}", show_alert=True)
+        else:
+            current = sub.get("check_interval_hours", 6)
+            await _replace_message(
+                call,
+                f"⏱ <b>Интервал проверки подписки #{sub_id}</b>\n\n"
+                "Как часто worker опрашивает gelbooru на новые посты.",
+                reply_markup=kb.gelbooru_interval_picker(sub_id, "setcheck", current),
+            )
+            await call.answer()
+            return
     elif action == "setnotify":
-        # Показать picker для выбора интервала уведомлений (минуты)
-        current = sub.get("notify_interval_minutes", 60)
-        await safe_edit_text(
-            call.message,
-            f"🔔 <b>Интервал уведомлений подписки #{sub_id}</b>\n\n"
-            "Как часто присылать уведомление о новых постах. "
-            "0 = при каждом чеке (может спамить).",
-            reply_markup=kb.gelbooru_interval_picker(sub_id, "setnotify", current),
-        )
-        await call.answer()
+        # setnotify (4 parts) = показать picker
+        # setnotify:<minutes> (5 parts) = применить значение
+        if len(parts) >= 5:
+            minutes = await _safe_int(parts[4], call, "minutes")
+            if minutes is not None and minutes >= 0:
+                try:
+                    await subs_repo.set_notify_interval(sub_id, minutes)
+                    label = "при каждом чеке" if minutes == 0 else f"{minutes}мин"
+                    await call.answer(f"✅ Интервал уведомлений: {label}")
+                    sub = await subs_repo.get_subscription(sub_id)
+                except ValueError as e:
+                    await call.answer(f"⚠️ {e}", show_alert=True)
+        else:
+            current = sub.get("notify_interval_minutes", 60)
+            await _replace_message(
+                call,
+                f"🔔 <b>Интервал уведомлений подписки #{sub_id}</b>\n\n"
+                "Как часто присылать уведомление о новых постах. 0 = при каждом чеке.",
+                reply_markup=kb.gelbooru_interval_picker(sub_id, "setnotify", current),
+            )
+            await call.answer()
+            return
+    else:
+        await call.answer("Неизвестное действие")
         return
-    elif action == "setqueue" and len(call.data.split(":")) > 3:
-        # gb:sub:<id>:setqueue:<qid> — установлен default queue
-        # (обрабатывается в отдельном elif ниже, т.к. action уже "setqueue")
-        pass
-
-    # Проверяем расширенный action: gb:sub:<id>:setqueue:<qid>
-    full_parts = call.data.split(":")
-    if len(full_parts) >= 5 and full_parts[3] == "setqueue":
-        qid_raw = full_parts[4]
-        qid = await _safe_int(qid_raw, call, "queue_id")
-        if qid is not None:
-            # qid=0 = сброс (None), иначе реальный queue_id
-            await subs_repo.set_default_queue(sub_id, None if qid == 0 else qid)
-            await call.answer("✅ Очередь по умолчанию обновлена")
-            sub = await subs_repo.get_subscription(sub_id)
-
-    # Проверяем gb:sub:<id>:setcheck:<hours>
-    if len(full_parts) >= 5 and full_parts[3] == "setcheck":
-        hours_raw = full_parts[4]
-        hours = await _safe_int(hours_raw, call, "hours")
-        if hours is not None and hours > 0:
-            try:
-                await subs_repo.set_check_interval(sub_id, hours)
-                await call.answer(f"✅ Интервал проверки: {hours}ч")
-                sub = await subs_repo.get_subscription(sub_id)
-            except ValueError as e:
-                await call.answer(f"⚠️ {e}", show_alert=True)
-
-    # Проверяем gb:sub:<id>:setnotify:<minutes>
-    if len(full_parts) >= 5 and full_parts[3] == "setnotify":
-        minutes_raw = full_parts[4]
-        minutes = await _safe_int(minutes_raw, call, "minutes")
-        if minutes is not None and minutes >= 0:
-            try:
-                await subs_repo.set_notify_interval(sub_id, minutes)
-                label = "при каждом чеке" if minutes == 0 else f"{minutes}мин"
-                await call.answer(f"✅ Интервал уведомлений: {label}")
-                sub = await subs_repo.get_subscription(sub_id)
-            except ValueError as e:
-                await call.answer(f"⚠️ {e}", show_alert=True)
 
     # Карточка подписки (default + после toggle/check/setqueue)
     sub = await subs_repo.get_subscription(sub_id)
@@ -405,7 +393,7 @@ async def cb_gelbooru_sub_card(call: CallbackQuery, user_role: str | None = None
         f"Последняя проверка: {sub.get('last_checked_at') or 'никогда'}\n"
         f"🆕 Новых постов: {new_count}"
     )
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_sub_card(sub, new_count, default_queue_name))
+    await _replace_message(call, text, reply_markup=kb.gelbooru_sub_card(sub, new_count, default_queue_name))
     if not action:
         await call.answer()
 
@@ -496,7 +484,7 @@ async def cb_gelbooru_seen_all(call: CallbackQuery, user_role: str | None = None
 
     items = await gs_repo.list_new_posts_all(limit=15)
     text = f"🆕 <b>Новые посты Gelbooru</b> ({len(items)})"
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_seen_list(items, sub_id=None))
+    await _replace_message(call, text, reply_markup=kb.gelbooru_seen_list(items, sub_id=None))
     await call.answer()
 
 
@@ -529,7 +517,7 @@ async def cb_gelbooru_seen_dispatch(call: CallbackQuery, state: FSMContext, user
 
         items = await gs_repo.list_new_posts(sub_id, limit=15)
         text = f"🆕 <b>Новые посты подписки #{sub_id}</b> ({len(items)})"
-        await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_seen_list(items, sub_id=sub_id))
+        await _replace_message(call, text, reply_markup=kb.gelbooru_seen_list(items, sub_id=sub_id))
         await call.answer()
         return
 
@@ -730,7 +718,7 @@ async def cb_gelbooru_blacklist(call: CallbackQuery, user_role: str | None = Non
         f"🚫 <b>Blacklist тегов Gelbooru</b> ({len(tags)})\n\n"
         "Эти теги исключаются из ВСЕХ подписок (добавляются как -tag к запросу)."
     )
-    await safe_edit_text(call.message, text, reply_markup=kb.gelbooru_blacklist_list(tags))
+    await _replace_message(call, text, reply_markup=kb.gelbooru_blacklist_list(tags))
     await call.answer()
 
 
@@ -758,8 +746,8 @@ async def cb_gelbooru_bl_action(call: CallbackQuery, user_role: str | None = Non
             await call.answer(f"Тег «{tag}» не найден", show_alert=True)
         # Обновляем список
         tags = await gs_repo.list_blacklist_tags()
-        await safe_edit_text(
-            call.message,
+        await _replace_message(
+            call,
             f"🚫 <b>Blacklist тегов Gelbooru</b> ({len(tags)})",
             reply_markup=kb.gelbooru_blacklist_list(tags),
         )

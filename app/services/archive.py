@@ -191,10 +191,22 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
 
         post_id = post.get("id")
         if file_type == "photo":
-            await _throttled_archive_send(
-                lambda: bot.send_photo(chat_id=archive_channel, photo=media_obj, caption=full_caption),
-                op_name="send_photo", post_id=post_id,
-            )
+            try:
+                await _throttled_archive_send(
+                    lambda: bot.send_photo(chat_id=archive_channel, photo=media_obj, caption=full_caption),
+                    op_name="send_photo", post_id=post_id,
+                )
+            except Exception as photo_err:  # noqa: BLE001
+                # PHOTO_INVALID_DIMENSIONS или file too big (>10MB) — fallback на document
+                err_str = str(photo_err)
+                if "too big for a photo" in err_str or "PHOTO_INVALID_DIMENSIONS" in err_str:
+                    log.warning("Пост #%s: фото слишком большое/маленькое — fallback на send_document", post_id)
+                    await _throttled_archive_send(
+                        lambda: bot.send_document(chat_id=archive_channel, document=media_obj, caption=full_caption),
+                        op_name="send_document", post_id=post_id,
+                    )
+                else:
+                    raise
         elif file_type == "video":
             await _throttled_archive_send(
                 lambda: bot.send_video(chat_id=archive_channel, video=media_obj, caption=full_caption),

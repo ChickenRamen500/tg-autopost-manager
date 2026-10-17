@@ -243,10 +243,12 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
         if thumb is None:
             return []
 
-        # Получаем file_path через getFile, затем читаем файл напрямую через volume mount.
+        # Получаем file_path через getFile, затем скачиваем через HTTP от local-bot-api.
         # bot.download() не работает с --local (двойной путь → 404).
+        # volume mount чтение тоже ненадёжно (структура директорий local-bot-api
+        # может отличаться). Надёжный способ: HTTP download с правильным URL.
         from app.bot.runtime import get_bot
-        from app.utils.local_bot_api import read_local_file_bytes_with_retry
+        from app.config.settings import settings
 
         bot = get_bot()
         file_info = await bot.get_file(thumb.file_id)
@@ -254,16 +256,31 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
             logger.warning("pHash: getFile вернул пустой file_path для поста #%s — пропуск", post_id)
             return []
 
-        # Retry: local-bot-api может ещё сохранять файл на диск (особенно для
-        # только что присланного фото). Без retry файл не найдётся.
-        data = read_local_file_bytes_with_retry(file_info.file_path, max_retries=3, delay=0.5)
+        # Скачиваем файл через HTTP от local-bot-api.
+        # file_path при --local: /var/lib/telegram-bot-api/<token>/photos/file_N.jpg
+        # URL для скачивания: {api_url}/file/bot{token}/{relative_path}
+        # relative_path = file_path БЕЗ префикса /var/lib/telegram-bot-api/
+        import aiohttp
+
+        relative_path = file_info.file_path
+        prefix = "/var/lib/telegram-bot-api/"
+        if relative_path.startswith(prefix):
+            relative_path = relative_path[len(prefix):]
+        download_url = f"{settings.bot_api_url}/file/bot{settings.bot_token}/{relative_path}"
+
+        data: bytes | None = None
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(download_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                    else:
+                        logger.warning("pHash: HTTP %d при скачивании %s для поста #%s", resp.status, download_url, post_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("pHash: ошибка HTTP скачивания для поста #%s: %s", post_id, e)
+
         if not data:
-            logger.warning(
-                "pHash: файл %s не найден в volume mount для поста #%s — пропуск "
-                "(проверьте BOT_API_DATA_MOUNT в docker-compose и что volume bot-api-data "
-                "примонтирован в контейнер bot)",
-                file_info.file_path, post_id,
-            )
+            logger.warning("pHash: не удалось скачать файл для поста #%s — пропуск", post_id)
             return []
 
         from app.services.dedup.phash import check_visual_duplicate, compute_phash_from_bytes
