@@ -29,23 +29,50 @@ async def create_subscription(
     site: str,
     tags: list[str],
     check_interval_hours: int = 6,
+    notify_interval_minutes: int = 60,
 ) -> int:
+    """Создаёт подписку на теги.
+
+    Args:
+        user_id: ID пользователя в БД (не tg_id).
+        site: 'gelbooru' или 'danbooru'.
+        tags: список тегов (могут содержать '-tag' для исключения).
+        check_interval_hours: как часто worker опрашивает gelbooru.
+        notify_interval_minutes: как часто уведомлять админа о новых постах (0 = при каждом чеке).
+    """
     if site not in ("gelbooru", "danbooru"):
         raise ValueError(f"Недопустимый сайт: {site!r} (разрешены gelbooru/danbooru)")
     if not tags:
         raise ValueError("Список тегов пуст")
+    if check_interval_hours <= 0:
+        raise ValueError("check_interval_hours должен быть > 0")
+    if notify_interval_minutes < 0:
+        raise ValueError("notify_interval_minutes должен быть >= 0")
     db = get_db()
     cur = await db.execute(
         """
-        INSERT INTO tag_subscriptions (user_id, site, tags, check_interval_hours)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO tag_subscriptions (user_id, site, tags, check_interval_hours, notify_interval_minutes)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (user_id, site, _tags_to_json(tags), check_interval_hours),
+        (user_id, site, _tags_to_json(tags), check_interval_hours, notify_interval_minutes),
     )
     await db.commit()
     rid = cur.lastrowid
     await cur.close()
     return rid
+
+
+async def get_subscription(subscription_id: int) -> dict[str, Any] | None:
+    """Возвращает подписку по id (с распарсенными tags)."""
+    db = get_db()
+    cur = await db.execute("SELECT * FROM tag_subscriptions WHERE id = ?", (subscription_id,))
+    row = await cur.fetchone()
+    await cur.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["tags"] = _parse_tags(d.get("tags"))
+    return d
 
 
 async def list_subscriptions(user_id: int | None = None, active_only: bool = True) -> list[dict[str, Any]]:
@@ -104,6 +131,49 @@ async def mark_checked(subscription_id: int) -> bool:
     changed = cur.rowcount > 0
     await cur.close()
     return changed
+
+
+async def set_last_notified(subscription_id: int) -> bool:
+    """Обновляет last_notified_at (вызывается после отправки уведомления админу)."""
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE tag_subscriptions SET last_notified_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (subscription_id,),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
+async def is_due_for_notify(subscription_id: int) -> bool:
+    """True если подошло время уведомления (с учётом notify_interval_minutes).
+
+    notify_interval_minutes=0 → всегда True (уведомлять при каждом чеке).
+    Иначе — если last_notified_at NULL или прошло >= notify_interval_minutes минут.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "SELECT notify_interval_minutes, last_notified_at FROM tag_subscriptions WHERE id = ?",
+        (subscription_id,),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    if not row:
+        return False
+    interval = row["notify_interval_minutes"]
+    if interval == 0:
+        return True
+    if row["last_notified_at"] is None:
+        return True
+    cur = await db.execute(
+        "SELECT CASE WHEN datetime(last_notified_at, '+' || ? || ' minutes') <= datetime('now') "
+        "THEN 1 ELSE 0 END AS due FROM tag_subscriptions WHERE id = ?",
+        (interval, subscription_id),
+    )
+    r = await cur.fetchone()
+    await cur.close()
+    return bool(r and r["due"])
 
 
 async def set_active(subscription_id: int, is_active: bool) -> bool:

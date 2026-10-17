@@ -506,3 +506,37 @@ Stage Summary:
 - Видео/GIF: pHash не применяется (нужен ffmpeg-кадр — Фаза 5). Для них работает только file_unique_id дедупликация
 - 29 новых тестов покрывают: чистые функции, lifecycle (file/bytes/disabled/non-image), интеграцию с БД (atomic, find_near, idempotent), worker-интеграцию (duplicate detected/unique/disabled/video)
 - Готов фундамент для этапа 3 (Gelbooru подписки): worker уже умеет скачивать + pHash-дедуп, подписки будут создавать posts status=new + enqueue download
+
+---
+Task ID: phase3-stage3
+Agent: Phase 3 implementer
+Task: Фаза 3, Этап 3 — Gelbooru подписки (backend): опрос, дедуп, уведомления, отправка
+
+Work Log:
+- Изучил PR #51-52 (этапы 1-2, слиты в main): worker с _poll_loop + _cleanup_loop, pHash-дедуп
+- Изучил существующие: subscriptions.py (tag_subscriptions с list_due_subscriptions), gelbooru client, notifications.py (notify_admin)
+- Создал ветку phase3/stage3-gelbooru-subs от свежего main (commit 9f9b252)
+- Схема БД (app/db/schema.sql): расширил tag_subscriptions (notify_interval_minutes + last_notified_at), создал gelbooru_seen_posts (subscription_id, post_id, file_unique_id/md5, source_url, preview_url, tags, rating, status new/sent/ignored, post_pk, reviewed_at, UNIQUE(subscription_id, post_id)) + gelbooru_blacklist_tags (tag UNIQUE, created_by_user). Добавил индексы idx_seen_sub_status, idx_seen_file_unique, idx_seen_post_id
+- Миграции (app/db/database.py): ALTER TABLE tag_subscriptions ADD notify_interval_minutes + last_notified_at (для существующих БД)
+- Расширил subscriptions.py: create_subscription(notify_interval_minutes=60), get_subscription, set_last_notified, is_due_for_notify (с учётом notify_interval_minutes: 0=всегда due, NULL last_notified=due, иначе datetime-сравнение)
+- Создал repositories/gelbooru_subs.py: seen_posts CRUD (add_seen_post с INSERT OR IGNORE + rowcount для идемпотентности, is_post_seen, is_file_seen_anywhere для кросс-подписочной дедупликации по md5, list_new_posts, count_new_posts, count_new_posts_all, get_seen_post, mark_sent, mark_ignored, find_by_post_and_subscription) + blacklist CRUD (add_blacklist_tag с нормализацией trim/lstrip('-')/lower, remove, list, is_blacklisted, get_blacklist_query_suffix → '-tag1 -tag2 ...')
+- Создал services/gelbooru_subscriptions.py: _build_query (tags + blacklist suffix), _extract_post_fields (gelbooru post → seen_post fields), check_subscription (search_posts → дедуп по md5 (кросс-подписочный) + по post_id (внутриподписочный) → add_seen_post), check_all_due_subscriptions (list_due → check + mark_checked + _maybe_notify), _maybe_notify (is_due_for_notify → notify_admin «N новых постов» + set_last_notified), send_seen_post_to_queue (создание posts-поста source_type='gelbooru' status='new' + enqueue download + mark_sent), _file_type_from_url (file_ext → photo/video/gif)
+- Интегрировал _subscription_loop в worker: третий asyncio-таск (помимо poll + cleanup), интервал gelbooru_subs_poll_interval_seconds (60с), вызывает check_all_due_subscriptions, обновляет счётчики subs_checked/subs_new_posts/subs_notified. Условие запуска: settings.gelbooru_subs_enabled
+- Обновил start/stop/reset_worker для учёта _subscription_task
+- Настройки (app/config/settings.py): gelbooru_subs_enabled, gelbooru_subs_poll_interval_seconds (60), gelbooru_search_limit (50) + валидация (poll>0, search_limit 1..100)
+- /health/worker endpoint: добавил subs_checked/subs_new_posts/subs_notified + gelbooru.new_posts
+- Версия → 0.3.0-phase3-stage3
+- Обновил .env.example блоком Фазы 3 этап 3
+- Создал tests/unit/test_gelbooru_subs.py: 42 теста — subscriptions (create с notify_interval, default, invalid, is_due_for_notify: never/zero/recent, set_last_notified), seen_posts (add new, idempotent, is_post_seen, is_file_seen_anywhere cross-sub, list_new, count_new, mark_sent, mark_ignored, mark_sent only for new), blacklist (add normalizes, idempotent, empty raises, remove, is_blacklisted, get_blacklist_query_suffix), service (_build_query with/without blacklist, empty; _extract_post_fields full/missing; _file_type_from_url; check_subscription: finds new/dedup already seen/cross-sub dedup by md5/with blacklist/api error/empty result; check_all_due: no due/marks checked; send_seen_post: creates post+enqueues/already sent/no source url/nonexistent; worker: start with subs loop/subs disabled no loop)
+- ruff: мои файлы — 0 ошибок (baseline 33 → 33, не добавил новых)
+- pytest: 250 passed (42 новых + 208 существующих), 0 failed
+- Баг-фикс при тестировании: INSERT OR IGNORE с AUTOINCREMENT возвращает lastrowid≠0 даже при конфликте — перешёл на проверку cur.rowcount>0 для идемпотентности add_seen_post и add_blacklist_tag
+
+Stage Summary:
+- Gelbooru подписки backend полностью реализован: worker опрашивает due-подписки каждые 60с, ищет посты через gelbooru client (с rate limit + cache), добавляет новые в gelbooru_seen_posts (status='new'), уведомляет админа по notify_interval
+- Три уровня дедупликации: (1) внутриподписочная по (subscription_id, post_id) — UNIQUE constraint; (2) кросс-подписочная по md5 (is_file_seen_anywhere) — один пост не добавляется дважды в разные подписки; (3) file_unique_id при отправке в очередь (через posts.create_post ON CONFLICT — Фаза 2)
+- Глобальный blacklist тегов: gelbooru_blacklist_tags, добавляется как '-tag1 -tag2' ко ВСЕМ запросам (get_blacklist_query_suffix). Игнор-теги в самой подписке ('-1boy' в tags) передаются как есть — gelbooru API сам исключает
+- send_seen_post_to_queue — готов для UI этапа 4: создаёт posts-пост source_type='gelbooru' status='new' + enqueue download → worker скачает и применит pHash-дедуп (этап 2). mark_sent связывает seen_post с post_pk
+- Архитектура: один worker-процесс, три asyncio-таска (poll + cleanup + subs), SQLite single-writer. Subscription loop не блокирует task_queue (отдельная задача)
+- 42 новых теста покрывают: CRUD подписок/seen_posts/blacklist, дедупликация (3 уровня), бизнес-логику check_subscription (mock gelbooru client), send_seen_post_to_queue (полный цикл), worker lifecycle (subs loop enabled/disabled)
+- Готов фундамент для этапа 4 (UI): keyboard кнопка Gelbooru → список подписок + blacklist → карточки новых постов [Назад][Отправить][Пропустить][Далее] → send_seen_post_to_queue/mark_ignored

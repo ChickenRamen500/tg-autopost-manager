@@ -110,6 +110,19 @@ class Settings:
     # False → pHash при приёме не вычисляется, только после явной обработки (worker).
     phash_check_on_receive: bool = field(default_factory=lambda: _get("PHASH_CHECK_ON_RECEIVE", "1").strip() not in ("0", "false", "no", "off"))
 
+    # --- Фаза 3: подписки Gelbooru (ТЗ §2.1.4) ---
+    # Включить автопарсинг подписок (tag_subscriptions). False → worker НЕ опрашивает
+    # gelbooru, подписки существуют в БД но не проверяются (для экономии трафика/CPU).
+    gelbooru_subs_enabled: bool = field(default_factory=lambda: _get("GELBOORU_SUBS_ENABLED", "1").strip() not in ("0", "false", "no", "off"))
+    # Интервал опроса due-подписок worker'ом, сек. Не путать с check_interval_hours
+    # отдельной подписки — этот интервал определяет как часто worker вообще запускает
+    # цикл проверки (внутри цикла каждая подписка проверяется только если подошёл её
+    # check_interval_hours). 60 сек = баланс реактивности и нагрузки.
+    gelbooru_subs_poll_interval_seconds: int = field(default_factory=lambda: _get_int("GELBOORU_SUBS_POLL_INTERVAL_SECONDS", 60))
+    # Лимит постов в одном запросе к gelbooru API (max 100, gelbooru ограничивает).
+    # Больше = больше постов за раз, но дольше запрос и больше расход кеша.
+    gelbooru_search_limit: int = field(default_factory=lambda: _get_int("GELBOORU_SEARCH_LIMIT", 50))
+
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: _get_int("WEB_PORT", 8000))
 
@@ -190,6 +203,16 @@ class Settings:
             problems.append(
                 f"PHASH_MAX_DISTANCE={self.phash_max_distance} слишком большой (>32) — "
                 "практически все изображения будут считаться дубликатами (64-битный pHash)"
+            )
+
+        # --- Фаза 3: подписки Gelbooru ---
+        if self.gelbooru_subs_poll_interval_seconds <= 0:
+            problems.append(
+                f"GELBOORU_SUBS_POLL_INTERVAL_SECONDS={self.gelbooru_subs_poll_interval_seconds} должен быть > 0"
+            )
+        if not (1 <= self.gelbooru_search_limit <= 100):
+            problems.append(
+                f"GELBOORU_SEARCH_LIMIT={self.gelbooru_search_limit} вне диапазона 1-100 (лимит gelbooru API)"
             )
 
         # --- Часовой пояс: должен существовать в tzdata ---

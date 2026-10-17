@@ -122,15 +122,55 @@ CREATE TABLE IF NOT EXISTS duplicate_hashes (
 
 -- Подписки на теги (Gelbooru/Danbooru)
 CREATE TABLE IF NOT EXISTS tag_subscriptions (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id              INTEGER NOT NULL,
-    site                 TEXT NOT NULL CHECK(site IN ('gelbooru', 'danbooru')),
-    tags                 TEXT NOT NULL,                -- JSON массив тегов
-    check_interval_hours INTEGER NOT NULL DEFAULT 6 CHECK(check_interval_hours > 0),
-    last_checked_at      DATETIME,
-    is_active            INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
-    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                  INTEGER NOT NULL,
+    site                     TEXT NOT NULL CHECK(site IN ('gelbooru', 'danbooru')),
+    tags                     TEXT NOT NULL,                -- JSON массив тегов
+    check_interval_hours     INTEGER NOT NULL DEFAULT 6 CHECK(check_interval_hours > 0),
+    -- Фаза 3: интервал уведомлений админа о новых постах (минуты).
+    -- 0 = уведомлять при каждом чеке; иначе — не чаще раза в N минут
+    -- (throttle, чтобы не спамить при частом check_interval).
+    notify_interval_minutes  INTEGER NOT NULL DEFAULT 60 CHECK(notify_interval_minutes >= 0),
+    last_checked_at          DATETIME,
+    last_notified_at         DATETIME,                       -- когда последний раз шло уведомление
+    is_active                INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+    created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Просмотренные посты Gelbooru (Фаза 3, ТЗ §2.1.4)
+-- Отслеживает, какие посты уже найдены по подписке, и их статус:
+--   new      — найден, ждёт решения админа (отправить/пропустить)
+--   sent     — отправлен в очередь (пост создан в posts)
+--   ignored  — пропущен админом (больше не показывается)
+CREATE TABLE IF NOT EXISTS gelbooru_seen_posts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    post_id         INTEGER NOT NULL,                    -- ID поста на gelbooru.com
+    file_unique_id  TEXT,                                  -- md5 из gelbooru (для дедупа)
+    source_url      TEXT,                                  -- file_url для скачивания
+    preview_url     TEXT,                                  -- для карточки в UI
+    tags            TEXT,                                  -- JSON массив тегов поста
+    rating          TEXT,                                  -- safe/questionable/explicit
+    status          TEXT NOT NULL DEFAULT 'new'
+                    CHECK(status IN ('new', 'sent', 'ignored')),
+    post_pk         INTEGER,                               -- ID поста в нашей БД (после «Отправить»)
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at     DATETIME,                              -- когда admin нажал Отправить/Пропустить
+    FOREIGN KEY (subscription_id) REFERENCES tag_subscriptions(id) ON DELETE CASCADE,
+    CONSTRAINT uq_seen_sub_post UNIQUE (subscription_id, post_id)
+);
+
+-- Глобальный blacklist тегов Gelbooru (Фаза 3, ТЗ §2.1.4)
+-- Теги, которые исключаются из ВСЕХ подписок (добавляются как -tag к запросу).
+-- Например: 'rating_explicit', '1boy', 'loli' — чтобы вырезать нежелательный контент
+-- на глобальном уровне, не дублируя -tag в каждой подписке.
+CREATE TABLE IF NOT EXISTS gelbooru_blacklist_tags (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag             TEXT NOT NULL UNIQUE,                 -- тег без минуса (например 'rating_explicit')
+    created_by_user INTEGER,                              -- кто добавил (NULL = системный)
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by_user) REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- Очередь задач (task_queue) — персистентная очередь для worker'а (Фаза 3)
@@ -164,6 +204,10 @@ CREATE INDEX IF NOT EXISTS idx_posts_media_group  ON posts(media_group_id);
 CREATE INDEX IF NOT EXISTS idx_routing_active      ON routing_rules(is_active, priority);
 CREATE INDEX IF NOT EXISTS idx_dup_hash_value      ON duplicate_hashes(hash_type, hash_value);
 CREATE INDEX IF NOT EXISTS idx_task_queue_status   ON task_queue(status);
+-- Фаза 3: индексы для gelbooru_seen_posts (поиск новых постов по подписке)
+CREATE INDEX IF NOT EXISTS idx_seen_sub_status     ON gelbooru_seen_posts(subscription_id, status);
+CREATE INDEX IF NOT EXISTS idx_seen_file_unique    ON gelbooru_seen_posts(file_unique_id);
+CREATE INDEX IF NOT EXISTS idx_seen_post_id        ON gelbooru_seen_posts(post_id);
 -- idx_users_tg_id удалён: UNIQUE-индекс на users(tg_id) уже создаётся автоматически
 -- (избыточный индекс без выигрыша — CR-LOW-3).
 -- Unique index для TOCTOU-дедупликации по file_unique_id (CR-H-V1).
