@@ -79,11 +79,12 @@ class GelbooruClient:
             - _UNCACHEABLE (sentinel) при 429/5xx/timeout/сетевой ошибке — НЕ кешируется,
               чтобы временный сбой не маскировался кешём на 60 секунд.
         """
-        # api_key/user_id опциональны (ТЗ §10: gbooru_tg требовал их, здесь — нет)
-        if settings.gelbooru_api_key:
-            params["api_key"] = settings.gelbooru_api_key
-        if settings.gelbooru_user_id:
-            params["user_id"] = settings.gelbooru_user_id
+        # api_key/user_id: передаём ВСЕГДА (как gbooru_tg). Gelbooru теперь требует
+        # их для любого API-запроса (без них — 401 Unauthorized). Если ключи пустые,
+        # gelbooru отклонит запрос, но мы передаём как есть — пусть решает сервер.
+        # Это совпадает с поведением gbooru_tg, который работает у пользователя.
+        params["api_key"] = settings.gelbooru_api_key
+        params["user_id"] = settings.gelbooru_user_id
         params["json"] = "1"
 
         # Маскирование api_key для логов — ПОСЛЕ добавления в params
@@ -113,22 +114,29 @@ class GelbooruClient:
                             logger.info("Gelbooru response: status=404")
                             return None
                         if response.status == 401:
-                            # 401 Unauthorized: gelbooru требует api_key+user_id ИЛИ
-                            # блокирует запрос по UA/IP. Логируем понятное сообщение.
+                            # 401 Unauthorized: gelbooru требует api_key+user_id.
+                            # Логируем факт передачи ключей (маскированно) для диагностики.
                             has_key = bool(settings.gelbooru_api_key)
                             has_uid = bool(settings.gelbooru_user_id)
+                            key_preview = settings.gelbooru_api_key[:4] + "***" if has_key else "(empty)"
+                            uid_preview = settings.gelbooru_user_id[:4] + "***" if has_uid else "(empty)"
                             if has_key and has_uid:
                                 logger.warning(
-                                    "Gelbooru 401: api_key и user_id передаются, но отклонены. "
-                                    "Проверьте правильность GELBOORU_API_KEY/GELBOORU_USER_ID "
-                                    "(user_id — числовой ID аккаунта, не tg_id). "
-                                    "Возможно ключ истёк или IP заблокирован."
+                                    "Gelbooru 401: api_key=%s user_id=%s передаются, но отклонены. "
+                                    "Возможные причины: 1) ключ истёк; 2) user_id неверный (нужен числовой ID "
+                                    "аккаунта gelbooru, не username/tg_id — найти на странице аккаунта); "
+                                    "3) IP заблокирован gelbooru (datacenter IP); "
+                                    "4) .env не загружен в Docker (проверьте env_file в docker-compose).",
+                                    key_preview, uid_preview,
                                 )
                             else:
                                 logger.warning(
-                                    "Gelbooru 401:Unauthorized. Задайте GELBOORU_API_KEY и GELBOORU_USER_ID в .env "
-                                    "(получить на https://gelbooru.com/index.php?page=account&s=options). "
-                                    "Без ключей gelbooru может блокировать запросы (изменилась политика API)."
+                                    "Gelbooru 401:Unauthorized. Ключи НЕ заданы в .env "
+                                    "(api_key=%s, user_id=%s). Получить на "
+                                    "https://gelbooru.com/index.php?page=account&s=options "
+                                    "(вкладка API Access). В Docker проверьте что .env монтируется "
+                                    "через env_file в docker-compose.yml.",
+                                    key_preview, uid_preview,
                                 )
                             return _UNCACHEABLE
                         if response.status == 403:

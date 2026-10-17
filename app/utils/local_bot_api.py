@@ -240,7 +240,40 @@ def read_local_file_bytes(file_path: str | None) -> bytes | None:
     for c in candidates:
         try:
             if c.is_file():
-                return c.read_bytes()
+                data = c.read_bytes()
+                if data:
+                    return data
         except OSError:
             continue
+    # Debug-логирование: показываем все candidates и существует ли local_mount.
+    # Помогает диагностировать проблемы с монтированием volume в Docker.
+    local_mount = _local_api_mount()
+    log.warning(
+        "read_local_file_bytes: файл не найден ни в одном candidate. "
+        "file_path=%r, BOT_API_DATA_MOUNT=%s (exists=%s, is_dir=%s), candidates=%s",
+        file_path, local_mount, local_mount.exists(), local_mount.is_dir(),
+        [str(c) for c in candidates],
+    )
+    return None
+
+
+def read_local_file_bytes_with_retry(file_path: str | None, max_retries: int = 3, delay: float = 0.5) -> bytes | None:
+    """Читает файл с retry — local-bot-api может ещё сохранять файл на диск.
+
+    getFile() возвращает file_path сразу, но сам файл может ещё записываться
+    local-bot-api на диск (особенно для больших фото). Без retry read_local_file_bytes
+    не найдёт файл и вернёт None.
+
+    Делает до max_retries попыток с задержкой delay между ними.
+    """
+    if not file_path:
+        return None
+    import time
+
+    for attempt in range(max_retries):
+        data = read_local_file_bytes(file_path)
+        if data:
+            return data
+        if attempt < max_retries - 1:
+            time.sleep(delay)
     return None
