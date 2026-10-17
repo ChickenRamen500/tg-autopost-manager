@@ -133,6 +133,9 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "CHECK(end_strategy IN ('continue_next_day', 'continue_after_end', 'move_to_inbox', 'delete'))"
         )),
         ("queues", "strip_caption", "ALTER TABLE queues ADD COLUMN strip_caption INTEGER NOT NULL DEFAULT 0"),
+        # Фаза 3: подписки Gelbooru — notify_interval_minutes + last_notified_at
+        ("tag_subscriptions", "notify_interval_minutes", "ALTER TABLE tag_subscriptions ADD COLUMN notify_interval_minutes INTEGER NOT NULL DEFAULT 60 CHECK(notify_interval_minutes >= 0)"),
+        ("tag_subscriptions", "last_notified_at", "ALTER TABLE tag_subscriptions ADD COLUMN last_notified_at DATETIME"),
     ]
     for table, column, ddl in migrations:
         if not await _column_exists(db, table, column):

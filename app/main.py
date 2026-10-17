@@ -197,7 +197,7 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage1", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage3", lifespan=lifespan)
 
 
 # P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.
@@ -261,10 +261,24 @@ async def health_worker(_token: None = Depends(verify_token)) -> dict:
         "done": await tq_repo.count_by_status("done"),
         "error": await tq_repo.count_by_status("error"),
     }
+    # Статистика подписок Gelbooru (Фаза 3 этап 3)
+    gelbooru_stats: dict[str, int] = {}
+    try:
+        from app.repositories import gelbooru_subs as gs_repo
+
+        gelbooru_stats = {
+            "new_posts": await gs_repo.count_new_posts_all(),
+        }
+    except Exception:  # noqa: BLE001 — статистика опциональна
+        pass
     return {
         "status": "ok" if w.running else "stopped",
         "processed": w.processed,
         "errors": w.errors,
         "requeued": w.requeued,
+        "subs_checked": w.subs_checked,
+        "subs_new_posts": w.subs_new_posts,
+        "subs_notified": w.subs_notified,
         "task_queue": stats,
+        "gelbooru": gelbooru_stats,
     }

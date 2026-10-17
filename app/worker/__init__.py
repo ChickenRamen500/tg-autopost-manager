@@ -44,42 +44,53 @@ log = logging.getLogger("worker")
 
 
 class Worker:
-    """Фоновый обработчик task_queue.
+    """Фоновый обработчик task_queue + опросчик подписок Gelbooru.
 
-    Один экземпляр на процесс (singleton через get_worker()). Запускает две asyncio-задачи:
-      - _poll_loop: цикл опроса очереди;
-      - _cleanup_loop: периодический сброс stale in_progress задач.
+    Один экземпляр на процесс (singleton через get_worker()). Запускает три asyncio-задачи:
+      - _poll_loop: цикл опроса task_queue (download/process/repost);
+      - _cleanup_loop: периодический сброс stale in_progress задач;
+      - _subscription_loop: опрос due-подписок gelbooru (Фаза 3 этап 3).
 
-    Безопасен для graceful shutdown: stop() отменяет обе задачи и ждёт их завершения.
+    Безопасен для graceful shutdown: stop() отменяет все задачи и ждёт их завершения.
     """
 
     def __init__(self) -> None:
         self._poll_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._subscription_task: asyncio.Task | None = None
         self._running = False
-        # Счётчики для /health/worker (будущие этапы) и логирования
+        # Счётчики для /health/worker и логирования
         self.processed = 0
         self.errors = 0
         self.requeued = 0
+        # Счётчики подписок (Фаза 3 этап 3)
+        self.subs_checked = 0
+        self.subs_new_posts = 0
+        self.subs_notified = 0
 
     @property
     def running(self) -> bool:
         return self._running
 
     def start(self) -> None:
-        """Запускает polling- и cleanup-циклы. Idempotent — повторный вызов безопасен."""
+        """Запускает polling-, cleanup- и subscription-циклы. Idempotent."""
         if self._running:
             log.warning("Worker.start(): уже запущен — пропуск")
             return
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop(), name="worker.poll")
         self._cleanup_task = asyncio.create_task(self._cleanup_loop(), name="worker.cleanup")
+        if settings.gelbooru_subs_enabled:
+            self._subscription_task = asyncio.create_task(self._subscription_loop(), name="worker.subs")
+        else:
+            log.info("Worker: подписки Gelbooru отключены (gelbooru_subs_enabled=False)")
         log.info(
-            "Worker запущен (poll=%.1fs, max_attempts=%d, stale=%dмин, cleanup=%ds)",
+            "Worker запущен (poll=%.1fs, max_attempts=%d, stale=%dмин, cleanup=%ds, subs=%ds)",
             settings.worker_poll_interval_seconds,
             settings.worker_max_attempts,
             settings.worker_stale_timeout_minutes,
             settings.worker_cleanup_interval_seconds,
+            settings.gelbooru_subs_poll_interval_seconds if settings.gelbooru_subs_enabled else 0,
         )
 
     async def stop(self) -> None:
@@ -87,7 +98,7 @@ class Worker:
         if not self._running:
             return
         self._running = False
-        tasks = [t for t in (self._poll_task, self._cleanup_task) if t is not None]
+        tasks = [t for t in (self._poll_task, self._cleanup_task, self._subscription_task) if t is not None]
         for t in tasks:
             t.cancel()
         for t in tasks:
@@ -99,7 +110,12 @@ class Worker:
                 log.warning("Worker task завершился с ошибкой при stop: %s", e)
         self._poll_task = None
         self._cleanup_task = None
-        log.info("Worker остановлен (processed=%d, errors=%d, requeued=%d)", self.processed, self.errors, self.requeued)
+        self._subscription_task = None
+        log.info(
+            "Worker остановлен (processed=%d, errors=%d, requeued=%d, subs_checked=%d, subs_new=%d, subs_notified=%d)",
+            self.processed, self.errors, self.requeued,
+            self.subs_checked, self.subs_new_posts, self.subs_notified,
+        )
 
     # ------------------------------------------------------------------
     # Основной polling-цикл
@@ -318,6 +334,43 @@ class Worker:
                 log.exception("Worker cleanup-loop: необработанная ошибка: %s", e)
                 await asyncio.sleep(60.0)  # пауза перед повтором
 
+    # ------------------------------------------------------------------
+    # Subscription-цикл (Фаза 3 этап 3 — опрос подписок Gelbooru)
+    # ------------------------------------------------------------------
+
+    async def _subscription_loop(self) -> None:
+        """Периодически опрашивает due-подписки gelbooru (ТЗ §2.1.4).
+
+        Интервал: settings.gelbooru_subs_poll_interval_seconds (по умолчанию 60с).
+        Внутри цикла вызывается check_all_due_subscriptions(), которая:
+          - берёт подписки с подошедшим check_interval_hours;
+          - для каждой: search_posts(tags + blacklist) → новые посты → seen_posts;
+          - уведомляет админа по notify_interval_minutes.
+        """
+        log.info("Worker subscription-loop запущен (интервал %ds)", settings.gelbooru_subs_poll_interval_seconds)
+        while self._running:
+            try:
+                await asyncio.sleep(settings.gelbooru_subs_poll_interval_seconds)
+                if not self._running:
+                    break
+                from app.services.gelbooru_subscriptions import check_all_due_subscriptions
+
+                stats = await check_all_due_subscriptions()
+                if stats["checked"] > 0 or stats["new_posts"] > 0:
+                    self.subs_checked += stats["checked"]
+                    self.subs_new_posts += stats["new_posts"]
+                    self.subs_notified += stats["notified"]
+                    log.info(
+                        "Worker subs: проверено %d подписок, новых %d, уведомлений %d",
+                        stats["checked"], stats["new_posts"], stats["notified"],
+                    )
+            except asyncio.CancelledError:
+                log.info("Worker subscription-loop отменён")
+                raise
+            except Exception as e:  # noqa: BLE001 — не роняем subs-цикл
+                log.exception("Worker subscription-loop: необработанная ошибка: %s", e)
+                await asyncio.sleep(60.0)
+
 
 # ---------------------------------------------------------------------------
 # Внутренние классы ошибок (для разграничения retry/permanent в _process_task)
@@ -353,7 +406,7 @@ def reset_worker() -> None:
     if _worker is not None and _worker.running:
         # В тестах нет running event loop для await stop() — используем синхронную
         # отмену задач. Реальный stop() вызывается в lifespan.
-        for t in (_worker._poll_task, _worker._cleanup_task):  # noqa: SLF001
+        for t in (_worker._poll_task, _worker._cleanup_task, _worker._subscription_task):  # noqa: SLF001
             if t is not None and not t.done():
                 t.cancel()
     _worker = None
