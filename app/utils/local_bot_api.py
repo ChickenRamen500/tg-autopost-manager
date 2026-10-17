@@ -214,13 +214,17 @@ def _resolve_local_file_candidates(file_path: str) -> list[Path]:
         local_mount / rel.removeprefix("var/lib/telegram-bot-api/"),
         Path(file_path),  # прямой путь (если скрипт запускается вне Docker)
     ]
-    # новый формат относительного пути: "documents/file_0.bin" может лежать
-    # и в подкаталоге с именем бота: "<bot_id>-<name>/documents/..."
+    # Поиск по basename: local-bot-api может использовать разную структуру
+    # директорий (/<token>/photos/, /<bot_id>/photos/, /photos/). Ищем файл
+    # по имени в любых поддиректориях.
     if local_mount.is_dir():
-        try:
-            candidates += sorted(local_mount.glob(f"*/{rel}"))
-        except OSError:
-            pass
+        basename = Path(file_path).name
+        if basename:
+            try:
+                # **/<basename> — рекурсивный поиск в любых поддиректориях
+                candidates += sorted(local_mount.glob(f"**/{basename}"))
+            except OSError:
+                pass
     return candidates
 
 
@@ -248,11 +252,23 @@ def read_local_file_bytes(file_path: str | None) -> bytes | None:
     # Debug-логирование: показываем все candidates и существует ли local_mount.
     # Помогает диагностировать проблемы с монтированием volume в Docker.
     local_mount = _local_api_mount()
+    # Показываем содержимое local_mount (первые 2 уровня) для диагностики
+    mount_contents = []
+    try:
+        if local_mount.is_dir():
+            for entry in sorted(local_mount.iterdir())[:10]:
+                mount_contents.append(str(entry))
+                if entry.is_dir():
+                    for sub in sorted(entry.iterdir())[:5]:
+                        mount_contents.append(f"  {sub}")
+    except OSError:
+        pass
     log.warning(
         "read_local_file_bytes: файл не найден ни в одном candidate. "
-        "file_path=%r, BOT_API_DATA_MOUNT=%s (exists=%s, is_dir=%s), candidates=%s",
+        "file_path=%r, BOT_API_DATA_MOUNT=%s (exists=%s, is_dir=%s), candidates=%s, "
+        "mount_contents=%s",
         file_path, local_mount, local_mount.exists(), local_mount.is_dir(),
-        [str(c) for c in candidates],
+        [str(c) for c in candidates], mount_contents,
     )
     return None
 

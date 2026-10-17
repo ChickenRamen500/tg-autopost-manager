@@ -153,19 +153,28 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
 
     all_types — список типов файлов (для альбома: ['photo', 'video']).
     Возвращает True если отправлено, False если архив выключен/ошибка.
+
+    Поддерживает два режима:
+    1. tg_file_id (Telegram-файлы из ЛС) — отправка по file_id.
+    2. file_path (скачанные внешние файлы: gelbooru и т.д.) — отправка через FSInputFile.
     """
     archive_channel = await app_settings_repo.get_archive_channel_id()
     if not archive_channel:
         return False  # архив выключен
 
     tg_file_id = post.get("tg_file_id")
-    if not tg_file_id:
-        return False  # локальный файл — не архивируем (Фаза 5)
+    file_path = post.get("file_path")
+    if not tg_file_id and not file_path:
+        return False  # нет ни file_id, ни file_path — не архивируем
 
     types = all_types or [post.get("file_type", "document")]
     tags = _build_tags(post, target_channel_id, types)
 
     try:
+        import os
+
+        from aiogram.types import FSInputFile
+
         from app.bot.runtime import get_bot
 
         bot = get_bot()
@@ -175,35 +184,40 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
         if len(full_caption) > 1024:
             full_caption = full_caption[:1021] + "..."
 
+        # Определяем медиа-объект: tg_file_id (приоритет) или FSInputFile из file_path
+        media_obj = tg_file_id
+        if not media_obj and file_path:
+            media_obj = FSInputFile(file_path, filename=os.path.basename(file_path))
+
         post_id = post.get("id")
         if file_type == "photo":
             await _throttled_archive_send(
-                lambda: bot.send_photo(chat_id=archive_channel, photo=tg_file_id, caption=full_caption),
+                lambda: bot.send_photo(chat_id=archive_channel, photo=media_obj, caption=full_caption),
                 op_name="send_photo", post_id=post_id,
             )
         elif file_type == "video":
             await _throttled_archive_send(
-                lambda: bot.send_video(chat_id=archive_channel, video=tg_file_id, caption=full_caption),
+                lambda: bot.send_video(chat_id=archive_channel, video=media_obj, caption=full_caption),
                 op_name="send_video", post_id=post_id,
             )
         elif file_type == "gif":
             await _throttled_archive_send(
-                lambda: bot.send_animation(chat_id=archive_channel, animation=tg_file_id, caption=full_caption),
+                lambda: bot.send_animation(chat_id=archive_channel, animation=media_obj, caption=full_caption),
                 op_name="send_animation", post_id=post_id,
             )
         elif file_type == "audio":
             await _throttled_archive_send(
-                lambda: bot.send_audio(chat_id=archive_channel, audio=tg_file_id, caption=full_caption),
+                lambda: bot.send_audio(chat_id=archive_channel, audio=media_obj, caption=full_caption),
                 op_name="send_audio", post_id=post_id,
             )
         elif file_type == "voice":
             await _throttled_archive_send(
-                lambda: bot.send_voice(chat_id=archive_channel, voice=tg_file_id, caption=full_caption),
+                lambda: bot.send_voice(chat_id=archive_channel, voice=media_obj, caption=full_caption),
                 op_name="send_voice", post_id=post_id,
             )
         else:
             await _throttled_archive_send(
-                lambda: bot.send_document(chat_id=archive_channel, document=tg_file_id, caption=full_caption),
+                lambda: bot.send_document(chat_id=archive_channel, document=media_obj, caption=full_caption),
                 op_name="send_document", post_id=post_id,
             )
         log.info("Пост #%s архивирован в канал %s", post_id, archive_channel)

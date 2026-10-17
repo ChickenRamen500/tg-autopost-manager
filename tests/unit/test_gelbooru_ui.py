@@ -83,18 +83,24 @@ def test_gelbooru_subs_list_empty():
 def test_gelbooru_sub_card():
     from app.bot.keyboards import builder as kb
 
-    sub = {"id": 1, "is_active": 1, "tags": ["1girl"]}
+    sub = {"id": 1, "is_active": 1, "tags": ["1girl"], "check_interval_hours": 6, "notify_interval_minutes": 60}
     card = kb.gelbooru_sub_card(sub, new_count=2)
     callbacks = [b.callback_data for row in card.inline_keyboard for b in row]
     assert "gb:sub:1:check" in callbacks  # Проверить сейчас
     assert "gb:sub:1:toggle" in callbacks  # Вкл/выкл
     assert "gb:sub:1:del" in callbacks  # Удалить
     assert "gb:subs" in callbacks  # Назад
+    assert "gb:sub:1:setcheck" in callbacks  # Интервал проверки
+    assert "gb:sub:1:setnotify" in callbacks  # Интервал уведомлений
+    assert "gb:sub:1:setqueue" in callbacks  # Default queue
     # Кнопка новых постов (если count > 0)
     assert "gb:seen:1" in callbacks
 
     # Без новых постов — кнопки «новые посты» нет
-    card2 = kb.gelbooru_sub_card({"id": 1, "is_active": 1, "tags": []}, new_count=0)
+    card2 = kb.gelbooru_sub_card(
+        {"id": 1, "is_active": 1, "tags": [], "check_interval_hours": 6, "notify_interval_minutes": 60},
+        new_count=0,
+    )
     callbacks2 = [b.callback_data for row in card2.inline_keyboard for b in row]
     assert "gb:seen:1" not in callbacks2
 
@@ -242,7 +248,7 @@ def test_callback_data_convention_no_conflicts():
     keyboards = [
         kb.gelbooru_main_menu(),
         kb.gelbooru_subs_list([{"id": 1, "tags": ["x"], "is_active": 1}], {}),
-        kb.gelbooru_sub_card({"id": 1, "is_active": 1, "tags": []}, 0),
+        kb.gelbooru_sub_card({"id": 1, "is_active": 1, "tags": [], "check_interval_hours": 6, "notify_interval_minutes": 60}, 0),
         kb.gelbooru_seen_list([{"id": 1, "post_id": 1, "tags": [], "rating": "safe"}], None),
         kb.gelbooru_seen_card(1, False, False),
         kb.gelbooru_blacklist_list(["x"]),
