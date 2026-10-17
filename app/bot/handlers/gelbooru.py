@@ -85,6 +85,23 @@ def _format_seen_card(seen: dict) -> str:
     )
 
 
+async def _replace_message(call: CallbackQuery, text: str, reply_markup=None) -> None:
+    """Отправляет НОВОЕ текстовое сообщение и удаляет старое.
+
+    Используется вместо safe_edit_text когда текущее сообщение может быть фото
+    (preview поста). edit_text на фото-сообщении падает с 'there is no text in
+    the message to edit'. Этот helper всегда работает: отправляет новое + удаляет старое.
+    """
+    try:
+        await call.message.answer(text, reply_markup=reply_markup)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("_replace_message: не удалось отправить сообщение: %s", e)
+    try:
+        await call.message.delete()
+    except Exception:  # noqa: BLE001 — сообщение уже удалено или нет прав
+        pass
+
+
 async def _send_seen_card(call: CallbackQuery, seen_id: int, list_ctx: dict | None = None) -> None:
     """Рисует карточку seen_post + кнопки навигации.
 
@@ -171,8 +188,10 @@ async def _send_seen_card(call: CallbackQuery, seen_id: int, list_ctx: dict | No
         except Exception as e:  # noqa: BLE001 — fallback на текст
             logger.warning("Не удалось отправить превью для поста #%s: %s — показываю текст", seen_id, e)
 
-    # Fallback: только текст (если нет preview_url или ошибка отправки фото)
-    await safe_edit_text(call.message, text, reply_markup=markup)
+    # Fallback: только текст (если нет preview_url или ошибка отправки фото).
+    # Используем _replace_message (не safe_edit_text) — текущее сообщение может
+    # быть фото от предыдущей карточки, edit_text на фото падает.
+    await _replace_message(call, text, reply_markup=markup)
     await call.answer()
 
 
@@ -565,8 +584,9 @@ async def _show_queue_picker(call: CallbackQuery, seen_id: int) -> None:
     from app.repositories import queues as queues_repo
 
     queues = await queues_repo.list_queues(active_only=True)
-    await safe_edit_text(
-        call.message,
+    # Используем _replace_message — текущее сообщение может быть фото (preview).
+    await _replace_message(
+        call,
         f"📤 <b>Отправить пост #{seen_id}</b>\n\nВыбери очередь или «Во Входящие»:",
         reply_markup=kb.gelbooru_seen_card(seen_id, has_prev=False, has_next=False, queues=queues),
     )
@@ -605,8 +625,8 @@ async def _do_send(call: CallbackQuery, seen_id: int, queue_id: int | None) -> N
         await _send_seen_card(call, next_seen_id, list_ctx={"sub_id": sub_id})
     else:
         all_items = await gs_repo.list_new_posts_all(limit=15)
-        await safe_edit_text(
-            call.message,
+        await _replace_message(
+            call,
             f"🆕 <b>Новые посты Gelbooru</b> ({len(all_items)})\n\nВсе посты просмотрены!",
             reply_markup=kb.gelbooru_seen_list(all_items, sub_id=None),
         )
@@ -644,8 +664,8 @@ async def _do_skip(call: CallbackQuery, seen_id: int) -> None:
     else:
         # Посты закончились — возвращаемся к списку
         all_items = await gs_repo.list_new_posts_all(limit=15)
-        await safe_edit_text(
-            call.message,
+        await _replace_message(
+            call,
             f"🆕 <b>Новые посты Gelbooru</b> ({len(all_items)})\n\nВсе посты просмотрены!",
             reply_markup=kb.gelbooru_seen_list(all_items, sub_id=None),
         )
