@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot import runtime
-from app.bot.handlers import admin, media, menu, start
+from app.bot.handlers import admin, gelbooru, media, menu, start
 from app.bot.middleware.access import AccessMiddleware
 
 log = logging.getLogger("bot")
@@ -38,12 +38,17 @@ def get_dispatcher() -> Dispatcher:
 
     # Порядок роутеров важен (CRITICAL из code review):
     # 1. menu — inline-кнопки + FSM (основной интерфейс) + /cancel /menu /start
-    # 2. admin — текстовые команды (/list_queues, /add_user и т.д.) — ДО media,
+    # 2. gelbooru — inline-кнопки Gelbooru (gb:*) + FSM add_sub/add_bl;
+    #    ДО media, т.к. media.receive_text ловит F.text — без этого FSM-теги
+    #    gelbooru попадали бы в media-хендлер. Также ДО admin (gb:* callbacks
+    #    не пересекаются с /commands, но порядок детерминирован).
+    # 3. admin — текстовые команды (/list_queues, /add_user и т.д.) — ДО media,
     #    т.к. media.receive_text ловит F.text (любой текст) и return для команд,
     #    что молча проглатывало бы все admin-команды
-    # 3. media — приём медиа из ЛС (file_id, маршрутизация)
-    # 4. start — /help (fallback)
+    # 4. media — приём медиа из ЛС (file_id, маршрутизация)
+    # 5. start — /help (fallback)
     dp.include_router(menu.router)
+    dp.include_router(gelbooru.router)
     dp.include_router(admin.router)
     dp.include_router(media.router)
     dp.include_router(start.router)

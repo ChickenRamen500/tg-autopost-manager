@@ -36,8 +36,9 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         kb.button(text="👥 Пользователи", callback_data="menu:users")
         kb.button(text="🔀 Маршрутизация", callback_data="menu:rules")
         kb.button(text="➕ Добавить", callback_data="menu:add")
+        kb.button(text="🖼 Gelbooru", callback_data="gb:menu")
         kb.button(text="⚙️ Настройки", callback_data="menu:settings")
-    kb.adjust(2, 1, 2, 2, 1)
+    kb.adjust(2, 1, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -358,5 +359,171 @@ def create_rule_prompt(post_id: int, queue_id: int, source_id: str) -> InlineKey
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Да, создать правило", callback_data=f"rule:create:{post_id}:{queue_id}:{source_id}")
     kb.button(text="❌ Нет", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+# ===========================================================================
+# Gelbooru (Фаза 3 этап 4 — подписки + blacklist + просмотр новых постов)
+# ===========================================================================
+#
+# Callback-конвенция:
+#   gb:menu                      — главное меню Gelbooru
+#   gb:subs                      — список подписок
+#   gb:sub:<id>                  — карточка подписки (действия)
+#   gb:sub:<id>:toggle           — вкл/выкл подписку
+#   gb:sub:<id>:del              — удалить подписку (с confirm)
+#   gb:sub:<id>:check            — запустить проверку вручную (немедленно)
+#   gb:add_sub                   — FSM: добавить подписку (tags)
+#   gb:seen                      — список новых постов (все подписки)
+#   gb:seen:<sub_id>             — новые посты конкретной подписки
+#   gb:seen_card:<seen_id>       — карточка поста [Назад][Отправить][Пропустить][Далее]
+#   gb:seen:<seen_id>:send       — отправить → выбор очереди
+#   gb:seen:<seen_id>:send:<qid> — подтверждение отправки в очередь qid
+#   gb:seen:<seen_id>:skip       — пропустить (mark_ignored)
+#   gb:seen:<seen_id>:next       — следующий пост (в рамках списка)
+#   gb:seen:<seen_id>:prev       — предыдущий пост
+#   gb:blacklist                 — список blacklist тегов
+#   gb:bl_add                    — FSM: добавить blacklist-тег
+#   gb:bl:<tag>:del              — удалить blacklist-тег (tag url-encoded)
+
+
+def gelbooru_main_menu(new_posts_count: int = 0) -> InlineKeyboardMarkup:
+    """Главное меню Gelbooru: подписки / новые посты / blacklist."""
+    kb = InlineKeyboardBuilder()
+    new_label = f"🆕 Новые посты ({new_posts_count})" if new_posts_count > 0 else "🆕 Новые посты"
+    kb.button(text=new_label, callback_data="gb:seen")
+    kb.button(text="📋 Подписки", callback_data="gb:subs")
+    kb.button(text="🚫 Blacklist тегов", callback_data="gb:blacklist")
+    kb.button(text="🔙 Назад", callback_data="menu:main")
+    kb.adjust(1, 2, 1)
+    return kb.as_markup()
+
+
+def gelbooru_subs_list(subs: list[dict], new_counts: dict[int, int] | None = None) -> InlineKeyboardMarkup:
+    """Список подписок кнопками.
+
+    subs — список dict из subscriptions.list_subscriptions (с распарсенными tags).
+    new_counts — {subscription_id: count_new_posts} для бейджа «N новых».
+    """
+    new_counts = new_counts or {}
+    kb = InlineKeyboardBuilder()
+    for s in subs[:20]:
+        active = "✅" if s.get("is_active") else "⏸"
+        tags_str = " ".join(s.get("tags") or []) or "(пусто)"
+        if len(tags_str) > 40:
+            tags_str = tags_str[:37] + "..."
+        new_n = new_counts.get(s["id"], 0)
+        badge = f" [+{new_n}]" if new_n > 0 else ""
+        kb.button(
+            text=f"{active} #{s['id']} {tags_str}{badge}",
+            callback_data=f"gb:sub:{s['id']}",
+        )
+    kb.button(text="➕ Добавить подписку", callback_data="gb:add_sub")
+    kb.button(text="🔙 Назад", callback_data="gb:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def gelbooru_sub_card(sub: dict, new_count: int = 0) -> InlineKeyboardMarkup:
+    """Карточка подписки: проверить сейчас, вкл/выкл, удалить, новые посты."""
+    kb = InlineKeyboardBuilder()
+    if new_count > 0:
+        kb.button(text=f"🆕 Новые посты ({new_count})", callback_data=f"gb:seen:{sub['id']}")
+    kb.button(text="🔄 Проверить сейчас", callback_data=f"gb:sub:{sub['id']}:check")
+    toggle_label = "⏸ Выключить" if sub.get("is_active") else "▶ Включить"
+    kb.button(text=toggle_label, callback_data=f"gb:sub:{sub['id']}:toggle")
+    kb.button(text="🗑 Удалить подписку", callback_data=f"gb:sub:{sub['id']}:del")
+    kb.button(text="🔙 К подпискам", callback_data="gb:subs")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def gelbooru_seen_list(items: list[dict], sub_id: int | None = None) -> InlineKeyboardMarkup:
+    """Список новых постов кнопками (для выбора карточки).
+
+    items — list из gelbooru_subs.list_new_posts / list_new_posts_all.
+    sub_id — если просмотр в рамках одной подписки, «Назад» → gb:seen:<sub_id>,
+    иначе → gb:menu.
+    """
+    kb = InlineKeyboardBuilder()
+    for it in items[:15]:
+        tags = it.get("tags") or []
+        tags_str = tags[0] if tags else f"#{it['post_id']}"
+        rating_badge = {"safe": "🟢", "questionable": "🟡", "explicit": "🔴"}.get(it.get("rating"), "⚪")
+        kb.button(
+            text=f"{rating_badge} #{it['id']} gelbooru:{it['post_id']} {tags_str}",
+            callback_data=f"gb:seen_card:{it['id']}",
+        )
+    if not items:
+        kb.button(text="📭 Пусто", callback_data="noop")
+    back_cb = f"gb:seen:{sub_id}" if sub_id else "gb:menu"
+    kb.button(text="🔙 Назад", callback_data=back_cb)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def gelbooru_seen_card(
+    seen_id: int,
+    has_prev: bool,
+    has_next: bool,
+    queues: list[dict] | None = None,
+) -> InlineKeyboardMarkup:
+    """Карточка поста Gelbooru: [Назад][Отправить в...][Пропустить][Далее].
+
+    ТЗ §2.1.4: кнопки [Назад] [Отправить] [Пропустить] [Далее].
+    «Отправить» открывает выбор очереди (inline кнопки очередей), либо
+    «Во Входящие» (queue_id=None).
+
+    Если queues передан — показываем кнопки очередей вместо основного меню
+    (режим выбора очереди). Иначе — основное меню карточки.
+    """
+    kb = InlineKeyboardBuilder()
+    if queues is not None:
+        # Режим выбора очереди
+        kb.button(text="📥 Во Входящие (без очереди)", callback_data=f"gb:seen:{seen_id}:send:0")
+        for q in queues[:8]:
+            kb.button(
+                text=f"📋 «{q['name']}» (#{q['id']})",
+                callback_data=f"gb:seen:{seen_id}:send:{q['id']}",
+            )
+        kb.button(text="🔙 Отмена", callback_data=f"gb:seen_card:{seen_id}")
+        kb.adjust(1)
+        return kb.as_markup()
+
+    # Основное меню карточки
+    kb.button(text="📤 Отправить", callback_data=f"gb:seen:{seen_id}:send")
+    kb.button(text="⏭ Пропустить", callback_data=f"gb:seen:{seen_id}:skip")
+    # Навигация
+    nav_added = False
+    if has_prev:
+        kb.button(text="⬅ Назад", callback_data=f"gb:seen:{seen_id}:prev")
+        nav_added = True
+    if has_next:
+        kb.button(text="Далее ➡", callback_data=f"gb:seen:{seen_id}:next")
+        nav_added = True
+    if nav_added:
+        # [Отправить][Пропустить] на одной строке, [Назад][Далее] на следующей
+        kb.adjust(2, 2)
+    else:
+        kb.adjust(2)
+    kb.button(text="📋 К списку", callback_data="gb:seen")
+    kb.adjust(2, 2, 1) if nav_added else kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def gelbooru_blacklist_list(tags: list[str]) -> InlineKeyboardMarkup:
+    """Список blacklist-тегов с кнопками удаления."""
+    kb = InlineKeyboardBuilder()
+    for tag in tags[:30]:
+        # URL-encode tag для callback_data (Telegram limit 64 байта)
+        from urllib.parse import quote
+
+        encoded = quote(tag, safe="")
+        kb.button(text=f"🚫 {tag}  🗛", callback_data=f"gb:bl:{encoded}:del")
+    if not tags:
+        kb.button(text="📭 Blacklist пуст", callback_data="noop")
+    kb.button(text="➕ Добавить тег", callback_data="gb:bl_add")
+    kb.button(text="🔙 Назад", callback_data="gb:menu")
     kb.adjust(1)
     return kb.as_markup()
