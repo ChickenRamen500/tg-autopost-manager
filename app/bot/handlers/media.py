@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 from typing import Any
 
@@ -212,8 +211,9 @@ def _extract_source(message: Message) -> dict[str, Any]:
 async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str, Any]) -> list[dict[str, Any]]:
     """Проверяет визуальный дубликат по pHash для фото из ЛС (ТЗ §2.4.3, Фаза 3 этап 2).
 
-    Для photo: скачивает thumbnail (минимальный размер,几 KB), вычисляет pHash,
-    сохраняет в БД (set_phash_atomic), ищет дубликаты (find_phash_near).
+    Для photo: получает thumbnail через getFile + читает файл напрямую через volume
+    mount local-bot-api (read_local_file_bytes), вычисляет pHash, сохраняет в БД
+    (set_phash_atomic), ищет дубликаты (find_phash_near).
     Если найден → пост помечается possible_duplicate.
 
     Возвращает список найденных дубликатов (пустой = дубликатов нет).
@@ -222,6 +222,11 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
 
     Для video/gif/document — пропускается (pHash только для изображений;
     для видео нужен ffmpeg-кадр — Фаза 5).
+
+    ВАЖНО: НЕ используем bot.download() — он формирует HTTP URL вида
+    {api_url}/file/bot{token}/{file_path}, но при --local file_path — абсолютный
+    (/var/lib/telegram-bot-api/...), что даёт двойной путь и 404.
+    Вместо этого читаем файл напрямую через volume mount (BOT_API_DATA_MOUNT).
     """
     if media["file_type"] != "photo":
         return []
@@ -238,15 +243,24 @@ async def _check_phash_duplicate(message: Message, post_id: int, media: dict[str
         if thumb is None:
             return []
 
+        # Получаем file_path через getFile, затем читаем файл напрямую через volume mount.
+        # bot.download() не работает с --local (двойной путь → 404).
         from app.bot.runtime import get_bot
+        from app.utils.local_bot_api import read_local_file_bytes
 
         bot = get_bot()
-        buf = io.BytesIO()
-        # bot.download пишет в IO объект (destination=buf)
-        await bot.download(thumb.file_id, destination=buf)
-        data = buf.getvalue()
+        file_info = await bot.get_file(thumb.file_id)
+        if not file_info or not file_info.file_path:
+            logger.warning("pHash: getFile вернул пустой file_path для поста #%s — пропуск", post_id)
+            return []
+
+        data = read_local_file_bytes(file_info.file_path)
         if not data:
-            logger.warning("pHash: thumbnail поста #%s скачан пустым — пропуск", post_id)
+            logger.warning(
+                "pHash: файл %s не найден в volume mount для поста #%s — пропуск "
+                "(проверьте BOT_API_DATA_MOUNT в docker-compose)",
+                file_info.file_path, post_id,
+            )
             return []
 
         from app.services.dedup.phash import check_visual_duplicate, compute_phash_from_bytes
