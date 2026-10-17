@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import sys
 import traceback
 from contextlib import asynccontextmanager
 
@@ -33,9 +34,21 @@ from app.services.parsers.gelbooru import cache, tags_db
 from app.utils.local_bot_api import get_me
 from app.worker import start_worker, stop_worker
 
-# НЕ используем logging.basicConfig — он перетирает handlers uvicorn/gunicorn.
-# Только поднимаем уровень корневого логгера, оставляя handlers изо всех мест.
-logging.getLogger().setLevel(logging.INFO)
+# Настройка logging: добавляем StreamHandler с форматом если root logger пуст.
+# В Docker (uvicorn) root logger может не иметь handler с форматом — логи обрезаны.
+# НЕ используем basicConfig (перетирает uvicorn handlers) — добавляем аккуратно.
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.INFO)
+# Проверяем есть ли уже handler (uvicorn может добавить свой)
+if not _root_logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setLevel(logging.INFO)
+    _formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    _handler.setFormatter(_formatter)
+    _root_logger.addHandler(_handler)
 log = logging.getLogger("main")
 
 _bot_polling_task: asyncio.Task | None = None

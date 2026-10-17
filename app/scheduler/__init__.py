@@ -111,20 +111,33 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
 
     if tg_file_id and not was_processed:
         # Стратегия 1: отправка по file_id — без чтения файла, без лимита размера
-        if file_type == "photo":
-            await bot.send_photo(chat_id=chat_id, photo=tg_file_id, caption=caption)
-        elif file_type == "video":
-            await bot.send_video(chat_id=chat_id, video=tg_file_id, caption=caption)
-        elif file_type == "gif":
-            await bot.send_animation(chat_id=chat_id, animation=tg_file_id, caption=caption)
-        elif file_type == "audio":
-            await bot.send_audio(chat_id=chat_id, audio=tg_file_id, caption=caption)
-        elif file_type == "voice":
-            await bot.send_voice(chat_id=chat_id, voice=tg_file_id, caption=caption)
-        else:
-            await bot.send_document(chat_id=chat_id, document=tg_file_id, caption=caption)
-        log.info("Пост #%s отправлен по file_id (type=%s)", post["id"], file_type)
-        return
+        try:
+            if file_type == "photo":
+                await bot.send_photo(chat_id=chat_id, photo=tg_file_id, caption=caption)
+            elif file_type == "video":
+                await bot.send_video(chat_id=chat_id, video=tg_file_id, caption=caption)
+            elif file_type == "gif":
+                await bot.send_animation(chat_id=chat_id, animation=tg_file_id, caption=caption)
+            elif file_type == "audio":
+                await bot.send_audio(chat_id=chat_id, audio=tg_file_id, caption=caption)
+            elif file_type == "voice":
+                await bot.send_voice(chat_id=chat_id, voice=tg_file_id, caption=caption)
+            else:
+                await bot.send_document(chat_id=chat_id, document=tg_file_id, caption=caption)
+            log.info("Пост #%s отправлен по file_id (type=%s)", post["id"], file_type)
+            return
+        except Exception as e:
+            # PHOTO_INVALID_DIMENSIONS: фото слишком маленькое (<320px) или
+            # неправильное соотношение сторон. Fallback: отправить как document.
+            if "PHOTO_INVALID_DIMENSIONS" in str(e) and file_type == "photo":
+                log.warning(
+                    "Пост #%s: PHOTO_INVALID_DIMENSIONS — fallback на send_document",
+                    post["id"],
+                )
+                await bot.send_document(chat_id=chat_id, document=tg_file_id, caption=caption)
+                log.info("Пост #%s отправлен как document (fallback)", post["id"])
+                return
+            raise  # пробрасываем для retry-логики
 
     # Стратегия 2: локальный файл через Local Bot API Server (до 2 ГБ)
     if not file_path:
@@ -135,18 +148,31 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
     from aiogram.types import FSInputFile
 
     doc = FSInputFile(file_path, filename=os.path.basename(file_path))
-    if file_type == "photo":
-        await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
-    elif file_type == "video":
-        await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
-    elif file_type == "gif":
-        await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
-    elif file_type == "audio":
-        await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
-    elif file_type == "voice":
-        await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
-    else:
-        await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
+    try:
+        if file_type == "photo":
+            await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
+        elif file_type == "video":
+            await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
+        elif file_type == "gif":
+            await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
+        elif file_type == "audio":
+            await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
+        elif file_type == "voice":
+            await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
+        else:
+            await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
+    except Exception as e:
+        # PHOTO_INVALID_DIMENSIONS: fallback на document
+        if "PHOTO_INVALID_DIMENSIONS" in str(e) and file_type == "photo":
+            log.warning(
+                "Пост #%s: PHOTO_INVALID_DIMENSIONS — fallback на send_document",
+                post["id"],
+            )
+            doc2 = FSInputFile(file_path, filename=os.path.basename(file_path))
+            await bot.send_document(chat_id=chat_id, document=doc2, caption=caption)
+            log.info("Пост #%s отправлен как document (fallback)", post["id"])
+            return
+        raise
     log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
 
 
