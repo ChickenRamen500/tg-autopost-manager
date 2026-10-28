@@ -109,7 +109,7 @@ async def page_dashboard(request: Request, _user: str = Depends(verify_web_user)
         "worker_stats": worker_stats,
         "worker_running": worker_running,
     }
-    return templates.TemplateResponse("pages/dashboard.html", ctx)
+    return templates.TemplateResponse(request, "pages/dashboard.html", ctx)
 
 
 @router.get("/queues")
@@ -125,7 +125,7 @@ async def page_queues(request: Request, _user: str = Depends(verify_web_user)) -
         "active_page": "queues",
         "queues": queues,
     }
-    return templates.TemplateResponse("pages/queues.html", ctx)
+    return templates.TemplateResponse(request, "pages/queues.html", ctx)
 
 
 @router.get("/queues/{queue_id}")
@@ -147,7 +147,7 @@ async def page_queue_detail(
         "posts": posts,
         "pending_count": pending,
     }
-    return templates.TemplateResponse("pages/queue_detail.html", ctx)
+    return templates.TemplateResponse(request, "pages/queue_detail.html", ctx)
 
 
 @router.get("/inbox")
@@ -161,7 +161,7 @@ async def page_inbox(request: Request, _user: str = Depends(verify_web_user)) ->
         "posts": inbox_posts,
         "queues": queues,
     }
-    return templates.TemplateResponse("pages/inbox.html", ctx)
+    return templates.TemplateResponse(request, "pages/inbox.html", ctx)
 
 
 @router.get("/posts")
@@ -215,7 +215,7 @@ async def page_posts(
         "statuses": POST_STATUSES,
         "current_status": status,
     }
-    return templates.TemplateResponse("pages/posts.html", ctx)
+    return templates.TemplateResponse(request, "pages/posts.html", ctx)
 
 
 @router.get("/routing")
@@ -241,7 +241,7 @@ async def page_routing(request: Request, _user: str = Depends(verify_web_user)) 
             ("telegram_channel", "Telegram-канал"),
         ],
     }
-    return templates.TemplateResponse("pages/routing.html", ctx)
+    return templates.TemplateResponse(request, "pages/routing.html", ctx)
 
 
 @router.get("/channels")
@@ -253,7 +253,7 @@ async def page_channels(request: Request, _user: str = Depends(verify_web_user))
         "active_page": "channels",
         "channels": channels,
     }
-    return templates.TemplateResponse("pages/channels.html", ctx)
+    return templates.TemplateResponse(request, "pages/channels.html", ctx)
 
 
 # ---------------------------------------------------------------------------
