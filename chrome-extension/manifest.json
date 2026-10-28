@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Send to TG Bot",
+  "version": "1.0.0",
+  "description": "Быстрая постановка контента с сайтов в очередь Telegram-бота (TG Media Queue Bot)",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "*://gelbooru.com/*",
+    "*://danbooru.donmai.us/*",
+    "*://x.com/*",
+    "*://twitter.com/*",
+    "*://pikabu.ru/*",
+    "*://www.pixiv.net/*",
+    "*://i.pximg.net/*",
+    "*://pbs.twimg.com/*",
+    "*://video.twimg.com/*",
+    "*://img3.gelbooru.com/*",
+    "*://cdn.donmai.us/*",
+    "*://cs*.pikabu.ru/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://gelbooru.com/*",
+        "*://danbooru.donmai.us/*",
+        "*://x.com/*",
+        "*://twitter.com/*",
+        "*://pikabu.ru/*",
+        "*://www.pixiv.net/*"
+      ],
+      "js": ["site-config.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send to TG Bot"
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

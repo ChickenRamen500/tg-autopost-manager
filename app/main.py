@@ -241,7 +241,12 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.3.0-phase3-stage5", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.4.0-phase4", lifespan=lifespan)
+
+# Фаза 4: REST API для Chrome-расширения (ТЗ §6.1.3, §9) — /api/quick_add и др.
+from app.api.routes.quick_add import router as quick_add_router  # noqa: E402
+
+app.include_router(quick_add_router)
 
 
 # P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Send to TG Bot — настройки</title>
+  <style>
+    body { font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #f2f4f7; margin: 0; }
+    .wrap { max-width: 640px; margin: 40px auto; background: #fff; border-radius: 12px; padding: 24px 28px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+    h1 { font-size: 20px; margin-top: 0; }
+    label { display: block; margin: 16px 0 4px; font-weight: 600; }
+    input, select { width: 100%; padding: 8px 10px; border: 1px solid #ccd2da; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
+    .hint { color: #6b7480; font-size: 12px; margin-top: 4px; }
+    .row { display: flex; gap: 10px; margin-top: 20px; }
+    button { padding: 9px 18px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; }
+    #save { background: #2AABEE; color: #fff; }
+    #test { background: #e8ebef; color: #333; }
+    #status { margin-top: 14px; min-height: 20px; font-weight: 600; }
+    #status.ok { color: #2e7d32; }
+    #status.err { color: #c62828; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🤖 Send to TG Bot — настройки</h1>
+
+    <label for="botUrl">Адрес сервера бота</label>
+    <input id="botUrl" type="text" placeholder="http://192.168.1.50:8000" spellcheck="false" />
+    <div class="hint">Локальный адрес TG Media Queue Bot (FastAPI). Без завершающего «/».</div>
+
+    <label for="secretToken">Секретный токен (SECRET_TOKEN)</label>
+    <input id="secretToken" type="password" placeholder="из .env на сервере" spellcheck="false" />
+    <div class="hint">Должен совпадать с SECRET_TOKEN в .env бота. Хранится в chrome.storage.sync.</div>
+
+    <label for="queueSelect">Очередь по умолчанию</label>
+    <select id="queueSelect">
+      <option value="">— Авто (маршрутизация по правилам / Входящие) —</option>
+    </select>
+    <div class="hint">Список загружается с сервера. Если сервер недоступен — оставьте «Авто».</div>
+
+    <div class="row">
+      <button id="save">💾 Сохранить</button>
+      <button id="test">🔌 Проверить подключение</button>
+      <button id="reload">⟳ Загрузить очереди</button>
+    </div>
+
+    <div id="status"></div>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>
