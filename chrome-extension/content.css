@@ -27,8 +27,15 @@
 .tgq-btn.tgq-error { background: #e53935; }
 .tgq-btn.tgq-pinned { position: fixed; top: 10px; left: 10px; }
 
-/* Кнопка «выбрать медиа» — появляется когда findBestMedia не сработал */
-.tgq-btn.tgq-pick { background: #ff9800; }
+/* Кнопка «выбрать медиа» — появляется когда findBestMedia не сработал.
+   Закреплена в правом-верхнем углу, чтобы не перекрываться с .tgq-pinned (левый-верх). */
+.tgq-btn.tgq-pick {
+  background: #ff9800;
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  left: auto;
+}
 
 /* Toast-контейнер (utils.js) */
 #tgq-toast-host {

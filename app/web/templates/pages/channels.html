@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Каналы — TG Media Queue Bot{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0"><i class="bi bi-broadcast"></i> Каналы</h1>
+    <span class="badge bg-secondary">{{ channels|length }} шт.</span>
+</div>
+
+<p class="text-muted small">
+    Целевые Telegram-каналы для постинга. Добавляются через бота в Telegram (команда <code>/add_channel</code>).
+</p>
+
+{% if channels %}
+<div class="card">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>#</th>
+                        <th>Название</th>
+                        <th>tg_chat_id</th>
+                        <th>Username</th>
+                        <th class="text-center">Активен</th>
+                        <th>Создан</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in channels %}
+                    <tr>
+                        <td>{{ c.id }}</td>
+                        <td>{{ c.name }}</td>
+                        <td><code>{{ c.tg_chat_id }}</code></td>
+                        <td>{% if c.username %}<a href="https://t.me/{{ c.username }}" target="_blank" rel="noopener">@{{ c.username }}</a>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+                        <td class="text-center">
+                            {% if c.is_active %}
+                            <span class="badge bg-success">да</span>
+                            {% else %}
+                            <span class="badge bg-secondary">нет</span>
+                            {% endif %}
+                        </td>
+                        <td class="small text-muted">{{ c.created_at }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body p-5 text-center text-muted">
+        <i class="bi bi-broadcast fs-1 d-block mb-3"></i>
+        <p class="mb-0">Каналов нет. Добавьте через бота: <code>/add_channel</code>.</p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -9,14 +9,14 @@
     "*://danbooru.donmai.us/*",
     "*://x.com/*",
     "*://twitter.com/*",
-    "*://pikabu.ru/*",
-    "*://www.pixiv.net/*",
+    "*://*.pikabu.ru/*",
+    "*://*.pixiv.net/*",
+    "*://pixiv.net/*",
     "*://i.pximg.net/*",
     "*://pbs.twimg.com/*",
     "*://video.twimg.com/*",
     "*://img3.gelbooru.com/*",
-    "*://cdn.donmai.us/*",
-    "*://cs*.pikabu.ru/*"
+    "*://cdn.donmai.us/*"
   ],
   "content_scripts": [
     {
@@ -25,8 +25,9 @@
         "*://danbooru.donmai.us/*",
         "*://x.com/*",
         "*://twitter.com/*",
-        "*://pikabu.ru/*",
-        "*://www.pixiv.net/*"
+        "*://*.pikabu.ru/*",
+        "*://*.pixiv.net/*",
+        "*://pixiv.net/*"
       ],
       "js": ["site-config.js", "utils.js", "content.js"],
       "css": ["content.css"],

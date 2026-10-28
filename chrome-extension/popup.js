@@ -49,14 +49,32 @@ async function enqueueCurrentPage() {
   const tab = await getCurrentTab();
   if (!tab || !tab.url) return setStatus("Нет активной вкладки", false);
 
-  const config = getConfigForHostname(new URL(tab.url).hostname || "");
-  // mediaUrl попробуем вытащить из вкладки (content script окружение недоступно
-  // напрямую — используем chrome.scripting? Нет permissions. Fallback: без mediaUrl,
-  // бот сам разберётся со страницей или yt-dlp).
+  let mediaUrl = null;
+  try {
+    // inject site-config.js so the page has getConfigForHostname/findBestMedia
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["site-config.js"] });
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        if (typeof getConfigForHostname === "undefined" || typeof findBestMedia === "undefined") return null;
+        const cfg = getConfigForHostname(location.hostname);
+        if (!cfg) return null;
+        const m = findBestMedia(cfg);
+        return m ? m.url : null;
+      },
+    });
+    mediaUrl = result?.result || null;
+  } catch (e) {
+    // scripting may fail on chrome:// pages or if permission denied — continue with null
+    mediaUrl = null;
+  }
+
+  let config = null;
+  try { config = getConfigForHostname(new URL(tab.url).hostname || ""); } catch {}
   const payload = {
     type: "ENQUEUE",
     pageUrl: tab.url,
-    mediaUrl: null,
+    mediaUrl,
     referer: config && config.needsReferer ? new URL(tab.url).origin + "/" : null,
     tags: [],
     title: tab.title || "",

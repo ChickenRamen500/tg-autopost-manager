@@ -243,10 +243,34 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="TG Media Queue Bot", version="0.4.0-phase4", lifespan=lifespan)
 
+# CORS для Chrome-расширения (Task 4): расширение делает fetch к bot_url с разных
+# хостов (x.com, gelbooru, ...) — без CORS-заголовков браузер блокирует запрос.
+# Auth здесь не через cookies (allow_credentials=False), а через X-Secret-Token
+# в заголовке — поэтому allow_origins=["*"] безопасен.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 # Фаза 4: REST API для Chrome-расширения (ТЗ §6.1.3, §9) — /api/quick_add и др.
 from app.api.routes.quick_add import router as quick_add_router  # noqa: E402
 
 app.include_router(quick_add_router)
+
+# Веб-интерфейс (ТЗ §7, Task 4): Jinja2 + Bootstrap 5 — страницы / /queues /inbox ...
+from pathlib import Path  # noqa: E402
+
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+from app.web import router as web_router  # noqa: E402
+
+app.include_router(web_router)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "web" / "static"), name="static")
 
 
 # P2-29: Простая авторизация для защищённых endpoints через SECRET_TOKEN.

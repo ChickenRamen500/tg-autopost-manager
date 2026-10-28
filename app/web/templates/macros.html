@@ -1,0 +1,53 @@
+{# Общие макросы для веб-интерфейса. Импортируется через {% from "macros.html" import ... %}. #}
+
+{# Бейдж статуса поста: pending=blue, sent=green, failed=red, possible_duplicate=orange, new=gray, downloading=cyan #}
+{% macro status_badge(status) -%}
+{% set classes = {
+    'pending': 'bg-primary',
+    'sent': 'bg-success',
+    'failed': 'bg-danger',
+    'possible_duplicate': 'bg-warning text-dark',
+    'duplicate': 'bg-warning text-dark',
+    'new': 'bg-secondary',
+    'downloading': 'bg-info text-dark'
+} %}
+{% set labels = {
+    'pending': 'Pending',
+    'sent': 'Отправлен',
+    'failed': 'Ошибка',
+    'possible_duplicate': 'Возможный дубль',
+    'duplicate': 'Дубликат',
+    'new': 'Новый',
+    'downloading': 'Скачивается'
+} %}
+<span class="badge {{ classes.get(status, 'bg-secondary') }}">{{ labels.get(status, status) }}</span>
+{%- endmacro %}
+
+{# Иконка типа файла #}
+{% macro file_type_icon(file_type) -%}
+{% set icons = {
+    'photo': 'bi-image',
+    'video': 'bi-film',
+    'gif': 'bi-file-play',
+    'document': 'bi-file-earmark',
+    'audio': 'bi-music-note-beamed',
+    'voice': 'bi-mic'
+} %}
+<i class="bi {{ icons.get(file_type, 'bi-file') }}" aria-label="{{ file_type }}"></i>
+{%- endmacro %}
+
+{# Иконка источника #}
+{% macro source_icon(source_type) -%}
+{% set icons = {
+    'gelbooru': 'bi-cloud-download',
+    'danbooru': 'bi-cloud-download',
+    'pixiv': 'bi-cloud-download',
+    'pikabu': 'bi-cloud-download',
+    'xcom': 'bi-twitter-x',
+    'telegram_channel': 'bi-telegram',
+    'web': 'bi-globe',
+    'extension': 'bi-puzzle',
+    'any': 'bi-asterisk'
+} %}
+<i class="bi {{ icons.get(source_type, 'bi-cloud') }}" aria-label="{{ source_type }}"></i>
+{%- endmacro %}

@@ -14,16 +14,16 @@ const DEFAULT_SETTINGS = {
   defaultQueueId: null, // null = маршрутизация по правилам / Входящие
 };
 
-async function getSettings() {
+async function getSettings(override) {
   const stored = await chrome.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
-  const s = { ...DEFAULT_SETTINGS, ...stored };
+  const s = { ...DEFAULT_SETTINGS, ...stored, ...(override || {}) };
   s.botUrl = (s.botUrl || "").replace(/\/+$/, ""); // без завершающего слеша
   return s;
 }
 
-function authHeaders() {
+function authHeaders(settings) {
   // токен кладём И в заголовок, и в body (бэкенд принимает оба варианта)
-  return {};
+  return settings.secretToken ? { "X-Secret-Token": settings.secretToken } : {};
 }
 
 async function postQuickAdd(settings, payload) {
@@ -39,7 +39,7 @@ async function postQuickAdd(settings, payload) {
   };
   const resp = await fetch(`${settings.botUrl}/api/quick_add`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Secret-Token": settings.secretToken, ...authHeaders() },
+    headers: { "Content-Type": "application/json", ...authHeaders(settings) },
     body: JSON.stringify(body),
   });
   return normalizeResponse(resp);
@@ -47,6 +47,13 @@ async function postQuickAdd(settings, payload) {
 
 async function postQuickAddUpload(settings, payload) {
   // Режим B: скачиваем медиа БРАУЗЕРОМ (cookies подставятся автоматически для x.com)
+  // Защита от null/не-HTTP mediaUrl (BUG-3): popup отправляет null, если не смог извлечь URL
+  if (!payload.mediaUrl || !/^https?:/i.test(payload.mediaUrl)) {
+    return {
+      ok: false,
+      error: "Не удалось определить прямую ссылку медиа — откройте пост и используйте кнопку на странице",
+    };
+  }
   let mediaResp;
   try {
     mediaResp = await fetch(payload.mediaUrl, { credentials: "include" });
@@ -72,7 +79,7 @@ async function postQuickAddUpload(settings, payload) {
 
   const resp = await fetch(`${settings.botUrl}/api/quick_add_upload`, {
     method: "POST",
-    headers: { "X-Secret-Token": settings.secretToken }, // Content-Type ставит fetch (multipart boundary)
+    headers: { ...authHeaders(settings) }, // Content-Type ставит fetch (multipart boundary)
     body: fd,
   });
   return normalizeResponse(resp);
@@ -128,10 +135,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "GET_QUEUES") {
     (async () => {
-      const settings = await getSettings();
+      const settings = await getSettings(msg.override);
       try {
         const u = `${settings.botUrl}/api/queues?secret_token=${encodeURIComponent(settings.secretToken)}`;
-        const resp = await fetch(u, { headers: { "X-Secret-Token": settings.secretToken } });
+        const resp = await fetch(u, { headers: { ...authHeaders(settings) } });
         const data = await resp.json();
         sendResponse({ ok: resp.ok, queues: data.queues || [], error: resp.ok ? undefined : "check settings" });
       } catch (e) {
@@ -143,12 +150,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "TEST_CONNECTION") {
     (async () => {
-      const settings = await getSettings();
+      const settings = await getSettings(msg.override);
       try {
         const resp = await fetch(`${settings.botUrl}/health`);
         const healthOk = resp.ok;
         const q = await fetch(
-          `${settings.botUrl}/api/queues?secret_token=${encodeURIComponent(settings.secretToken)}`
+          `${settings.botUrl}/api/queues?secret_token=${encodeURIComponent(settings.secretToken)}`,
+          { headers: { ...authHeaders(settings) } }
         );
         sendResponse({ ok: healthOk && q.ok, health: resp.status, api: q.status });
       } catch (e) {

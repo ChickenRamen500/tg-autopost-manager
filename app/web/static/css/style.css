@@ -1,0 +1,200 @@
+/* ==========================================================================
+   TG Media Queue Bot — Web Interface styles (ТЗ §7, Task 4)
+   Bootstrap 5 + кастомный Telegram-blue primary + sticky sidebar layout.
+   ========================================================================== */
+
+:root {
+    /* Telegram blue как primary (вместо Bootstrap default indigo) */
+    --bs-primary: #2AABEE;
+    --bs-primary-rgb: 42, 171, 238;
+    --tg-sidebar-width: 220px;
+    --tg-sidebar-bg: #1c2836;
+}
+
+[data-bs-theme="dark"] {
+    --tg-sidebar-bg: #111821;
+}
+
+/* Primary-кнопки/ссылки наследуют Telegram-blue */
+.btn-primary {
+    --bs-btn-bg: #2AABEE;
+    --bs-btn-border-color: #2AABEE;
+    --bs-btn-hover-bg: #1f8fc4;
+    --bs-btn-hover-border-color: #1f8fc4;
+    --bs-btn-active-bg: #1b7eaf;
+    --bs-btn-active-border-color: #1b7eaf;
+    --bs-btn-disabled-bg: #2AABEE;
+    --bs-btn-disabled-border-color: #2AABEE;
+}
+
+.btn-outline-primary {
+    --bs-btn-color: #2AABEE;
+    --bs-btn-border-color: #2AABEE;
+    --bs-btn-hover-bg: #2AABEE;
+    --bs-btn-hover-border-color: #2AABEE;
+    --bs-btn-active-bg: #2AABEE;
+    --bs-btn-active-border-color: #2AABEE;
+}
+
+.text-primary {
+    color: #2AABEE !important;
+}
+
+.link-primary {
+    color: #2AABEE !important;
+}
+
+.bg-primary {
+    background-color: #2AABEE !important;
+}
+
+.border-primary {
+    border-color: #2AABEE !important;
+}
+
+a {
+    color: #2AABEE;
+}
+
+/* --- Sidebar (desktop) --------------------------------------------------- */
+.sidebar {
+    width: var(--tg-sidebar-width);
+    min-width: var(--tg-sidebar-width);
+    min-height: calc(100vh - 56px - 40px); /* высота footer + mobile navbar */
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+}
+
+.sidebar-brand {
+    padding: 1rem 1rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sidebar .nav-link {
+    color: rgba(255, 255, 255, 0.75);
+    padding: 0.6rem 1rem;
+    border-radius: 0;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.sidebar .nav-link:hover {
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.sidebar .nav-link.active {
+    color: #ffffff;
+    background-color: #2AABEE;
+}
+
+.sidebar .nav-link i {
+    width: 1.25rem;
+    display: inline-block;
+    text-align: center;
+    margin-right: 0.5rem;
+}
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Mobile offcanvas nav links */
+.offcanvas .nav-link {
+    color: var(--bs-body-color);
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.offcanvas .nav-link:hover {
+    background-color: rgba(42, 171, 238, 0.08);
+    color: #2AABEE;
+}
+
+.offcanvas .nav-link.active {
+    background-color: rgba(42, 171, 238, 0.15);
+    color: #2AABEE;
+    font-weight: 600;
+}
+
+/* --- Footer sticky ------------------------------------------------------- */
+.footer {
+    min-height: 40px;
+    margin-top: auto;
+}
+
+/* --- Cards & table hover ------------------------------------------------- */
+.card {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.stat-card {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(42, 171, 238, 0.12);
+}
+
+.table > :not(caption) > * > * {
+    padding: 0.55rem 0.75rem;
+}
+
+.table-hover > tbody > tr:hover {
+    background-color: rgba(42, 171, 238, 0.06);
+    cursor: default;
+}
+
+/* --- Custom scrollbar ---------------------------------------------------- */
+.overflow-auto,
+.table-responsive {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(42, 171, 238, 0.4) transparent;
+}
+
+.overflow-auto::-webkit-scrollbar,
+.table-responsive::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb,
+.table-responsive::-webkit-scrollbar-thumb {
+    background-color: rgba(42, 171, 238, 0.35);
+    border-radius: 4px;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb:hover,
+.table-responsive::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(42, 171, 238, 0.6);
+}
+
+/* --- Long lists (inbox/posts) — заданный max-height со скроллом --------- */
+.scroll-list {
+    max-height: 24rem;
+    overflow-y: auto;
+}
+
+/* --- Mobile tweaks ------------------------------------------------------- */
+@media (max-width: 575.98px) {
+    .sidebar-brand { font-size: 0.95rem; }
+    .card-body { padding: 0.75rem; }
+    main { padding: 0.75rem !important; }
+}
+
+/* --- Toast container (для action-фидбэка) -------------------------------- */
+.toast-container {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    z-index: 1080;
+}

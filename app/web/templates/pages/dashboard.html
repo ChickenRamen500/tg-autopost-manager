@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% from "macros.html" import status_badge, file_type_icon, source_icon %}
+
+{% block title %}Дашборд — TG Media Queue Bot{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-4"><i class="bi bi-speedometer2"></i> Дашборд</h1>
+
+{# Карточки статистики постов #}
+<div class="row row-cols-2 row-cols-md-3 row-cols-lg-6 g-3 mb-4">
+    <div class="col">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="text-muted small">Всего постов</div>
+                <div class="fs-3 fw-bold text-body">{{ total_posts }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="text-muted small">Новые (new)</div>
+                <div class="fs-3 fw-bold text-secondary">{{ counts.get('new', 0) }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="text-muted small">Pending</div>
+                <div class="fs-3 fw-bold text-primary">{{ counts.get('pending', 0) }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="text-muted small">Отправлено</div>
+                <div class="fs-3 fw-bold text-success">{{ counts.get('sent', 0) }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="text-muted small">Ошибки</div>
+                <div class="fs-3 fw-bold text-danger">{{ counts.get('failed', 0) }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="text-muted small">Возможные дубли</div>
+                <div class="fs-3 fw-bold text-warning">{{ counts.get('possible_duplicate', 0) }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    {# Worker status #}
+    <div class="col-12 col-lg-5">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-gear-fill"></i> Worker</span>
+                <span id="worker-state-badge" class="badge {% if worker_running %}bg-success{% else %}bg-secondary{% endif %}">
+                    {% if worker_running %}запущен{% else %}остановлен{% endif %}
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="row row-cols-2 g-2 text-center" id="worker-stats">
+                    <div class="col">
+                        <div class="text-muted small">Queued</div>
+                        <div class="fs-5 fw-bold">{{ worker_stats.queued }}</div>
+                    </div>
+                    <div class="col">
+                        <div class="text-muted small">In progress</div>
+                        <div class="fs-5 fw-bold text-info">{{ worker_stats.in_progress }}</div>
+                    </div>
+                    <div class="col">
+                        <div class="text-muted small">Done</div>
+                        <div class="fs-5 fw-bold text-success">{{ worker_stats.done }}</div>
+                    </div>
+                    <div class="col">
+                        <div class="text-muted small">Error</div>
+                        <div class="fs-5 fw-bold text-danger">{{ worker_stats.error }}</div>
+                    </div>
+                </div>
+                <p class="text-muted small mt-3 mb-0">Автообновление каждые 30 сек через <code>/health/worker</code>.</p>
+            </div>
+        </div>
+    </div>
+
+    {# Recent inbox #}
+    <div class="col-12 col-lg-7">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-inbox-fill"></i> Последние во Входящих</span>
+                <a href="/inbox" class="btn btn-sm btn-outline-primary">Все →</a>
+            </div>
+            <div class="card-body p-0">
+                {% if inbox %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>#</th>
+                                <th>Источник</th>
+                                <th>Тип</th>
+                                <th>Статус</th>
+                                <th>Создан</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for p in inbox %}
+                            <tr>
+                                <td>{{ p.id }}</td>
+                                <td>{{ source_icon(p.source_type) }} {{ p.source_type }}</td>
+                                <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
+                                <td>{{ status_badge(p.status) }}</td>
+                                <td class="small text-muted">{{ p.created_at }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-4 text-center text-muted">
+                    <i class="bi bi-inbox fs-1 d-block mb-2"></i>
+                    Входящие пусты.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {# Queues overview #}
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-list-ol"></i> Очереди</span>
+                <a href="/queues" class="btn btn-sm btn-outline-primary">Все →</a>
+            </div>
+            <div class="card-body p-0">
+                {% if queues %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>#</th>
+                                <th>Название</th>
+                                <th>Канал</th>
+                                <th>Интервал (мин)</th>
+                                <th>Активна</th>
+                                <th class="text-end">Pending</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for q in queues %}
+                            <tr>
+                                <td>{{ q.id }}</td>
+                                <td>
+                                    <a href="/queues/{{ q.id }}">{{ q.name }}</a>
+                                </td>
+                                <td>{{ q.channel_name or '—' }}</td>
+                                <td>{{ q.interval_minutes }}</td>
+                                <td>
+                                    {% if q.is_active %}
+                                    <span class="badge bg-success">вкл</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary">выкл</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end fw-bold">{{ q.pending_count }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-4 text-center text-muted">
+                    <i class="bi bi-list-ol fs-1 d-block mb-2"></i>
+                    Нет очередей. Создайте через бота в Telegram.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -16,7 +16,7 @@ const SITE_CONFIGS = {
   "danbooru.donmai.us": {
     mode: "A",
     // Danbooru отдаёт data-original-url прямо на <img>; ссылка "Original image"
-    mediaSelector: "a[itemprop='contentURL'], a[href$='/original'], #image-container img[id='image'], #show-post a[src]",
+    mediaSelector: "a[itemprop='contentURL'], a[href$='/original'], #image-container img[id='image'], #show-post a[href]",
     mediaAttrPriority: ["data-file-url", "src"],
     mediaHosts: ["donmai.us"],
     needsReferer: false,
@@ -86,11 +86,23 @@ function extractMediaUrl(mediaEl, config) {
   // <meta property="og:image" content="...">
   if (tag === "meta") return mediaEl.getAttribute("content");
 
-  // <video>/<source> — src у video или первого source
+  // <video>/<source> — src у video или первого source. blob: URL'ы игнорируем (BUG-21):
+  // они указывают на локальный MediaSource (HLS/dash) и не скачиваются fetch без cookies.
   if (tag === "video") {
-    return mediaEl.getAttribute("src") || mediaEl.querySelector("source")?.getAttribute("src") || null;
+    const src = mediaEl.getAttribute("src");
+    if (src && !src.startsWith("blob:")) return src;
+    const sourceEl = mediaEl.querySelector("source");
+    if (sourceEl) {
+      const ssrc = sourceEl.getAttribute("src");
+      if (ssrc && !ssrc.startsWith("blob:")) return ssrc;
+    }
+    return null;
   }
-  if (tag === "source") return mediaEl.getAttribute("src");
+  if (tag === "source") {
+    const src = mediaEl.getAttribute("src");
+    if (src && !src.startsWith("blob:")) return src;
+    return null;
+  }
 
   // Приоритетные атрибуты (danbooru: data-file-url точнее, чем src превью)
   for (const attr of config.mediaAttrPriority || []) {
@@ -119,6 +131,19 @@ function _absMediaUrl(u, config) {
   }
 }
 
+// Проверка, что URL ведёт на разрешённый хост медиа (BUG-12).
+// mediaHosts — allowlist. Если пусто — пропускаем всё.
+function isAllowedMediaHost(url, config) {
+  try {
+    const h = new URL(url).hostname;
+    const allowed = config.mediaHosts || [];
+    if (!allowed.length) return true; // no allowlist = allow all
+    return allowed.some((a) => h === a || h.endsWith("." + a));
+  } catch {
+    return false;
+  }
+}
+
 // Поиск лучшего кандидата-медиа на странице (первый совпавший селектор).
 function findBestMedia(config) {
   if (!config || !config.mediaSelector) return null;
@@ -127,7 +152,7 @@ function findBestMedia(config) {
       const el = document.querySelector(sel);
       if (el) {
         const url = extractMediaUrl(el, config);
-        if (url && /^https?:/.test(url)) return { el, url };
+        if (url && /^https?:/.test(url) && isAllowedMediaHost(url, config)) return { el, url };
       }
     } catch (e) {
       /* невалидный селектор — пропускаем */
@@ -152,4 +177,8 @@ function extractTags(config) {
 if (typeof globalThis !== "undefined") {
   globalThis.SITE_CONFIGS = SITE_CONFIGS;
   globalThis.getConfigForHostname = getConfigForHostname;
+  globalThis.findBestMedia = findBestMedia;
+  globalThis.extractMediaUrl = extractMediaUrl;
+  globalThis.isAllowedMediaHost = isAllowedMediaHost;
+  globalThis.extractTags = extractTags;
 }

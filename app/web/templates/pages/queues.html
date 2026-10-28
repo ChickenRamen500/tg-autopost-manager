@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Очереди — TG Media Queue Bot{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0"><i class="bi bi-list-ol"></i> Очереди</h1>
+    <span class="badge bg-secondary">{{ queues|length }} шт.</span>
+</div>
+
+{% if queues %}
+<div class="card">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>#</th>
+                        <th>Название</th>
+                        <th>Канал</th>
+                        <th class="text-center">Интервал (мин)</th>
+                        <th class="text-center">Активна</th>
+                        <th class="text-end">Pending</th>
+                        <th class="text-end">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for q in queues %}
+                    <tr>
+                        <td>{{ q.id }}</td>
+                        <td>
+                            <a href="/queues/{{ q.id }}">{{ q.name }}</a>
+                        </td>
+                        <td>
+                            {% if q.channel_name %}
+                            {{ q.channel_name }}
+                            {% if q.channel_username %}<span class="text-muted small">@{{ q.channel_username }}</span>{% endif %}
+                            {% else %}
+                            <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-center">{{ q.interval_minutes }}</td>
+                        <td class="text-center">
+                            <form method="post" action="/web/queues/{{ q.id }}/toggle" class="d-inline" data-confirm="Сменить статус очереди {{ q.name }}?">
+                                <button type="submit" class="btn btn-sm {% if q.is_active %}btn-success{% else %}btn-secondary{% endif %}" aria-label="Включить/выключить очередь">
+                                    {% if q.is_active %}<i class="bi bi-toggle-on"></i>{% else %}<i class="bi bi-toggle-off"></i>{% endif %}
+                                </button>
+                            </form>
+                        </td>
+                        <td class="text-end fw-bold">{{ q.pending_count }}</td>
+                        <td class="text-end">
+                            <form method="post" action="/web/queues/{{ q.id }}/delete" class="d-inline" data-confirm="Удалить очередь «{{ q.name }}»? Все её посты перейдут во Входящие.">
+                                <button type="submit" class="btn btn-sm btn-outline-danger" aria-label="Удалить очередь">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body p-5 text-center text-muted">
+        <i class="bi bi-list-ol fs-1 d-block mb-3"></i>
+        <p class="mb-0">Нет очередей. Создайте через бота в Telegram.</p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

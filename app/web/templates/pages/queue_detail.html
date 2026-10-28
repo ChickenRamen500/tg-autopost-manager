@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% from "macros.html" import status_badge, file_type_icon, source_icon %}
+
+{% block title %}Очередь «{{ queue.name }}» — TG Media Queue Bot{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+    <ol class="breadcrumb mb-0">
+        <li class="breadcrumb-item"><a href="/queues">Очереди</a></li>
+        <li class="breadcrumb-item active" aria-current="page">{{ queue.name }}</li>
+    </ol>
+</nav>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+            <i class="bi bi-list-ol"></i>
+            <strong>{{ queue.name }}</strong>
+            <span class="text-muted small">#{{ queue.id }}</span>
+            {% if queue.is_active %}
+            <span class="badge bg-success ms-2">активна</span>
+            {% else %}
+            <span class="badge bg-secondary ms-2">выключена</span>
+            {% endif %}
+        </div>
+        <div class="text-muted small">
+            Канал: {{ queue.channel_name or '—' }} · Интервал: {{ queue.interval_minutes }} мин
+        </div>
+    </div>
+    <div class="card-body">
+        <div class="row row-cols-2 row-cols-md-4 g-3 text-center">
+            <div class="col">
+                <div class="text-muted small">Pending</div>
+                <div class="fs-4 fw-bold text-primary">{{ pending_count }}</div>
+            </div>
+            <div class="col">
+                <div class="text-muted small">Постов всего</div>
+                <div class="fs-4 fw-bold">{{ posts|length }}</div>
+            </div>
+            <div class="col">
+                <div class="text-muted small">Групп. альбомы</div>
+                <div class="fs-4 fw-bold">{{ 'да' if queue.group_albums else 'нет' }}</div>
+            </div>
+            <div class="col">
+                <div class="text-muted small">Shuffle</div>
+                <div class="fs-4 fw-bold">{{ 'да' if queue.shuffle_enabled else 'нет' }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <i class="bi bi-images"></i> Посты очереди ({{ posts|length }})
+    </div>
+    <div class="card-body p-0">
+        {% if posts %}
+        <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>#</th>
+                        <th>Тип</th>
+                        <th>Источник</th>
+                        <th>Статус</th>
+                        <th>Теги</th>
+                        <th>Создан</th>
+                        <th class="text-end">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in posts %}
+                    <tr>
+                        <td>{{ p.id }}</td>
+                        <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
+                        <td>{{ source_icon(p.source_type) }} {{ p.source_type }}
+                            {% if p.source_url %}<a href="{{ p.source_url }}" target="_blank" rel="noopener" class="ms-1 small" title="Открыть источник"><i class="bi bi-box-arrow-up-right"></i></a>{% endif %}
+                        </td>
+                        <td>{{ status_badge(p.status) }}</td>
+                        <td class="small text-muted">
+                            {% if p.tags %}
+                            {% for t in p.tags[:5] %}<span class="badge bg-light text-dark me-1">{{ t }}</span>{% endfor %}
+                            {% if p.tags|length > 5 %}<span class="text-muted">+{{ p.tags|length - 5 }}</span>{% endif %}
+                            {% else %}—{% endif %}
+                        </td>
+                        <td class="small text-muted">{{ p.created_at }}</td>
+                        <td class="text-end">
+                            <form method="post" action="/web/posts/{{ p.id }}/assign/0" class="d-inline" data-confirm="Переместить пост #{{ p.id }} во Входящие?">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary" title="Во Входящие">
+                                    <i class="bi bi-inbox"></i>
+                                </button>
+                            </form>
+                            <form method="post" action="/web/posts/{{ p.id }}/delete" class="d-inline" data-confirm="Удалить пост #{{ p.id }}?">
+                                <button type="submit" class="btn btn-sm btn-outline-danger" title="Удалить">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="p-5 text-center text-muted">
+            <i class="bi bi-images fs-1 d-block mb-3"></i>
+            <p class="mb-0">В этой очереди нет постов.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

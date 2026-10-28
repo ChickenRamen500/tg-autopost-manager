@@ -3,44 +3,23 @@
 // Важно (ТЗ §9.6):
 //  - Никаких inline-обработчиков (CSP сайтов) — только addEventListener.
 //  - SPA (x.com, pikabu) — переинъекция через MutationObserver с debounce.
-//  - Дедупликация: отправленные страницы помнятся в chrome.storage.local,
+//  - Дедупликация: отправленные страницы помечаются в chrome.storage.local,
 //    кнопка становится «✓ Уже в очереди».
+//  - Стили вынесены в content.css (подключается через manifest), без inline <style> (CSP-safe).
 (() => {
   "use strict";
 
   const BTN_ID = "tg-queue-btn";
-  const STYLE_ID = "tg-queue-btn-style";
+  const PICK_BTN_ID = "tg-queue-pick-btn";
+  const PICKER_ID = "tgq-picker";
 
   const config = getConfigForHostname(location.hostname);
   if (!config) return;
 
-  // --- Стили кнопки (CSS через <style>, не inline — безопасно для CSP) ---
-  function ensureStyle() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement("style");
-    style.id = STYLE_ID;
-    style.textContent = `
-      #${BTN_ID} {
-        all: initial;
-        display: inline-flex; align-items: center; gap: 6px;
-        padding: 8px 14px; margin: 8px;
-        background: #2AABEE; color: #fff !important;
-        font: 600 14px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-        border: none; border-radius: 8px; cursor: pointer;
-        box-shadow: 0 2px 8px rgba(0,0,0,.25);
-        z-index: 2147483647; position: relative; opacity: 0.95;
-      }
-      #${BTN_ID}:hover { opacity: 1; }
-      #${BTN_ID}[disabled] { background: #7a8691; cursor: default; }
-      #${BTN_ID}.done { background: #4caf50; }
-      #${BTN_ID}.error { background: #e53935; }
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  // Ключ дедупликации в storage — страница + медиа URL
+  // Ключ дедупликации в storage — origin + (mediaUrl или page URL как fallback).
   function dedupeKey(mediaUrl) {
-    return `sent:${location.origin}|${mediaUrl}`;
+    const key = mediaUrl || location.href;
+    return `sent:${location.origin}|${key}`;
   }
 
   async function wasSent(mediaUrl) {
@@ -56,6 +35,7 @@
   function makeButton(mediaUrl) {
     const btn = document.createElement("button");
     btn.id = BTN_ID;
+    btn.className = "tgq-btn";
     btn.type = "button";
     btn.textContent = "→ В очередь";
     btn.title = "Отправить этот пост в очередь TG Media Queue Bot";
@@ -82,17 +62,25 @@
         const resp = await chrome.runtime.sendMessage(payload);
         if (resp && resp.ok) {
           btn.textContent = resp.duplicate ? "✓ Уже было" : "✓ В очереди";
-          btn.classList.add("done");
+          btn.classList.add("tgq-done");
+          tgqShowToast(
+            resp.duplicate
+              ? "Уже в очереди (дубликат #" + resp.post_id + ")"
+              : "Добавлено в очередь #" + resp.post_id,
+            "ok"
+          );
           await markSent(mediaUrl, resp.post_id);
         } else {
           btn.textContent = (resp && resp.error) ? "✗ " + truncate(resp.error) : "✗ Ошибка";
-          btn.classList.add("error");
+          btn.classList.add("tgq-error");
           btn.disabled = false; // разрешить повтор
+          tgqShowToast(resp?.error || "Ошибка отправки", "err");
         }
       } catch (e) {
         btn.textContent = "✗ Нет связи с ботом";
-        btn.classList.add("error");
+        btn.classList.add("tgq-error");
         btn.disabled = false;
+        tgqShowToast("Нет связи с ботом — проверьте настройки", "err");
       }
     });
     return btn;
@@ -110,9 +98,7 @@
     if (host) {
       host.insertBefore(btn, host.firstChild);
     } else {
-      btn.style.position = "fixed";
-      btn.style.top = "10px";
-      btn.style.left = "10px";
+      btn.classList.add("tgq-pinned");
       document.body.prepend(btn);
     }
   }
@@ -121,23 +107,182 @@
 
   async function injectButtons() {
     if (injecting) return;
-    if (document.getElementById(BTN_ID)) return; // уже есть
     const found = findBestMedia(config);
-    if (!found) return;
+    if (!found) {
+      // Медиа не найдено автоматически — показываем кнопку запуска пикера
+      ensurePickerButton();
+      return;
+    }
+    // Убираем кнопку-пикер, если основное медиа нашлось
+    removePickerButton();
+    const existing = document.getElementById(BTN_ID);
+    if (existing && existing.dataset.mediaUrl === found.url) return; // up-to-date
+    if (existing) existing.remove();
     injecting = true;
     try {
-      ensureStyle();
       if (!document.body) return;
       const btn = makeButton(found.url);
+      btn.dataset.mediaUrl = found.url;
       if (await wasSent(found.url)) {
         btn.textContent = "✓ Уже в очереди";
         btn.disabled = true;
-        btn.classList.add("done");
+        btn.classList.add("tgq-done");
       }
       await placeButton(btn, found.el);
     } finally {
       injecting = false;
     }
+  }
+
+  // --- Media picker overlay (BUG-8) ---
+  const MEDIA_PATTERN = /\.(jpe?g|png|gif|webp|mp4|webm)(\?|#|$)/i;
+
+  function ensurePickerButton() {
+    if (document.getElementById(PICK_BTN_ID)) return;
+    if (!document.body) return;
+    const btn = document.createElement("button");
+    btn.id = PICK_BTN_ID;
+    btn.className = "tgq-btn tgq-pick";
+    btn.type = "button";
+    btn.textContent = "🎞 Выбрать медиа";
+    btn.title = "Медиа не найдено автоматически — выберите вручную";
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openMediaPicker();
+    });
+    document.body.appendChild(btn);
+  }
+
+  function removePickerButton() {
+    const el = document.getElementById(PICK_BTN_ID);
+    if (el) el.remove();
+  }
+
+  function collectMediaCandidates() {
+    const items = [];
+    const seen = new Set();
+    const push = (url, el, kind) => {
+      if (!url) return;
+      let abs;
+      try { abs = new URL(url, location.href).href; } catch { return; }
+      if (!/^https?:/.test(abs)) return;
+      if (seen.has(abs)) return;
+      seen.add(abs);
+      items.push({ url: abs, el, kind });
+    };
+
+    document.querySelectorAll("img").forEach((el) => {
+      const src = el.getAttribute("src") || el.getAttribute("data-src");
+      if (src && MEDIA_PATTERN.test(src)) push(src, el, "img");
+    });
+    document.querySelectorAll("video").forEach((el) => {
+      const src = el.getAttribute("src");
+      if (src && !src.startsWith("blob:") && MEDIA_PATTERN.test(src)) push(src, el, "video");
+      const sourceEl = el.querySelector("source");
+      if (sourceEl) {
+        const ssrc = sourceEl.getAttribute("src");
+        if (ssrc && !ssrc.startsWith("blob:") && MEDIA_PATTERN.test(ssrc)) push(ssrc, sourceEl, "video");
+      }
+    });
+    document.querySelectorAll("source").forEach((el) => {
+      const src = el.getAttribute("src");
+      if (src && !src.startsWith("blob:") && MEDIA_PATTERN.test(src)) push(src, el, "video");
+    });
+    document.querySelectorAll("a").forEach((el) => {
+      const href = el.getAttribute("href");
+      if (href && MEDIA_PATTERN.test(href)) push(href, el, "link");
+    });
+
+    return items;
+  }
+
+  function openMediaPicker() {
+    if (document.getElementById(PICKER_ID)) return;
+    if (!document.body) return;
+
+    const overlay = document.createElement("div");
+    overlay.id = PICKER_ID;
+
+    const head = document.createElement("div");
+    head.className = "tgq-picker-head";
+    head.textContent = "Выберите медиа для отправки в очередь";
+    overlay.appendChild(head);
+
+    const sub = document.createElement("div");
+    sub.className = "tgq-picker-sub";
+    sub.textContent = "Кликните по элементу, чтобы поставить его в очередь.";
+    overlay.appendChild(sub);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "tgq-pick-close";
+    closeBtn.type = "button";
+    closeBtn.textContent = "✕ Закрыть";
+    closeBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      overlay.remove();
+    });
+    overlay.appendChild(closeBtn);
+
+    const grid = document.createElement("div");
+    grid.className = "tgq-picker-grid";
+
+    const items = collectMediaCandidates();
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "tgq-picker-sub";
+      empty.textContent = "На странице не найдено подходящих медиа (jpg/png/gif/webp/mp4/webm).";
+      grid.appendChild(empty);
+    }
+
+    for (const item of items) {
+      const card = document.createElement("button");
+      card.className = "tgq-pick-item";
+      card.type = "button";
+
+      if (item.kind === "video" || /\.(mp4|webm)(\?|#|$)/i.test(item.url)) {
+        const v = document.createElement("video");
+        v.src = item.url;
+        v.muted = true;
+        card.appendChild(v);
+      } else {
+        const img = document.createElement("img");
+        img.src = item.url;
+        img.alt = "";
+        img.loading = "lazy";
+        card.appendChild(img);
+      }
+      const label = document.createElement("span");
+      label.textContent = item.url.split("/").pop().split("?")[0] || item.url;
+      card.appendChild(label);
+
+      card.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        overlay.remove();
+        removePickerButton();
+        const existing = document.getElementById(BTN_ID);
+        if (existing) existing.remove();
+        try {
+          if (!document.body) return;
+          const btn = makeButton(item.url);
+          btn.dataset.mediaUrl = item.url;
+          if (await wasSent(item.url)) {
+            btn.textContent = "✓ Уже в очереди";
+            btn.disabled = true;
+            btn.classList.add("tgq-done");
+          }
+          await placeButton(btn, item.el);
+        } catch (e) {
+          tgqShowToast("Не удалось поставить кнопку: " + (e?.message || e), "err");
+        }
+      });
+      grid.appendChild(card);
+    }
+
+    overlay.appendChild(grid);
+    document.body.appendChild(overlay);
   }
 
   // --- Старт + наблюдение за SPA (ТЗ §9.6) ---
