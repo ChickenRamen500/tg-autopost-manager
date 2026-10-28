@@ -3,7 +3,7 @@
   "name": "Send to TG Bot",
   "version": "1.0.0",
   "description": "Быстрая постановка контента с сайтов в очередь Telegram-бота (TG Media Queue Bot)",
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "*://gelbooru.com/*",
     "*://danbooru.donmai.us/*",
@@ -28,7 +28,8 @@
         "*://pikabu.ru/*",
         "*://www.pixiv.net/*"
       ],
-      "js": ["site-config.js", "content.js"],
+      "js": ["site-config.js", "utils.js", "content.js"],
+      "css": ["content.css"],
       "run_at": "document_idle"
     }
   ],
