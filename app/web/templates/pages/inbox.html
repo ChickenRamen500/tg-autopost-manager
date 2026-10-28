@@ -30,7 +30,7 @@
                 </thead>
                 <tbody>
                     {% for p in posts %}
-                    <tr>
+                    <tr id="post-{{ p.id }}" style="scroll-margin-top: 1rem;">
                         <td>{{ p.id }}</td>
                         <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
                         <td>
@@ -41,23 +41,16 @@
                         <td class="small text-muted">{{ p.created_at }}</td>
                         <td class="text-end">
                             <div class="d-flex flex-wrap justify-content-end gap-1 align-items-center">
-                                <form method="post" action="/web/posts/{{ p.id }}/assign/0" class="d-inline m-0">
-                                    {% if not queues %}
-                                    <span class="text-muted small me-2">нет очередей</span>
-                                    {% else %}
-                                    <select name="_dummy" class="form-select form-select-sm d-none" disabled>
-                                        <option>—</option>
-                                    </select>
-                                    <input type="hidden" name="post_id" value="{{ p.id }}" />
-                                    {% endif %}
-                                </form>
                                 {% if queues %}
                                 <div class="dropdown d-inline-block">
                                     <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button"
-                                            data-bs-toggle="dropdown" aria-expanded="false">
+                                            data-bs-toggle="dropdown" aria-expanded="false"
+                                            data-bs-auto-close="true">
                                         <i class="bi bi-send"></i> В очередь
                                     </button>
-                                    <ul class="dropdown-menu dropdown-menu-end" style="max-height: 320px; overflow-y: auto;">
+                                    {# dropdown-menu без max-height/overflow-y — пусть открывается полностью,
+                                       Popper.js сам развернёт вверх если внизу нет места (Task 9 fix). #}
+                                    <ul class="dropdown-menu dropdown-menu-end">
                                         {% for q in queues %}
                                         <li>
                                             <form method="post" action="/web/posts/{{ p.id }}/assign/{{ q.id }}" class="m-0">
@@ -70,6 +63,8 @@
                                         {% endfor %}
                                     </ul>
                                 </div>
+                                {% else %}
+                                <span class="text-muted small">нет очередей</span>
                                 {% endif %}
                                 <form method="post" action="/web/posts/{{ p.id }}/delete" class="d-inline" data-confirm="Удалить пост #{{ p.id }}?">
                                     <button type="submit" class="btn btn-sm btn-outline-danger" title="Удалить">
@@ -94,3 +89,4 @@
 </div>
 {% endif %}
 {% endblock %}
+

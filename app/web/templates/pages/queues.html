@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/queue_form.html" import queue_form %}
 
 {% block title %}Очереди — TG Media Queue Bot{% endblock %}
 
@@ -6,6 +7,22 @@
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h1 class="h3 mb-0"><i class="bi bi-list-ol"></i> Очереди</h1>
     <span class="badge bg-secondary">{{ queues|length }} шт.</span>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center" id="createQueueHeader">
+        <span><i class="bi bi-plus-lg"></i> Создать очередь</span>
+        <button class="btn btn-sm btn-outline-secondary" type="button"
+                data-bs-toggle="collapse" data-bs-target="#createQueueForm"
+                aria-expanded="true" aria-controls="createQueueForm">
+            <i class="bi bi-chevron-down"></i>
+        </button>
+    </div>
+    <div class="collapse show" id="createQueueForm">
+        <div class="card-body">
+            {{ queue_form(form_action='/web/queues/create', submit_label='Создать', submit_icon='bi-plus-lg', q=None, channels=channels, scope_id='create') }}
+        </div>
+    </div>
 </div>
 
 {% if queues %}
@@ -49,6 +66,9 @@
                         </td>
                         <td class="text-end fw-bold">{{ q.pending_count }}</td>
                         <td class="text-end">
+                            <a href="/queues/{{ q.id }}" class="btn btn-sm btn-outline-primary" title="Изменить">
+                                <i class="bi bi-pencil"></i>
+                            </a>
                             <form method="post" action="/web/queues/{{ q.id }}/delete" class="d-inline" data-confirm="Удалить очередь «{{ q.name }}»? Все её посты перейдут во Входящие.">
                                 <button type="submit" class="btn btn-sm btn-outline-danger" aria-label="Удалить очередь">
                                     <i class="bi bi-trash"></i>
@@ -66,7 +86,7 @@
 <div class="card">
     <div class="card-body p-5 text-center text-muted">
         <i class="bi bi-list-ol fs-1 d-block mb-3"></i>
-        <p class="mb-0">Нет очередей. Создайте через бота в Telegram.</p>
+        <p class="mb-0">Нет очередей. Создайте новую через форму выше.</p>
     </div>
 </div>
 {% endif %}

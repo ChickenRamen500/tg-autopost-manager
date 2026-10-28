@@ -1,22 +1,27 @@
-"""FastAPI router веб-интерфейса (ТЗ §7, Task 4).
+"""FastAPI router веб-интерфейса (ТЗ §7, Task 4 + Task 8-9).
 
 HTML-страницы (Jinja2 + Bootstrap 5) — пути без префикса, корневые:
   GET /            — dashboard
-  GET /queues      — список очередей
-  GET /queues/{id} — детали очереди с постами
+  GET /queues      — список очередей + форма создания
+  GET /queues/{id} — детали очереди с постами + форма редактирования
   GET /inbox       — входящие (queue_id IS NULL)
   GET /posts       — все посты с фильтром ?status=
   GET /routing     — правила маршрутизации + форма
-  GET /channels    — список каналов
+  GET /channels    — список каналов + форма создания + inline-редактирование
 
 POST-actions (возвращают redirect на referer):
-  /web/posts/{id}/assign/{queue_id}   — назначить пост в очередь
-  /web/posts/{id}/delete              — удалить пост
-  /web/posts/{id}/status              — изменить статус (form: status)
-  /web/queues/{id}/toggle             — вкл/выкл очередь
-  /web/queues/{id}/delete             — удалить очередь
-  /web/routing/create                 — создать правило
-  /web/routing/{id}/delete            — удалить правило
+  /web/posts/{id}/assign/{queue_id}      — назначить пост в очередь
+  /web/posts/{id}/delete                 — удалить пост
+  /web/posts/{id}/status                 — изменить статус (form: status)
+  /web/queues/create                     — создать очередь (Task 8)
+  /web/queues/{id}/edit                   — обновить очередь (Task 8)
+  /web/queues/{id}/toggle                — вкл/выкл очередь
+  /web/queues/{id}/delete                — удалить очередь
+  /web/routing/create                    — создать правило
+  /web/routing/{id}/delete               — удалить правило
+  /web/channels/create                   — создать канал (Task 8)
+  /web/channels/{id}/edit                — обновить канал (Task 8)
+  /web/channels/{id}/delete              — удалить канал (Task 8)
 """
 from __future__ import annotations
 
@@ -63,6 +68,14 @@ def _redirect_back(request: Request) -> RedirectResponse:
     """После POST — возврат на referer (или на главную)."""
     back = request.headers.get("referer", "/")
     return RedirectResponse(url=back, status_code=303)
+
+
+def _checkbox(value: str | None) -> bool:
+    """HTML checkbox отправляет 'on' если отмечен, и отсутствует если нет.
+
+    FastAPI Form(default=None) получит None при отсутствии поля.
+    """
+    return value is not None and value.lower() not in ("", "off", "false", "0")
 
 
 # ---------------------------------------------------------------------------
@@ -114,16 +127,18 @@ async def page_dashboard(request: Request, _user: str = Depends(verify_web_user)
 
 @router.get("/queues")
 async def page_queues(request: Request, _user: str = Depends(verify_web_user)) -> Any:
-    """Список всех очередей."""
+    """Список всех очередей + форма создания."""
     queues_raw = await queues_repo.list_queues(active_only=False)
     queues = []
     for q in queues_raw:
         pending = await queues_repo.count_pending(q["id"])
         queues.append({**q, "pending_count": pending})
+    channels = await channels_repo.list_channels(active_only=False)
     ctx = {
         "request": request,
         "active_page": "queues",
         "queues": queues,
+        "channels": channels,
     }
     return templates.TemplateResponse(request, "pages/queues.html", ctx)
 
@@ -134,18 +149,20 @@ async def page_queue_detail(
     request: Request,
     _user: str = Depends(verify_web_user),
 ) -> Any:
-    """Детали одной очереди + её посты (limit 100)."""
+    """Детали одной очереди + её посты (limit 100) + форма редактирования."""
     q = await queues_repo.get_queue(queue_id)
     if q is None:
         raise HTTPException(status_code=404, detail=f"Очередь #{queue_id} не найдена")
     posts = await posts_repo.list_queue_posts(queue_id, limit=100)
     pending = await queues_repo.count_pending(queue_id)
+    channels = await channels_repo.list_channels(active_only=False)
     ctx = {
         "request": request,
         "active_page": "queues",
         "queue": q,
         "posts": posts,
         "pending_count": pending,
+        "channels": channels,
     }
     return templates.TemplateResponse(request, "pages/queue_detail.html", ctx)
 
@@ -375,3 +392,193 @@ async def action_delete_rule(
         raise HTTPException(status_code=404, detail=f"Правило #{rule_id} не найдено")
     log.info("web: удалено правило #%s (user=%s)", rule_id, _user)
     return _redirect_back(request)
+
+
+# ---------------------------------------------------------------------------
+# Queue CRUD (Task 8) — create / edit
+# ---------------------------------------------------------------------------
+
+
+@router.post("/web/queues/create")
+async def action_create_queue(
+    request: Request,
+    name: str = Form(...),
+    channel_id: int = Form(...),
+    interval_minutes: int = Form(60),
+    is_active: str | None = Form(None),
+    crop_video: str | None = Form(None),
+    shuffle_enabled: str | None = Form(None),
+    group_albums: str | None = Form(None),
+    strip_caption: str | None = Form(None),
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Имя очереди не может быть пустым")
+    if interval_minutes < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"interval_minutes должен быть >= 1, получено {interval_minutes}",
+        )
+    # Проверяем что канал существует
+    ch = await channels_repo.get_channel(channel_id)
+    if ch is None:
+        raise HTTPException(
+            status_code=404, detail=f"Канал #{channel_id} не найден"
+        )
+    qid = await queues_repo.create_queue(
+        channel_id=channel_id,
+        name=name,
+        interval_minutes=interval_minutes,
+        is_active=_checkbox(is_active),
+        crop_video=_checkbox(crop_video),
+        shuffle_enabled=_checkbox(shuffle_enabled),
+        group_albums=_checkbox(group_albums),
+        strip_caption=_checkbox(strip_caption),
+    )
+    log.info(
+        "web: создана очередь #%s name=%r channel_id=%s interval=%s (user=%s)",
+        qid, name, channel_id, interval_minutes, _user,
+    )
+    return RedirectResponse(url=f"/queues/{qid}", status_code=303)
+
+
+@router.post("/web/queues/{queue_id}/edit")
+async def action_edit_queue(
+    queue_id: int,
+    request: Request,
+    name: str = Form(...),
+    channel_id: int = Form(...),
+    interval_minutes: int = Form(60),
+    is_active: str | None = Form(None),
+    crop_video: str | None = Form(None),
+    shuffle_enabled: str | None = Form(None),
+    group_albums: str | None = Form(None),
+    strip_caption: str | None = Form(None),
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    q = await queues_repo.get_queue(queue_id)
+    if q is None:
+        raise HTTPException(status_code=404, detail=f"Очередь #{queue_id} не найдена")
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Имя очереди не может быть пустым")
+    if interval_minutes < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"interval_minutes должен быть >= 1, получено {interval_minutes}",
+        )
+    ch = await channels_repo.get_channel(channel_id)
+    if ch is None:
+        raise HTTPException(
+            status_code=404, detail=f"Канал #{channel_id} не найден"
+        )
+    await queues_repo.update_queue(
+        queue_id,
+        name=name,
+        channel_id=channel_id,
+        interval_minutes=interval_minutes,
+        is_active=_checkbox(is_active),
+        crop_video=_checkbox(crop_video),
+        shuffle_enabled=_checkbox(shuffle_enabled),
+        group_albums=_checkbox(group_albums),
+        strip_caption=_checkbox(strip_caption),
+    )
+    log.info(
+        "web: обновлена очередь #%s name=%r channel_id=%s interval=%s (user=%s)",
+        queue_id, name, channel_id, interval_minutes, _user,
+    )
+    return RedirectResponse(url=f"/queues/{queue_id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Channel CRUD (Task 8) — create / edit / delete
+# ---------------------------------------------------------------------------
+
+
+@router.post("/web/channels/create")
+async def action_create_channel(
+    request: Request,
+    name: str = Form(...),
+    tg_chat_id: int = Form(...),
+    username: str = Form(""),
+    is_active: str | None = Form(None),
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Имя канала не может быть пустым")
+    username = (username or "").strip()
+    try:
+        cid = await channels_repo.create_channel(
+            tg_chat_id=tg_chat_id,
+            name=name,
+            username=username or None,
+            is_active=_checkbox(is_active),
+        )
+    except channels_repo.DuplicateChannelError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Канал с tg_chat_id={e.tg_chat_id} уже существует",
+        ) from e
+    log.info(
+        "web: создан канал #%s name=%r tg_chat_id=%s (user=%s)",
+        cid, name, tg_chat_id, _user,
+    )
+    return RedirectResponse(url="/channels", status_code=303)
+
+
+@router.post("/web/channels/{channel_id}/edit")
+async def action_edit_channel(
+    channel_id: int,
+    request: Request,
+    name: str = Form(...),
+    tg_chat_id: int = Form(...),
+    username: str = Form(""),
+    is_active: str | None = Form(None),
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    ch = await channels_repo.get_channel(channel_id)
+    if ch is None:
+        raise HTTPException(
+            status_code=404, detail=f"Канал #{channel_id} не найден"
+        )
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Имя канала не может быть пустым")
+    username = (username or "").strip()
+    try:
+        await channels_repo.update_channel(
+            channel_id,
+            name=name,
+            tg_chat_id=tg_chat_id,
+            username=username or "",
+            is_active=_checkbox(is_active),
+        )
+    except channels_repo.DuplicateChannelError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Канал с tg_chat_id={e.tg_chat_id} уже существует",
+        ) from e
+    log.info(
+        "web: обновлён канал #%s name=%r tg_chat_id=%s (user=%s)",
+        channel_id, name, tg_chat_id, _user,
+    )
+    return _redirect_back(request)
+
+
+@router.post("/web/channels/{channel_id}/delete")
+async def action_delete_channel(
+    channel_id: int,
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    ok = await channels_repo.remove_channel(channel_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404, detail=f"Канал #{channel_id} не найден"
+        )
+    log.info("web: удалён канал #%s (user=%s)", channel_id, _user)
+    # Удаление канала каскадно сносит очереди (FK ON DELETE CASCADE) —
+    # возвращаемся на /channels (referere может быть на удалённой странице канала).
+    return RedirectResponse(url="/channels", status_code=303)

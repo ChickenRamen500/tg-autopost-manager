@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "macros.html" import status_badge, file_type_icon, source_icon %}
+{% from "partials/queue_form.html" import queue_form %}
 
 {% block title %}Очередь «{{ queue.name }}» — TG Media Queue Bot{% endblock %}
 
@@ -46,6 +47,35 @@
                 <div class="fs-4 fw-bold">{{ 'да' if queue.shuffle_enabled else 'нет' }}</div>
             </div>
         </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-pencil"></i> Редактировать очередь</span>
+        <button class="btn btn-sm btn-outline-secondary" type="button"
+                data-bs-toggle="collapse" data-bs-target="#editQueueForm"
+                aria-expanded="false" aria-controls="editQueueForm">
+            <i class="bi bi-chevron-down"></i>
+        </button>
+    </div>
+    <div class="collapse" id="editQueueForm">
+        <div class="card-body">
+            {{ queue_form(form_action='/web/queues/' ~ queue.id ~ '/edit', submit_label='Сохранить', submit_icon='bi-save', q=queue, channels=channels, scope_id='edit') }}
+        </div>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-exclamation-triangle text-danger"></i> Опасная зона</span>
+    </div>
+    <div class="card-body">
+        <form method="post" action="/web/queues/{{ queue.id }}/delete" class="d-inline" data-confirm="Удалить очередь «{{ queue.name }}»? Все её посты перейдут во Входящие.">
+            <button type="submit" class="btn btn-sm btn-outline-danger">
+                <i class="bi bi-trash"></i> Удалить очередь
+            </button>
+        </form>
     </div>
 </div>
 

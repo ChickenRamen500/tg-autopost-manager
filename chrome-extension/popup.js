@@ -49,28 +49,46 @@ async function enqueueCurrentPage() {
   const tab = await getCurrentTab();
   if (!tab || !tab.url) return setStatus("Нет активной вкладки", false);
 
+  // Извлечь медиа из активной вкладки через chrome.scripting.executeScript.
+  // В странице вызываем collectMediaInArticle (экспортируется из site-config.js).
+  // Если в активной вкладке нет ни одного медиа — отправляем только pageUrl
+  // с mediaUrl=null + mode=A: бэкенд использует yt-dlp / scrape.
   let mediaUrl = null;
+  let detectedMode = null;
   try {
-    // inject site-config.js so the page has getConfigForHostname/findBestMedia
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["site-config.js"] });
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
-        if (typeof getConfigForHostname === "undefined" || typeof findBestMedia === "undefined") return null;
+        if (typeof getConfigForHostname === "undefined" || typeof collectMediaInArticle === "undefined") {
+          return null;
+        }
         const cfg = getConfigForHostname(location.hostname);
         if (!cfg) return null;
-        const m = findBestMedia(cfg);
-        return m ? m.url : null;
+        const list = collectMediaInArticle(document.body, cfg) || [];
+        if (list.length === 0) return { url: null, mode: cfg.mode };
+        // Берём первый кандидат с реальным URL (пропускаем blob-видео).
+        const first = list.find((m) => m.url) || list[0];
+        return { url: first.url, mode: cfg.mode };
       },
     });
-    mediaUrl = result?.result || null;
+    if (result && result.result) {
+      mediaUrl = result.result.url;
+      detectedMode = result.result.mode;
+    }
   } catch (e) {
     // scripting may fail on chrome:// pages or if permission denied — continue with null
     mediaUrl = null;
   }
 
   let config = null;
-  try { config = getConfigForHostname(new URL(tab.url).hostname || ""); } catch {}
+  try {
+    config = getConfigForHostname(new URL(tab.url).hostname || "");
+  } catch (e) {}
+
+  // Если mediaUrl null → mode=A (бот scrapes через yt-dlp). Иначе — режим сайта.
+  const finalMode = mediaUrl ? detectedMode || (config ? config.mode : "A") : "A";
+
   const payload = {
     type: "ENQUEUE",
     pageUrl: tab.url,
@@ -79,12 +97,17 @@ async function enqueueCurrentPage() {
     tags: [],
     title: tab.title || "",
     site: (new URL(tab.url).hostname || "").replace(/^www\./, ""),
-    mode: config ? config.mode : "A",
+    mode: finalMode,
   };
   setStatus("Отправка…", true);
   const resp = await chrome.runtime.sendMessage(payload);
   if (resp && resp.ok) {
-    setStatus(resp.message || "OK ✓", true);
+    setStatus(
+      mediaUrl
+        ? (resp.message || "OK ✓")
+        : "Отправлено как ссылка (бот скачает через yt-dlp) ✓",
+      true
+    );
   } else {
     setStatus("Ошибка: " + ((resp && resp.error) || "неизвестно"), false);
   }

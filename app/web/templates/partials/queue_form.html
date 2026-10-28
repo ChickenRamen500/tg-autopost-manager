@@ -1,0 +1,96 @@
+{# Общие поля формы очереди — используются в создании (queues.html) и редактировании (queue_detail.html).
+
+   Параметры макроса:
+     - form_action: URL для form action
+     - submit_label: текст кнопки submit
+     - submit_icon: класс иконки Bootstrap Icons (например "bi-plus-lg")
+     - q: dict с полями очереди (для предзаполнения при редактировании) или None для создания
+     - channels: список каналов для выпадающего списка
+     - scope_id: уникальный суффикс для id полей (на случай двух форм на одной странице)
+#}
+{% macro queue_form(form_action, submit_label='Создать', submit_icon='bi-plus-lg', q=None, channels=None, scope_id='main') %}
+<form method="post" action="{{ form_action }}" class="row g-3 align-items-end">
+    <div class="col-12 col-md-4">
+        <label class="form-label" for="queue-name-{{ scope_id }}">Название</label>
+        <input type="text" class="form-control" id="queue-name-{{ scope_id }}"
+               name="name" required maxlength="200"
+               value="{{ q.name if q else '' }}" />
+    </div>
+    <div class="col-12 col-md-4">
+        <label class="form-label" for="queue-channel-{{ scope_id }}">Канал</label>
+        <select class="form-select" id="queue-channel-{{ scope_id }}"
+                name="channel_id" required>
+            {% if not channels %}
+            <option value="" disabled selected>— нет каналов —</option>
+            {% else %}
+            {% for c in channels %}
+            <option value="{{ c.id }}"
+                {% if q and q.channel_id == c.id %}selected{% endif %}>
+                {{ c.name }} (@{{ c.username or '—' }}){% if not c.is_active %} (выключен){% endif %}
+            </option>
+            {% endfor %}
+            {% endif %}
+        </select>
+        {% if not channels %}
+        <div class="form-text text-danger">Сначала создайте канал на странице «Каналы».</div>
+        {% endif %}
+    </div>
+    <div class="col-6 col-md-2">
+        <label class="form-label" for="queue-interval-{{ scope_id }}">Интервал (мин)</label>
+        <input type="number" class="form-control" id="queue-interval-{{ scope_id }}"
+               name="interval_minutes" min="1" step="1" required
+               value="{{ q.interval_minutes if q else 60 }}" />
+    </div>
+    <div class="col-6 col-md-2 d-grid">
+        <button type="submit" class="btn btn-primary"{% if not channels %} disabled{% endif %}>
+            <i class="bi {{ submit_icon }}"></i>
+            {{ submit_label }}
+        </button>
+    </div>
+
+    <div class="col-12">
+        <div class="row row-cols-2 row-cols-md-3 row-cols-xl-5 g-2">
+            <div class="col">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="qa-is_active-{{ scope_id }}"
+                           name="is_active" value="on"
+                           {% if not q or q.is_active %}checked{% endif %} />
+                    <label class="form-check-label" for="qa-is_active-{{ scope_id }}">Активна</label>
+                </div>
+            </div>
+            <div class="col">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="qa-shuffle-{{ scope_id }}"
+                           name="shuffle_enabled" value="on"
+                           {% if not q or q.shuffle_enabled %}checked{% endif %} />
+                    <label class="form-check-label" for="qa-shuffle-{{ scope_id }}">Shuffle</label>
+                </div>
+            </div>
+            <div class="col">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="qa-group_albums-{{ scope_id }}"
+                           name="group_albums" value="on"
+                           {% if q and q.group_albums %}checked{% endif %} />
+                    <label class="form-check-label" for="qa-group_albums-{{ scope_id }}">Групп. альбомы</label>
+                </div>
+            </div>
+            <div class="col">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="qa-crop_video-{{ scope_id }}"
+                           name="crop_video" value="on"
+                           {% if q and q.crop_video %}checked{% endif %} />
+                    <label class="form-check-label" for="qa-crop_video-{{ scope_id }}">Crop видео</label>
+                </div>
+            </div>
+            <div class="col">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="qa-strip_caption-{{ scope_id }}"
+                           name="strip_caption" value="on"
+                           {% if q and q.strip_caption %}checked{% endif %} />
+                    <label class="form-check-label" for="qa-strip_caption-{{ scope_id }}">Удалить подпись</label>
+                </div>
+            </div>
+        </div>
+    </div>
+</form>
+{% endmacro %}
