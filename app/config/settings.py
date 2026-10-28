@@ -54,6 +54,8 @@ class Settings:
 
     # --- Безопасность (REST API + Chrome-расширение, ТЗ §6, §9) ---
     secret_token: str = field(default_factory=lambda: _get("SECRET_TOKEN"))
+    # Лимит размера файла для POST /api/quick_add_upload (ТЗ §6.1.3, по умолчанию 200 МБ)
+    max_upload_mb: int = field(default_factory=lambda: _get_int("MAX_UPLOAD_MB", 200))
 
     # --- База данных (ТЗ §5) ---
     database_url: str = field(default_factory=lambda: _get("DATABASE_URL", "sqlite:///./data/bot.db"))
