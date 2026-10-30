@@ -79,3 +79,47 @@ async def remove_channel(channel_id: int) -> bool:
     changed = cur.rowcount > 0
     await cur.close()
     return changed
+
+
+async def update_channel(
+    channel_id: int,
+    *,
+    name: str | None = None,
+    tg_chat_id: int | None = None,
+    username: str | None = None,
+    is_active: bool | None = None,
+) -> bool:
+    """Обновляет поля канала (только переданные не-None).
+
+    None означает «не трогать это поле». Для username пустая строка "" → NULL.
+    tg_chat_id должен быть уникален — DuplicateChannelError выбрасывается при конфликте.
+    """
+    db = get_db()
+    sets: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name)
+    if tg_chat_id is not None:
+        sets.append("tg_chat_id = ?")
+        params.append(tg_chat_id)
+    if username is not None:
+        sets.append("username = ?")
+        params.append(username.lstrip("@") if username else None)
+    if is_active is not None:
+        sets.append("is_active = ?")
+        params.append(1 if is_active else 0)
+    if not sets:
+        return False
+    params.append(channel_id)
+    try:
+        cur = await db.execute(
+            f"UPDATE channels SET {', '.join(sets)} WHERE id = ?", params
+        )
+    except aiosqlite.IntegrityError as e:
+        log.warning("Дубликат канала tg_chat_id=%s: %s", tg_chat_id, e)
+        raise DuplicateChannelError(tg_chat_id if tg_chat_id is not None else 0) from e
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed

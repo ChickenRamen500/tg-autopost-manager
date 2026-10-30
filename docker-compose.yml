@@ -69,7 +69,7 @@ services:
       # Прямой доступ к файлам local-bot-api (файлы >20МБ нельзя скачать через облачное getFile)
       - bot-api-data:/app/bot-api-data:ro
     ports:
-      - "127.0.0.1:8000:8000"     # только localhost: веб-интерфейс за reverse-proxy
+      - "8000:8000"     # только localhost: веб-интерфейс за reverse-proxy
     logging:
       driver: json-file
       options:

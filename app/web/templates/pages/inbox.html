@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% from "macros.html" import status_badge, file_type_icon, source_icon %}
+
+{% block title %}Входящие — TG Media Queue Bot{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0"><i class="bi bi-inbox"></i> Входящие</h1>
+    <span class="badge bg-secondary">{{ posts|length }} шт.</span>
+</div>
+
+<p class="text-muted small">
+    Посты без очереди (queue_id = NULL): дедупы, manually маршрутизируемые, или для которых не подошло ни одно правило маршрутизации.
+</p>
+
+{% if posts %}
+<div class="card">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>#</th>
+                        <th>Тип</th>
+                        <th>Источник</th>
+                        <th>Статус</th>
+                        <th>Создан</th>
+                        <th class="text-end">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in posts %}
+                    <tr id="post-{{ p.id }}" style="scroll-margin-top: 1rem;">
+                        <td>{{ p.id }}</td>
+                        <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
+                        <td>
+                            {{ source_icon(p.source_type) }} {{ p.source_type }}
+                            {% if p.source_url %}<a href="{{ p.source_url }}" target="_blank" rel="noopener" class="ms-1 small" title="Открыть источник"><i class="bi bi-box-arrow-up-right"></i></a>{% endif %}
+                        </td>
+                        <td>{{ status_badge(p.status) }}</td>
+                        <td class="small text-muted">{{ p.created_at }}</td>
+                        <td class="text-end">
+                            <div class="d-flex flex-wrap justify-content-end gap-1 align-items-center">
+                                {% if queues %}
+                                <div class="dropdown d-inline-block">
+                                    <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button"
+                                            data-bs-toggle="dropdown" aria-expanded="false"
+                                            data-bs-auto-close="true">
+                                        <i class="bi bi-send"></i> В очередь
+                                    </button>
+                                    {# dropdown-menu без max-height/overflow-y — пусть открывается полностью,
+                                       Popper.js сам развернёт вверх если внизу нет места (Task 9 fix). #}
+                                    <ul class="dropdown-menu dropdown-menu-end">
+                                        {% for q in queues %}
+                                        <li>
+                                            <form method="post" action="/web/posts/{{ p.id }}/assign/{{ q.id }}" class="m-0">
+                                                <button type="submit" class="dropdown-item">
+                                                    {% if not q.is_active %}<i class="bi bi-pause-circle text-muted"></i> {% endif %}
+                                                    {{ q.name }} <span class="text-muted small">#{{ q.id }}</span>
+                                                </button>
+                                            </form>
+                                        </li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                                {% else %}
+                                <span class="text-muted small">нет очередей</span>
+                                {% endif %}
+                                <form method="post" action="/web/posts/{{ p.id }}/delete" class="d-inline" data-confirm="Удалить пост #{{ p.id }}?">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger" title="Удалить">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body p-5 text-center text-muted">
+        <i class="bi bi-inbox fs-1 d-block mb-3"></i>
+        <p class="mb-0">Входящие пусты.</p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+

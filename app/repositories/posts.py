@@ -380,6 +380,22 @@ async def find_by_file_unique_id(file_unique_id: str) -> list[dict[str, Any]]:
     return [_row_to_post(r) for r in rows]
 
 
+async def find_by_source(source_type: str, source_id: str) -> list[dict[str, Any]]:
+    """Поиск постов по точному источнику (ТЗ §2.4.2 — дедуп внешних источников).
+
+    Используется API расширения (quick_add): один и тот же media_url не должен
+    создавать повторные посты/задачи скачивания.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "SELECT * FROM posts WHERE source_type = ? AND source_id = ? ORDER BY created_at DESC LIMIT 5",
+        (source_type, source_id),
+    )
+    rows = await cur.fetchall()
+    await cur.close()
+    return [_row_to_post(r) for r in rows]
+
+
 async def count_by_status(status: str) -> int:
     db = get_db()
     cur = await db.execute("SELECT COUNT(*) AS c FROM posts WHERE status = ?", (status,))

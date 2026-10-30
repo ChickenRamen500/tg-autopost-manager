@@ -130,3 +130,83 @@ async def set_group_albums(queue_id: int, group_albums: bool) -> bool:
     changed = cur.rowcount > 0
     await cur.close()
     return changed
+
+
+async def update_queue(
+    queue_id: int,
+    *,
+    name: str | None = None,
+    channel_id: int | None = None,
+    interval_minutes: int | None = None,
+    is_active: bool | None = None,
+    crop_video: bool | None = None,
+    signature_template: str | None = None,
+    shuffle_enabled: bool | None = None,
+    group_albums: bool | None = None,
+    start_at: str | None = None,
+    end_at: str | None = None,
+    daily_window_start: str | None = None,
+    daily_window_end: str | None = None,
+    end_strategy: str | None = None,
+    strip_caption: bool | None = None,
+) -> bool:
+    """Обновляет поля очереди (только переданные не-None).
+
+    None означает «не трогать это поле» (частичное обновление как PATCH).
+    Для полей, допускающих NULL (signature_template, start_at, ...),
+    передавайте пустую строку "" чтобы сохранить NULL в БД, или None чтобы
+    пропустить. Это позволяет сбросить дату через start_at="".
+    """
+    db = get_db()
+    sets: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name)
+    if channel_id is not None:
+        sets.append("channel_id = ?")
+        params.append(channel_id)
+    if interval_minutes is not None:
+        sets.append("interval_minutes = ?")
+        params.append(interval_minutes)
+    if is_active is not None:
+        sets.append("is_active = ?")
+        params.append(1 if is_active else 0)
+    if crop_video is not None:
+        sets.append("crop_video = ?")
+        params.append(1 if crop_video else 0)
+    if signature_template is not None:
+        sets.append("signature_template = ?")
+        params.append(signature_template or None)
+    if shuffle_enabled is not None:
+        sets.append("shuffle_enabled = ?")
+        params.append(1 if shuffle_enabled else 0)
+    if group_albums is not None:
+        sets.append("group_albums = ?")
+        params.append(1 if group_albums else 0)
+    if start_at is not None:
+        sets.append("start_at = ?")
+        params.append(start_at or None)
+    if end_at is not None:
+        sets.append("end_at = ?")
+        params.append(end_at or None)
+    if daily_window_start is not None:
+        sets.append("daily_window_start = ?")
+        params.append(daily_window_start or None)
+    if daily_window_end is not None:
+        sets.append("daily_window_end = ?")
+        params.append(daily_window_end or None)
+    if end_strategy is not None:
+        sets.append("end_strategy = ?")
+        params.append(end_strategy)
+    if strip_caption is not None:
+        sets.append("strip_caption = ?")
+        params.append(1 if strip_caption else 0)
+    if not sets:
+        return False
+    params.append(queue_id)
+    cur = await db.execute(f"UPDATE queues SET {', '.join(sets)} WHERE id = ?", params)
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
