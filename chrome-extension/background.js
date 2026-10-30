@@ -36,6 +36,10 @@ async function postQuickAdd(settings, payload) {
     site: payload.site || "",
     queue_id: settings.defaultQueueId || null,
     secret_token: settings.secretToken,
+    // media_group_id — для объединения нескольких медиа одного поста в альбом.
+    // Scheduler отправит все посты с одинаковым media_group_id одним сообщением
+    // через send_media_group (если у очереди включён group_albums=True).
+    media_group_id: payload.mediaGroupId || null,
   };
   const resp = await fetch(`${settings.botUrl}/api/quick_add`, {
     method: "POST",
@@ -76,6 +80,8 @@ async function postQuickAddUpload(settings, payload) {
   fd.append("tags", JSON.stringify(payload.tags || []));
   if (settings.defaultQueueId) fd.append("queue_id", String(settings.defaultQueueId));
   fd.append("secret_token", settings.secretToken);
+  // media_group_id — для объединения нескольких медиа одного поста в альбом.
+  if (payload.mediaGroupId) fd.append("media_group_id", payload.mediaGroupId);
 
   const resp = await fetch(`${settings.botUrl}/api/quick_add_upload`, {
     method: "POST",

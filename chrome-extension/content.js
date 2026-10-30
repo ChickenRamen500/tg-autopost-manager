@@ -24,12 +24,16 @@
   if (!config) return;
 
   // --- Дедупликация (storage) ---
-  function dedupeKey(mediaUrl) {
-    const key = mediaUrl || location.href;
+  // Ключ: origin + (mediaUrl или permalink).
+  // Важно для blob-видео (Twitter/Pikabu): mediaUrl=null, но permalink уникален
+  // для каждого поста. Раньше fallback был location.href, а на ленте x.com/home
+  // это значение одинаково для ВСЕХ твитов → все помечались "уже в очереди".
+  function dedupeKey(mediaUrl, permalink) {
+    const key = mediaUrl || permalink || location.href;
     return `sent:${location.origin}|${key}`;
   }
-  async function wasSent(mediaUrl) {
-    const k = dedupeKey(mediaUrl);
+  async function wasSent(mediaUrl, permalink) {
+    const k = dedupeKey(mediaUrl, permalink);
     try {
       const res = await chrome.storage.local.get(k);
       return !!res[k];
@@ -37,10 +41,10 @@
       return false;
     }
   }
-  async function markSent(mediaUrl, postId) {
+  async function markSent(mediaUrl, permalink, postId) {
     try {
       await chrome.storage.local.set({
-        [dedupeKey(mediaUrl)]: { at: Date.now(), post_id: postId },
+        [dedupeKey(mediaUrl, permalink)]: { at: Date.now(), post_id: postId },
       });
     } catch (e) {
       /* storage может быть недоступно в selten случаях */
@@ -67,6 +71,8 @@
 
   // --- Создание кнопки для одного article ---
   function makeArticleButton(articleEl, mediaList) {
+    const permalink = getArticlePermalink(articleEl, config);
+
     const btn = document.createElement("button");
     btn.className = "tgq-btn tgq-article-btn";
     btn.type = "button";
@@ -74,26 +80,32 @@
       mediaList.length > 1 ? `→ В очередь (${mediaList.length})` : "→ В очередь";
     btn.title = "Отправить в очередь TG Media Queue Bot";
 
+    // Сохраняем permalink на кнопке — используется в sendSingle и пикере.
+    btn.dataset.permalink = permalink;
+
     if (mediaList.length === 1) {
       // Single-media → send immediately.
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        sendSingle(mediaList[0], btn, articleEl);
+        sendSingle(mediaList[0], btn, articleEl, permalink);
       });
     } else {
       // Multi-media → open selection picker with checkboxes.
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        openSelectionPicker(mediaList, articleEl, btn);
+        openSelectionPicker(mediaList, articleEl, btn, permalink);
       });
     }
 
     // Асинхронная проверка дедупликации — обновить метку кнопки.
+    // Для каждого медиа используем permalink как fallback ключа (для blob-видео).
     (async () => {
       try {
-        const sent = await Promise.all(mediaList.map((m) => wasSent(m.url)));
+        const sent = await Promise.all(
+          mediaList.map((m) => wasSent(m.url, permalink))
+        );
         const sentCount = sent.filter(Boolean).length;
         if (sentCount === mediaList.length && mediaList.length > 0) {
           btn.textContent = "✓ Все в очереди";
@@ -149,16 +161,17 @@
   }
 
   // --- Отправка одного медиа ---
-  async function sendSingle(media, btn, articleEl) {
+  async function sendSingle(media, btn, articleEl, permalink) {
     if (btn.disabled) return;
     btn.disabled = true;
     btn.textContent = "… Отправка";
 
     const isBlobVideo = !media.url && media.kind === "video";
-    // blob: видео → mediaUrl=null + mode=A (бэкенд использует yt-dlp на pageUrl).
+    // blob: видео → mediaUrl=null + mode=A (бэкенд использует yt-dlp на permalink).
+    // pageUrl = permalink (НЕ location.href!) — иначе бот качает HTML ленты x.com/home.
     const payload = {
       type: "ENQUEUE",
-      pageUrl: location.href,
+      pageUrl: permalink || location.href,
       mediaUrl: media.url,
       referer: config.needsReferer ? location.origin + "/" : null,
       tags: extractTags(config),
@@ -178,7 +191,7 @@
           ? "Дубликат #" + resp.post_id
           : "Добавлено в очередь #" + resp.post_id;
         tgqShowToast(msg, "ok");
-        await markSent(media.url || location.href, resp.post_id);
+        await markSent(media.url, permalink, resp.post_id);
       } else {
         btn.textContent = "✗ Ошибка";
         btn.classList.add("tgq-error");
@@ -194,10 +207,31 @@
   }
 
   // --- Пикер выбора медиа (multi-media post) ---
-  function openSelectionPicker(mediaList, articleEl, sourceBtn) {
+  // permalink нужен для:
+  //   1) pageUrl в payload (а не location.href — иначе бот качает HTML ленты)
+  //   2) генерации media_group_id — чтобы бэкенд объединил выбранные медиа в один альбом
+  //      (scheduler отправит их одним сообщением через send_media_group,
+  //       если у очереди включён group_albums=True).
+  function openSelectionPicker(mediaList, articleEl, sourceBtn, permalink) {
     const existing = document.getElementById(PICKER_ID);
     if (existing) existing.remove();
     if (!document.body) return;
+
+    // media_group_id генерируется из permalink (уникален для поста) + суффикс tgq.
+    // Пример: https://x.com/user/status/123 → "tgq:xcom:123"
+    // Бэкенд сохранит это значение в posts.media_group_id для всех выбранных медиа.
+    let mediaGroupId = null;
+    if (permalink && mediaList.length > 1) {
+      try {
+        const u = new URL(permalink);
+        // Извлекаем последний числовой сегмент пути (id твита/поста).
+        const m = u.pathname.match(/(\d+)(?:\/|$|\?)/g);
+        const idPart = m && m.length ? m[m.length - 1].replace(/[\/\?]/g, "") : u.pathname.slice(-20);
+        mediaGroupId = `tgq:${u.hostname.replace(/^www\./, "")}:${idPart}`;
+      } catch {
+        mediaGroupId = "tgq:" + Date.now().toString(36);
+      }
+    }
 
     const overlay = document.createElement("div");
     overlay.id = PICKER_ID;
@@ -364,19 +398,24 @@
         sendBtn.textContent = `Отправка ${i + 1}/${selected.length}…`;
         const payload = {
           type: "ENQUEUE",
-          pageUrl: location.href,
+          // pageUrl = permalink (НЕ location.href) — иначе бот качает HTML ленты.
+          pageUrl: permalink || location.href,
           mediaUrl: m.url,
           referer: config.needsReferer ? location.origin + "/" : null,
           tags: extractTags(config),
           title: document.title,
           site: location.hostname.replace(/^www\./, ""),
           mode: isBlob ? "A" : config.mode,
+          // media_group_id — одинаковый для всех выбранных медиа этого поста.
+          // Бэкенд сохранит его; если у очереди group_albums=True, scheduler
+          // отправит все посты с этим ID одним сообщением (send_media_group).
+          mediaGroupId: selected.length > 1 ? mediaGroupId : null,
         };
         try {
           const resp = await chrome.runtime.sendMessage(payload);
           if (resp && resp.ok) {
             sent++;
-            await markSent(m.url || location.href, resp.post_id);
+            await markSent(m.url, permalink, resp.post_id);
           } else {
             failed++;
             console.warn("[tgq] enqueue failed:", resp?.error);

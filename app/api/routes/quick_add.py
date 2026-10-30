@@ -64,6 +64,10 @@ class QuickAddRequest(BaseModel):
     site: str | None = Field(None, description="Подсказка источника: gelbooru/danbooru/pixiv/...")
     queue_id: int | None = Field(None, description="Явная очередь (иначе — маршрутизация/Входящие)")
     secret_token: str | None = Field(None, description="SECRET_TOKEN (или заголовок X-Secret-Token)")
+    # media_group_id — для постов с 2+ медиа (x.com: твит с 4 картинками).
+    # Все медиа одного поста получают одинаковый ID; если у очереди group_albums=True,
+    # scheduler отправит их одним сообщением через send_media_group (ТЗ §2.1.1).
+    media_group_id: str | None = Field(None, description="ID альбома (для send_media_group)")
 
 
 def _check_auth(provided_token: str | None, request: Request) -> None:
@@ -160,6 +164,7 @@ async def quick_add(body: QuickAddRequest, request: Request) -> dict[str, Any]:
         original_caption=body.title,
         tags=body.tags,
         status="new",
+        media_group_id=body.media_group_id,
     )
     await tq_repo.enqueue(
         post_id,
@@ -185,6 +190,7 @@ async def quick_add_upload(
     tags: str = Form("[]"),
     queue_id: str | None = Form(None),
     secret_token: str | None = Form(None),
+    media_group_id: str | None = Form(None),
 ) -> dict[str, Any]:
     """Режим B (ТЗ §6.1.3, §9.5): расширение скачало файл браузером (cookies x.com)
     и прислало его через multipart/form-data.
@@ -272,6 +278,7 @@ async def quick_add_upload(
         original_caption=title or None,
         tags=tag_list,
         status="pending",
+        media_group_id=media_group_id,
     )
 
     # pHash для изображений: визуальный дедуп (ТЗ §2.4.3)

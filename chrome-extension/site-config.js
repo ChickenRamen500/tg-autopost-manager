@@ -36,6 +36,8 @@ const SITE_CONFIGS = {
     tagsSelector: "#tag-list li a[href*='tags='], .tag-list-section a",
     buttonAnchorSelector: ".image-container-notes, #image-container, #note-container",
     buttonPosition: "after",
+    // Permalink: на странице поста — это canonical или location.href.
+    permalinkSelector: "link[rel='canonical']",
   },
   "danbooru.donmai.us": {
     mode: "A",
@@ -48,6 +50,7 @@ const SITE_CONFIGS = {
     tagsSelector: ".tag-list a.search-tag, #tags-sidebar a.search-tag",
     buttonAnchorSelector: "#post-information, .image-container",
     buttonPosition: "before",
+    permalinkSelector: "link[rel='canonical']",
   },
   "www.pixiv.net": {
     mode: "A",
@@ -65,6 +68,7 @@ const SITE_CONFIGS = {
     waitForLoad: true,
     buttonAnchorSelector: "div[role='toolbar'], section [role='toolbar'], [role='group']",
     buttonPosition: "append",
+    permalinkSelector: "link[rel='canonical']",
   },
   "pikabu.ru": {
     mode: "A",
@@ -78,6 +82,8 @@ const SITE_CONFIGS = {
     tagsSelector: "a[href*='/tag/'], .story_tags a",
     buttonAnchorSelector: ".story__footer, .post__footer, .actions, .story-tools",
     buttonPosition: "append",
+    // На ленте — ссылка на пост; на странице поста — canonical.
+    permalinkSelector: "a.story__title-link, a[href*='/story/'], link[rel='canonical']",
   },
   "x.com": {
     mode: "B", // браузерное скачивание (cookies пользователя)
@@ -93,6 +99,8 @@ const SITE_CONFIGS = {
     // Action bar твита — div[role='group'] (reply/retweet/like/share).
     buttonAnchorSelector: "div[role='group'], [role='group']",
     buttonPosition: "append",
+    // Permalink твита: a[href*='/status/'] — ссылка на время/дату или "Show this thread".
+    permalinkSelector: "a[href*='/status/'], a[href*='/statuses/']",
   },
   "twitter.com": {
     mode: "B",
@@ -105,6 +113,7 @@ const SITE_CONFIGS = {
     tagsSelector: "",
     buttonAnchorSelector: "div[role='group'], [role='group']",
     buttonPosition: "append",
+    permalinkSelector: "a[href*='/status/'], a[href*='/statuses/']",
   },
 };
 
@@ -391,6 +400,59 @@ function extractPixivUrls(articleEl, config) {
   return collected.length ? collected : null;
 }
 
+// --- Извлечение permalink'а конкретного поста из article ---
+// Важно для x.com/twitter/pikabu: на ленте location.href = ".../home" или ".../feed",
+// но каждый пост имеет свой permalink (https://x.com/{user}/status/{id}).
+// Бэкенду нужен именно permalink как pageUrl — иначе он пытается скачать HTML ленты.
+// Также permalink используется как ключ дедупликации (для blob-видео, где mediaUrl=null).
+function getArticlePermalink(articleEl, config) {
+  if (!articleEl || !config) return location.href;
+
+  // 1) Способ 1: config.permalinkSelector — CSS-селектор(ы) внутри article.
+  if (config.permalinkSelector) {
+    for (const sel of config.permalinkSelector.split(",").map((s) => s.trim())) {
+      if (!sel) continue;
+      try {
+        const el = articleEl.querySelector(sel);
+        if (!el) continue;
+        // <link rel="canonical" href="..."> — читаем href.
+        // <a href="..."> — читаем href.
+        const href = el.getAttribute("href");
+        if (!href) continue;
+        // Относительные ссылки (/user/status/123) → абсолютные.
+        const abs = new URL(href, location.origin).href;
+        // Фильтр: только http(s), не якоря (#...) и не просто location.href.
+        if (/^https?:/.test(abs) && !abs.endsWith("#")) {
+          // Для Twitter: отрезаем query-параметры (?s=46, ?ref_src=...),
+          // оставляем чистый permalink /user/status/id
+          if (abs.includes("/status/") || abs.includes("/statuses/")) {
+            try {
+              const u = new URL(abs);
+              u.search = "";
+              return u.href;
+            } catch {}
+          }
+          return abs;
+        }
+      } catch (e) {
+        /* invalid selector — skip */
+      }
+    }
+  }
+
+  // 2) Способ 2: canonical link в <head> (для детальных страниц поста).
+  try {
+    const canonical = document.querySelector("link[rel='canonical']");
+    if (canonical) {
+      const href = canonical.getAttribute("href");
+      if (href) return new URL(href, location.origin).href;
+    }
+  } catch {}
+
+  // 3) Fallback: location.href (последний шанс — на детальной странице поста это ОК).
+  return location.href;
+}
+
 // --- Экспорт для content.js и popup.js (через chrome.scripting.executeScript) ---
 if (typeof globalThis !== "undefined") {
   globalThis.SITE_CONFIGS = SITE_CONFIGS;
@@ -401,4 +463,5 @@ if (typeof globalThis !== "undefined") {
   globalThis.extractTags = extractTags;
   globalThis.extractPixivUrls = extractPixivUrls;
   globalThis.mediaKind = mediaKind;
+  globalThis.getArticlePermalink = getArticlePermalink;
 }
