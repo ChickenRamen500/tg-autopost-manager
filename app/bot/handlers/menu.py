@@ -767,13 +767,13 @@ async def _render_queue_settings(message_or_call: Message | CallbackQuery, state
         "delete": "4) удалить",
     }
     text = (
-        f"📋 <b>Настройки очереди «{data['name']}»</b>\n\n"
+        f"📋 <b>Настройки очереди «{html.escape(data['name'])}»</b>\n\n"
         f"Что делать с постами, когда время закончилось:\n"
         f"Стратегия: {strategy_labels.get(strategy, strategy)}\n\n"
         f"Группировать альбомы: {'✅ да' if group_albums else '❌ нет'}\n"
         f"Удалять подписи: {'✅ да' if strip_caption else '❌ нет'}\n"
         f"Перемешать: {'✅ да' if shuffle else '❌ нет'}\n"
-        f"Подпись: {sig[:30] + '...' if sig else '— нет'}\n"
+        f"Подпись: {html.escape(sig[:50]) + '...' if sig else '— нет'}\n"
     )
     markup = kb.queue_settings_menu(
         strategy=strategy,
@@ -843,8 +843,12 @@ async def queue_settings_toggle(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AddStates.add_queue_signature, F.text)
 async def add_queue_signature(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if text == "-":
+    # message.html_text — конвертирует встроенное форматирование Telegram
+    # (жирный Ctrl+B, курсив Ctrl+I, ссылки Ctrl+K, и т.д.) в HTML автоматически.
+    # Пользователь НЕ пишет HTML вручную — использует форматирование клиента Telegram.
+    # message.text — plain text без форматирования (entities потеряны).
+    text = (message.html_text or message.text or "").strip()
+    if not text or text == "-":
         await state.update_data(signature_template=None)
     else:
         # P2-24: лимит 800 символов (оставляем запас для caption, Telegram limit 1024)
