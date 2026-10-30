@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config.settings import settings
 from app.repositories import (
@@ -41,6 +42,49 @@ from app.repositories import (
 )
 
 log = logging.getLogger("worker")
+
+
+# ---------------------------------------------------------------------------
+# Хелперы для определения типа URL (x.com tweet vs прямая ссылка на медиа)
+# ---------------------------------------------------------------------------
+
+# Расширения, которые указывают на прямой медиа-файл (не HTML страницу).
+_MEDIA_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".gifv",
+               ".mp4", ".webm", ".mov", ".avi", ".mkv", ".m4v")
+
+
+def _is_xcom_url(url: str) -> bool:
+    """True если URL ведёт на x.com или twitter.com (tweet page или медиа CDN)."""
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    return host in ("x.com", "twitter.com") or host.endswith(".x.com") or host.endswith(".twitter.com")
+
+
+def _is_direct_media_url(url: str) -> bool:
+    """True если URL указывает на прямой медиа-файл (по расширению или CDN-хосту).
+
+    Прямые медиа-URL:
+      - pbs.twimg.com/media/... (Twitter image CDN)
+      - video.twimg.com/... (Twitter video CDN)
+      - Любой URL с медиа-расширением (.jpg, .mp4, ...)
+    НЕ прямые (нужен yt-dlp):
+      - x.com/user/status/123 (tweet page)
+      - twitter.com/user/status/123
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    # Twitter CDN хосты — всегда прямые медиа-ссылки
+    if host in ("pbs.twimg.com", "video.twimg.com", "ton.twimg.com"):
+        return True
+    # Проверяем расширение в path
+    path = parsed.path.lower()
+    return any(path.endswith(ext) or (ext in path) for ext in _MEDIA_EXTS)
 
 
 class Worker:
@@ -222,8 +266,13 @@ class Worker:
         Стратегия (ТЗ §2.1.1 п.4, §4.2.2):
           1. Пост уже имеет tg_file_id (Telegram-источник) → скачивать не нужно,
              сразу pending (отправка пойдёт по file_id).
-          2. Пост имеет source_url (внешний источник) → download_media().
-          3. Нет ни того, ни другого → permanent error.
+          2. Пост имеет file_path (mode B расширения) → уже на диске, → pending.
+          3. Пост имеет source_url — внешний источник → download_media().
+             ОСОБЫЙ СЛУЧАЙ: x.com/twitter tweet URL (не прямая ссылка на медиа) —
+             прямое HTTP GET вернёт HTML страницу. В этом случае используем
+             yt-dlp (через XcomParser) для извлечения прямой ссылки на медиа,
+             затем скачиваем её.
+          4. Нет ни того, ни другого → permanent error.
 
         Жизненный цикл: new → downloading → pending (success) | failed (error).
         """
@@ -240,8 +289,8 @@ class Worker:
             await posts_repo.update_status(post_id, "pending")
             return
 
-        # Если у поста уже есть file_path (повторная обработка / ручная загрузка) —
-        # считаем готовым к отправке.
+        # 2. Если у поста уже есть file_path (mode B расширения загрузило файл
+        # браузером и прислало через quick_add_upload) — считаем готовым к отправке.
         if post.get("file_path"):
             log.info("Worker: пост #%s уже имеет file_path=%s — → pending", post_id, post["file_path"])
             await posts_repo.update_status(post_id, "pending")
@@ -253,7 +302,31 @@ class Worker:
                 f"Пост #{post_id}: нет tg_file_id, file_path и source_url — скачать невозможно"
             )
 
-        # 2. Скачивание внешнего файла
+        # 3а. Особый случай: x.com/twitter tweet URL — НЕ прямая ссылка на медиа.
+        # Прямое HTTP GET вернёт HTML страницу твита. Используем yt-dlp для извлечения
+        # прямой ссылки на медиа, затем скачиваем её обычным download_media().
+        source_type = post.get("source_type") or payload.get("site") or ""
+        is_xcom = source_type in ("xcom", "x.com") or _is_xcom_url(url)
+        is_direct_media = _is_direct_media_url(url)
+
+        if is_xcom and not is_direct_media:
+            log.info("Worker: пост #%s — x.com tweet URL, извлекаем медиа через yt-dlp: %s", post_id, url)
+            await posts_repo.update_status(post_id, "downloading")
+            try:
+                media_url = await self._extract_xcom_media_url(url, post_id)
+            except _PermanentTaskError:
+                raise
+            except Exception as e:
+                raise _RetryableTaskError(f"yt-dlp extract failed для {url} (post #{post_id}): {e}") from e
+
+            if not media_url:
+                raise _PermanentTaskError(
+                    f"Пост #{post_id}: yt-dlp не смог извлечь медиа из твита {url}"
+                )
+            log.info("Worker: пост #%s — yt-dlp извлёк медиа: %s", post_id, media_url)
+            url = media_url  # скачиваем прямую ссылку
+
+        # 3б. Скачивание внешнего файла
         await posts_repo.update_status(post_id, "downloading")
         try:
             from app.services.media.downloader import (
@@ -323,6 +396,28 @@ class Worker:
                 await archive_post(post_with_file, 0, [result["file_type"]])
         except Exception as e:  # noqa: BLE001 — архивация не критична
             log.warning("Worker: архивация поста #%s не удалась: %s", post_id, e)
+
+    async def _extract_xcom_media_url(self, tweet_url: str, post_id: int) -> str | None:
+        """Извлекает прямую ссылку на медиа из твита через yt-dlp (XcomParser).
+
+        Вызывается когда worker получает URL вида https://x.com/user/status/123 —
+        это tweet page (HTML), а не прямая ссылка на медиа. yt-dlp извлекает
+        прямую ссылку на изображение/видео из твита.
+
+        Для твитов с 2+ изображениями yt-dlp возвращает только первое (album).
+        В будущем можно расширить до multi-media extraction.
+
+        Возвращает прямой URL медиа или None если не удалось.
+        """
+        from app.services.parsers.xcom import get_xcom_parser
+
+        parser = get_xcom_parser()
+        external_post = await parser.extract(tweet_url)
+        if external_post is None:
+            log.warning("Worker: yt-dlp не извлёк медиа из %s (post #%s)", tweet_url, post_id)
+            return None
+        # ExternalPost.source_url — прямая ссылка на файл (pbs.twimg.com/... или video.twimg.com/...)
+        return external_post.source_url
 
     # ------------------------------------------------------------------
     # Stale-cleanup цикл

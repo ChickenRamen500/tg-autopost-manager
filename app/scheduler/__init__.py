@@ -181,8 +181,19 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
 
     Все посты должны иметь одинаковый media_group_id и быть в одной очереди.
     Caption берётся из первого поста (Telegram показывает подпись только для первого).
+
+    Поддерживает два источника медиа:
+      1. tg_file_id — пост из Telegram (уже загружен, отправляем по file_id).
+      2. file_path — пост из расширения/парсера (локальный файл на диске,
+         отправляем через FSInputFile/attach://). Это работает с Local Bot API.
     """
-    from aiogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo
+    from aiogram.types import (
+        FSInputFile,
+        InputMediaAudio,
+        InputMediaDocument,
+        InputMediaPhoto,
+        InputMediaVideo,
+    )
 
     from app.bot.runtime import get_bot
 
@@ -195,17 +206,26 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
         caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
         ft = p["file_type"]
         fid = p.get("tg_file_id")
-        if not fid:
-            log.warning("Пост #%s альбома без tg_file_id — пропускаем групповую отправку", p["id"])
-            raise RuntimeError(f"Пост #{p['id']}: альбом требует tg_file_id для всех файлов")
-        if ft == "photo":
-            media.append(InputMediaPhoto(media=fid, caption=caption))
-        elif ft == "video":
-            media.append(InputMediaVideo(media=fid, caption=caption))
-        elif ft == "audio":
-            media.append(InputMediaAudio(media=fid, caption=caption))
+        file_path = p.get("file_path")
+
+        # Определяем источник медиа: tg_file_id (приоритет) или file_path (локальный файл)
+        if fid:
+            media_obj = fid
+        elif file_path:
+            media_obj = FSInputFile(file_path)
+            log.info("Пост #%s альбома: отправка локального файла %s", p["id"], file_path)
         else:
-            media.append(InputMediaDocument(media=fid, caption=caption))
+            log.warning("Пост #%s альбома без tg_file_id и file_path — пропускаем", p["id"])
+            raise RuntimeError(f"Пост #{p['id']}: альбом требует tg_file_id или file_path для всех файлов")
+
+        if ft == "photo":
+            media.append(InputMediaPhoto(media=media_obj, caption=caption))
+        elif ft == "video":
+            media.append(InputMediaVideo(media=media_obj, caption=caption))
+        elif ft == "audio":
+            media.append(InputMediaAudio(media=media_obj, caption=caption))
+        else:
+            media.append(InputMediaDocument(media=media_obj, caption=caption))
 
     if len(media) == 1:
         await _send_one_post(posts[0], channel, queue)

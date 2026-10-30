@@ -214,22 +214,42 @@
   min-width: 0;
 }
 
-/* Кнопка «Отправить выбранные (N)» */
-#tgq-picker .tgq-send-selected {
-  all: initial;
-  display: block;
+/* Контейнер с двумя кнопками отправки: «По отдельности» + «Как альбом» */
+#tgq-picker .tgq-send-row {
+  display: flex;
+  gap: 10px;
   margin: 16px auto 0;
-  padding: 12px 24px;
-  background: #2AABEE;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+#tgq-picker .tgq-send-btn {
+  all: initial;
+  display: inline-block;
+  padding: 12px 20px;
   color: #fff;
-  font: 600 14px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  font: 600 13px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   border-radius: 8px;
   cursor: pointer;
   text-align: center;
   box-sizing: border-box;
+  flex: 1 1 200px;
+  max-width: 260px;
 }
-#tgq-picker .tgq-send-selected[disabled] {
+
+/* «По отдельности» — синяя (основной цвет Telegram) */
+#tgq-picker .tgq-send-separate {
+  background: #2AABEE;
+}
+#tgq-picker .tgq-send-separate:hover:not([disabled]) { background: #1d9aec; }
+
+/* «Как альбом» — зелёная (визуально отличается — другое действие) */
+#tgq-picker .tgq-send-album {
+  background: #2e7d32;
+}
+#tgq-picker .tgq-send-album:hover:not([disabled]) { background: #1b5e20; }
+
+#tgq-picker .tgq-send-btn[disabled] {
   background: #7a8691;
   cursor: default;
 }
-#tgq-picker .tgq-send-selected:hover:not([disabled]) { background: #1d9aec; }

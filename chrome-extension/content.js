@@ -353,16 +353,33 @@
     }
     overlay.appendChild(grid);
 
-    // Кнопка отправки.
-    const sendBtn = document.createElement("button");
-    sendBtn.type = "button";
-    sendBtn.className = "tgq-send-selected";
-    overlay.appendChild(sendBtn);
+    // Контейнер с двумя кнопками отправки:
+    //   «Отправить по отдельности» — каждое медиа как отдельный пост (без media_group_id).
+    //   «Отправить как альбом» — все медиа с одним media_group_id; scheduler
+    //     отправит их одним сообщением через send_media_group (если у очереди
+    //     включён group_albums=True).
+    const sendBtnRow = document.createElement("div");
+    sendBtnRow.className = "tgq-send-row";
+    overlay.appendChild(sendBtnRow);
+
+    const sendSeparateBtn = document.createElement("button");
+    sendSeparateBtn.type = "button";
+    sendSeparateBtn.className = "tgq-send-btn tgq-send-separate";
+    sendBtnRow.appendChild(sendSeparateBtn);
+
+    const sendAlbumBtn = document.createElement("button");
+    sendAlbumBtn.type = "button";
+    sendAlbumBtn.className = "tgq-send-btn tgq-send-album";
+    sendBtnRow.appendChild(sendAlbumBtn);
 
     function updateSendBtn() {
       const n = items.filter((i) => i.cb.checked).length;
-      sendBtn.textContent = n > 0 ? `Отправить выбранные (${n})` : "Нет выбранных";
-      sendBtn.disabled = n === 0;
+      const label = n > 0 ? String(n) : "0";
+      sendSeparateBtn.textContent = `📤 По отдельности (${label})`;
+      sendAlbumBtn.textContent = `🖼 Как альбом (${label})`;
+      const disabled = n === 0;
+      sendSeparateBtn.disabled = disabled;
+      sendAlbumBtn.disabled = disabled;
     }
     updateSendBtn();
 
@@ -381,21 +398,27 @@
       updateSendBtn();
     });
 
-    sendBtn.addEventListener("click", async (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
+    // Общая функция отправки выбранных медиа.
+    // useAlbum=true → передаём mediaGroupId (альбом); false → без (отдельные посты).
+    async function sendSelected(useAlbum) {
       const selected = items.filter((i) => i.cb.checked).map((i) => i.media);
       if (!selected.length) return;
-      sendBtn.disabled = true;
+      sendSeparateBtn.disabled = true;
+      sendAlbumBtn.disabled = true;
       let sent = 0;
       let failed = 0;
       let wasBlobVideo = false;
+
+      // media_group_id только если выбран альбом И выбрано 2+ медиа.
+      const useMgid = useAlbum && selected.length > 1 ? mediaGroupId : null;
 
       for (let i = 0; i < selected.length; i++) {
         const m = selected[i];
         const isBlob = !m.url && m.kind === "video";
         if (isBlob) wasBlobVideo = true;
-        sendBtn.textContent = `Отправка ${i + 1}/${selected.length}…`;
+        // Обновляем текст на активной кнопке.
+        const activeBtn = useAlbum ? sendAlbumBtn : sendSeparateBtn;
+        activeBtn.textContent = `Отправка ${i + 1}/${selected.length}…`;
         const payload = {
           type: "ENQUEUE",
           // pageUrl = permalink (НЕ location.href) — иначе бот качает HTML ленты.
@@ -409,7 +432,7 @@
           // media_group_id — одинаковый для всех выбранных медиа этого поста.
           // Бэкенд сохранит его; если у очереди group_albums=True, scheduler
           // отправит все посты с этим ID одним сообщением (send_media_group).
-          mediaGroupId: selected.length > 1 ? mediaGroupId : null,
+          mediaGroupId: useMgid,
         };
         try {
           const resp = await chrome.runtime.sendMessage(payload);
@@ -427,13 +450,14 @@
       }
       overlay.remove();
       if (sent > 0) {
+        const albumLabel = useAlbum && selected.length > 1 ? " как альбом" : "";
         if (wasBlobVideo && failed === 0) {
           tgqShowToast(
-            `Видео отправлено как ссылка (бот скачает через yt-dlp). Успешно: ${sent}`,
+            `Отправлено${albumLabel} ${sent} медиа (видео — через yt-dlp)`,
             "ok"
           );
         } else {
-          const msg = `Отправлено ${sent} медиа` + (failed > 0 ? `, ошибок: ${failed}` : "");
+          const msg = `Отправлено${albumLabel} ${sent} медиа` + (failed > 0 ? `, ошибок: ${failed}` : "");
           tgqShowToast(msg, failed > 0 ? "err" : "ok");
         }
         if (sourceBtn) {
@@ -449,6 +473,17 @@
       } else {
         tgqShowToast("Не удалось отправить ни одного медиа", "err");
       }
+    }
+
+    sendSeparateBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      sendSelected(false);
+    });
+    sendAlbumBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      sendSelected(true);
     });
 
     // Закрытие по клику на backdrop.

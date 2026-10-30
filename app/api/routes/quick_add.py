@@ -94,13 +94,26 @@ def _guess_file_type(url: str) -> str:
 
 
 def _normalize_site(site: str | None, page_url: str) -> str:
-    """source_type поста: подсказка сайта или hostname (gelbooru.com → gelbooru)."""
+    """source_type поста: нормализованный идентификатор источника.
+
+    ВАЖНО: всегда возвращает 'xcom' (без точки) для x.com/twitter.com —
+    независимо от того, передано ли site='x.com' явно или выведено из URL.
+    Иначе mode A (quick_add) даёт source_type='x.com', а mode B (quick_add_upload)
+    даёт source_type='xcom' — и правила маршрутизации не матчатся между ними.
+    """
     if site:
-        return site.strip().lower()
+        s = site.strip().lower()
+        # Нормализация: 'x.com' → 'xcom', 'twitter.com' → 'xcom', 'twitter' → 'xcom'
+        if s in ("x.com", "twitter.com", "twitter", "xcom"):
+            return "xcom"
+        return s
     host = (urlparse(page_url).hostname or "").lower()
-    for key in ("gelbooru", "danbooru", "pixiv", "pikabu", "x.com", "twitter"):
+    # Сначала проверяем x.com/twitter.com (полные хосты)
+    if "x.com" in host or "twitter.com" in host:
+        return "xcom"
+    for key in ("gelbooru", "danbooru", "pixiv", "pikabu"):
         if key in host:
-            return key.replace(".com", "") if key != "x.com" else "xcom"
+            return key
     return "web"
 
 
