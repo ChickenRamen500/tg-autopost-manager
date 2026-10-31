@@ -206,6 +206,28 @@ async def cb_inbox(call: CallbackQuery) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data == "menu:sent")
+async def cb_sent(call: CallbackQuery) -> None:
+    """Архив отправленных постов (status='sent').
+
+    Показывает последние 20 отправленных постов из всех очередей.
+    Sent посты из удалённых очередей удаляются в remove_queue(), поэтому
+    здесь только посты из активных очередей.
+    """
+    posts = await posts_repo.list_sent(limit=20)
+    if not posts:
+        text = "✅ Архив пуст — отправленных постов пока нет"
+    else:
+        # Краткая сводка: покажем последние 10 постов списком
+        lines = [f"✅ <b>Архив</b> — отправленных постов: {len(posts)}\n"]
+        for p in posts[:10]:
+            sent_at = p.get("sent_at") or p.get("created_at") or ""
+            lines.append(f"#{p['id']} {p['file_type']} {p['source_type']} — {sent_at}")
+        text = "\n".join(lines)
+    await safe_edit_text(call.message, text, reply_markup=kb.back_button())
+    await call.answer()
+
+
 # ===========================================================================
 # Карточка поста + действия
 # ===========================================================================

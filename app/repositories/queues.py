@@ -99,7 +99,32 @@ async def set_active(queue_id: int, is_active: bool) -> bool:
 
 
 async def remove_queue(queue_id: int) -> bool:
+    """Удаляет очередь.
+
+    Важно: FK posts.queue_id ON DELETE SET NULL переводит ВСЕ посты (включая
+    sent) во Входящие (queue_id=NULL). Это засоряет Inbox отправленными постами.
+
+    Поэтому перед удалением очереди явно удаляем sent посты (они уже отправлены,
+    не подлежат модерации). Остальные (pending/new/failed/duplicate) остаются —
+    их ON DELETE SET NULL переведёт во Входящие, где модератор решит что с ними
+    делать (переназначить в другую очередь или удалить).
+    """
     db = get_db()
+    # 1. Удаляем sent посты этой очереди (история отправленных не нужна в Inbox).
+    cur_sent = await db.execute(
+        "DELETE FROM posts WHERE queue_id = ? AND status = 'sent'",
+        (queue_id,),
+    )
+    sent_deleted = cur_sent.rowcount
+    await cur_sent.close()
+    if sent_deleted > 0:
+        import logging
+        logging.getLogger("repositories.queues").info(
+            "remove_queue #%s: удалено %d sent постов (не засоряют Входящие)",
+            queue_id, sent_deleted,
+        )
+    # 2. Удаляем саму очередь — ON DELETE SET NULL переведёт оставшиеся посты
+    # (pending/new/failed/duplicate) в queue_id=NULL (Входящие).
     cur = await db.execute("DELETE FROM queues WHERE id = ?", (queue_id,))
     await db.commit()
     changed = cur.rowcount > 0

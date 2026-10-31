@@ -181,6 +181,27 @@ async def page_inbox(request: Request, _user: str = Depends(verify_web_user)) ->
     return templates.TemplateResponse(request, "pages/inbox.html", ctx)
 
 
+@router.get("/sent")
+async def page_sent(request: Request, _user: str = Depends(verify_web_user)) -> Any:
+    """Архив отправленных постов (status='sent').
+
+    Сюда попадают посты из активных очередей после успешной отправки в канал.
+    При удалении очереди sent посты удаляются (remove_queue), а не засоряют Inbox.
+    """
+    sent_posts = await posts_repo.list_sent(limit=200)
+    queues = await queues_repo.list_queues(active_only=False)
+    queues_by_id = {q["id"]: q for q in queues}
+    for p in sent_posts:
+        p["queue_obj"] = queues_by_id.get(p["queue_id"]) if p["queue_id"] else None
+    ctx = {
+        "request": request,
+        "active_page": "sent",
+        "posts": sent_posts,
+        "total": len(sent_posts),
+    }
+    return templates.TemplateResponse(request, "pages/sent.html", ctx)
+
+
 @router.get("/posts")
 async def page_posts(
     request: Request,

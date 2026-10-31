@@ -30,6 +30,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📥 Входящие", callback_data="menu:inbox")
     kb.button(text="📋 Очереди", callback_data="menu:queues")
+    kb.button(text="✅ Архив", callback_data="menu:sent")
     kb.button(text="📊 Статистика", callback_data="menu:stats")
     if is_admin:
         kb.button(text="📢 Каналы", callback_data="menu:channels")
@@ -38,7 +39,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         kb.button(text="➕ Добавить", callback_data="menu:add")
         kb.button(text="🖼 Gelbooru", callback_data="gb:menu")
         kb.button(text="⚙️ Настройки", callback_data="menu:settings")
-    kb.adjust(2, 1, 2, 2, 2, 1)
+    kb.adjust(2, 1, 1, 2, 2, 2, 1)
     return kb.as_markup()
 
 

@@ -233,12 +233,43 @@ async def list_queue_posts(queue_id: int, status: str | None = None, limit: int 
 
 
 async def list_inbox(limit: int = 100) -> list[dict[str, Any]]:
-    """«Входящие» — посты без очереди (queue_id IS NULL), ручная сортировка (ТЗ §2.2.2)."""
+    """«Входящие» — посты без очереди (queue_id IS NULL), ручная сортировка (ТЗ §2.2.2).
+
+    ВАЖНО: excludes sent posts — они уже отправлены и не требуют модерации.
+    Sent посты из удалённых очередей удаляются в remove_queue(), но если
+    какой-то sent пост остался без очереди (edge case), он сюда не попадёт —
+    используйте list_sent() для просмотра отправленных.
+    """
     db = get_db()
     cur = await db.execute(
-        "SELECT * FROM posts WHERE queue_id IS NULL ORDER BY created_at DESC LIMIT ?",
+        "SELECT * FROM posts WHERE queue_id IS NULL AND status != 'sent' "
+        "ORDER BY created_at DESC LIMIT ?",
         (limit,),
     )
+    rows = await cur.fetchall()
+    await cur.close()
+    return [_row_to_post(r) for r in rows]
+
+
+async def list_sent(limit: int = 200, queue_id: int | None = None) -> list[dict[str, Any]]:
+    """Список отправленных постов (status='sent') — для страницы «Архив/Sent».
+
+    Если queue_id задан — фильтрует по очереди; иначе все sent посты.
+    Сортировка: sent_at DESC (сначала самые свежие отправленные).
+    """
+    db = get_db()
+    if queue_id is not None:
+        cur = await db.execute(
+            "SELECT * FROM posts WHERE status = 'sent' AND queue_id = ? "
+            "ORDER BY sent_at DESC, created_at DESC LIMIT ?",
+            (queue_id, limit),
+        )
+    else:
+        cur = await db.execute(
+            "SELECT * FROM posts WHERE status = 'sent' "
+            "ORDER BY sent_at DESC, created_at DESC LIMIT ?",
+            (limit,),
+        )
     rows = await cur.fetchall()
     await cur.close()
     return [_row_to_post(r) for r in rows]
