@@ -308,6 +308,20 @@ async def quick_add_upload(
                 post_id, [d["post_id"] for d in dupes[:5]],
             )
 
+    # Архивация в служебный канал (ТЗ §2.4.5, блок D).
+    # quick_add_upload НЕ создаёт task_queue задачу (файл уже на диске, статус pending),
+    # поэтому worker никогда не видит эти посты и не вызывает archive_post.
+    # Архивируем напрямую здесь — иначе фото/GIF из расширения не попадают в архив
+    # (только видео через quick_add → worker download path → archive).
+    try:
+        from app.services.archive import archive_post
+
+        post_for_archive = await posts_repo.get_post(post_id)
+        if post_for_archive and post_for_archive.get("file_path"):
+            await archive_post(post_for_archive, 0, [guessed_type])
+    except Exception as e:  # noqa: BLE001 — архивация не критична
+        log.warning("quick_add_upload: архивация поста #%s не удалась: %s", post_id, e)
+
     message = (
         f"Пост #{post_id} — возможен дубликат, проверьте во «Входящих»"
         if final_status == "possible_duplicate"
