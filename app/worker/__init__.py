@@ -291,9 +291,15 @@ class Worker:
 
         # 2. Если у поста уже есть file_path (mode B расширения загрузило файл
         # браузером и прислало через quick_add_upload) — считаем готовым к отправке.
+        # ВАЖНО: архивируем такой пост! Раньше здесь был return БЕЗ архивации —
+        # фото из расширения никогда не попадали в архив (только видео, которые
+        # шли через yt-dlp download path). Теперь архивация вызывается для ВСЕХ
+        # постов с file_path, независимо от пути (download или early-return).
         if post.get("file_path"):
             log.info("Worker: пост #%s уже имеет file_path=%s — → pending", post_id, post["file_path"])
             await posts_repo.update_status(post_id, "pending")
+            # Архивация (ТЗ §2.4.5, блок D) — дублируем в служебный канал.
+            await self._archive_post_safe(post_id)
             return
 
         url = post.get("source_url") or payload.get("media_url") or payload.get("url")
@@ -384,16 +390,27 @@ class Worker:
 
         # Архивация в служебный канал (ТЗ §2.4.5, блок D).
         # После скачивания файла — дублируем в служебный канал (если задан).
-        # archive_post теперь поддерживает file_path (через FSInputFile).
+        # Вынесено в _archive_post_safe — используется и здесь, и в early-return path.
+        await self._archive_post_safe(post_id)
+
+    async def _archive_post_safe(self, post_id: int) -> None:
+        """Архивирует пост в служебный канал (если задан archive_channel).
+
+        Безопасная обёртка: ошибки архивации не роняют worker (archive не критичен).
+        Используется из двух мест:
+        1. После скачивания файла (download path) — для видео/файлов из внешних источников.
+        2. После early-return для постов с file_path (mode B расширения) — для фото
+           из Chrome extension, которые ранее НЕ архивировались (баг: только видео
+           попадали в архив).
+        """
         try:
             from app.services.archive import archive_post
 
-            # Достаём обновлённый пост с file_path
-            post_with_file = await posts_repo.get_post(post_id)
-            if post_with_file and post_with_file.get("file_path"):
-                # target_channel_id: 0 = нет целевого канала (архивация все равно
-                # использует archive_channel из app_settings). Передаём 0.
-                await archive_post(post_with_file, 0, [result["file_type"]])
+            post = await posts_repo.get_post(post_id)
+            if post and post.get("file_path"):
+                # target_channel_id: 0 = нет целевого канала (архивация использует
+                # archive_channel из app_settings). Передаём 0.
+                await archive_post(post, 0, [post.get("file_type", "document")])
         except Exception as e:  # noqa: BLE001 — архивация не критична
             log.warning("Worker: архивация поста #%s не удалась: %s", post_id, e)
 

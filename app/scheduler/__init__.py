@@ -203,7 +203,21 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
     media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio] = []
     for i, p in enumerate(posts):
         # Caption только для первого элемента альбома (ограничение Telegram)
-        caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
+        raw_caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
+
+        # Настройки очереди: strip_caption (убирать подпись), signature_template (добавить свою)
+        # Та же логика что в _send_one_post — иначе альбомы получали подпись без учёта настроек.
+        if i == 0 and queue:
+            if queue.get("strip_caption"):
+                raw_caption = None
+            sig = queue.get("signature_template")
+            if sig:
+                raw_caption = f"{sig}\n{raw_caption}" if raw_caption else sig
+        # P2-13: Telegram limit caption 1024 chars (для album — 1024, не 4096)
+        if raw_caption and len(raw_caption) > 1024:
+            raw_caption = raw_caption[:1021] + "..."
+        caption = raw_caption
+
         ft = p["file_type"]
         fid = p.get("tg_file_id")
         file_path = p.get("file_path")
