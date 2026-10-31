@@ -154,18 +154,25 @@ async def quick_add(body: QuickAddRequest, request: Request) -> dict[str, Any]:
     source_type = _normalize_site(body.site, body.url)
     queue_id, queue_name = await _resolve_target_queue(source_type, body.url, body.tags, body.queue_id)
 
-    # Дедупликация по source_id (ТЗ §2.4.2: точный уровень для внешних источников)
-    existing = await posts_repo.find_by_source(source_type, media_url)
-    if existing:
-        p = existing[0]
-        return {
-            "success": True,
-            "duplicate": True,
-            "post_id": p["id"],
-            "queue_id": p["queue_id"],
-            "status": p["status"],
-            "message": f"Пост уже в базе (#{p['id']}, статус {p['status']})",
-        }
+    # Дедупликация по source_id (ТЗ §2.4.2: точный уровень для внешних источников).
+    # ВАЖНО: если задан media_group_id — пропускаем дедуп! В альбоме N медиа
+    # из одного твита имеют одинаковый source_id (permalink твита). Без этого
+    # видео (mode A, media_url=null → source_id=permalink) считается дублем
+    # фото (mode B, source_id=permalink) → видео пост не создаётся → альбом
+    # теряет видео. file_unique_id дедуп в quick_add_upload защищает от
+    # повторной загрузки одного и того же файла.
+    if not body.media_group_id:
+        existing = await posts_repo.find_by_source(source_type, media_url)
+        if existing:
+            p = existing[0]
+            return {
+                "success": True,
+                "duplicate": True,
+                "post_id": p["id"],
+                "queue_id": p["queue_id"],
+                "status": p["status"],
+                "message": f"Пост уже в базе (#{p['id']}, статус {p['status']})",
+            }
 
     post_id = await posts_repo.create_post(
         source_type=source_type,

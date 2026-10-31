@@ -134,6 +134,11 @@ TYPE_TAGS = {
 _ALBUM_ARCHIVE_DELAY: float = float(os.getenv("ALBUM_ARCHIVE_DELAY", "5.0"))
 _album_archive_timers: dict[str, asyncio.Task] = {}
 _album_archive_timers_lock: asyncio.Lock | None = None
+# Множество уже архивированных групп — защита от повторной архивации.
+# После успешной archive_album группа добавляется сюда. Если debounce-таймер
+# срабатывает повторно (race condition), _do_album_archive_check видит группу
+# в этом множестве и пропускает.
+_archived_groups: set[str] = set()
 
 
 def _get_album_timers_lock() -> asyncio.Lock:
@@ -167,6 +172,14 @@ async def _do_album_archive_check(media_group_id: str) -> None:
     try:
         await asyncio.sleep(_ALBUM_ARCHIVE_DELAY)
 
+        # Защита от повторной архивации: если группа уже архивирована — пропускаем.
+        # Это решает race condition: два таймера для одной группы срабатывают
+        # одновременно (например, фото пришли через quick_add_upload, а видео
+        # через worker download — оба вызвали schedule_album_archive).
+        if media_group_id in _archived_groups:
+            log.info("Альбом %s уже архивирован — пропускаем", media_group_id)
+            return
+
         from app.repositories import posts as posts_repo
 
         group_posts = await posts_repo.find_posts_by_media_group_id(media_group_id)
@@ -185,6 +198,10 @@ async def _do_album_archive_check(media_group_id: str) -> None:
             )
             return
 
+        # Все посты готовы → помечаем как архивированную ДО вызова archive_album,
+        # чтобы параллельный таймер не заархивировал повторно.
+        _archived_groups.add(media_group_id)
+
         # Все посты готовы → архивируем как один альбом
         await archive_album(group_posts, 0)
         log.info(
@@ -196,6 +213,8 @@ async def _do_album_archive_check(media_group_id: str) -> None:
         pass
     except Exception as e:  # noqa: BLE001
         log.warning("Album archive check failed for %s: %s", media_group_id, e)
+        # При ошибке — убираем из archived, чтобы можно было повторить
+        _archived_groups.discard(media_group_id)
     finally:
         lock = _get_album_timers_lock()
         async with lock:
