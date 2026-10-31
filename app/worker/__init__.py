@@ -410,19 +410,26 @@ class Worker:
         """Архивирует пост в служебный канал (если задан archive_channel).
 
         Безопасная обёртка: ошибки архивации не роняют worker (archive не критичен).
-        Используется из двух мест:
-        1. После скачивания файла (download path) — для видео/файлов из внешних источников.
-        2. После early-return для постов с file_path (mode B расширения) — для фото
-           из Chrome extension, которые ранее НЕ архивировались (баг: только видео
-           попадали в архив).
+        - Для одиночных постов (без media_group_id) → archive_post сразу.
+        - Для альбомов (с media_group_id) → schedule_album_archive (debounce-таймер):
+          ждём пока все посты группы загрузятся, затем архивируем как один альбом.
+          Это важно для смешанных альбомов (фото mode B + видео mode A): фото
+          приходит сразу, видео скачивается 2-3 сек — без debounce фото архивировалось
+          бы отдельно от видео.
         """
         try:
-            from app.services.archive import archive_post
-
             post = await posts_repo.get_post(post_id)
-            if post and post.get("file_path"):
-                # target_channel_id: 0 = нет целевого канала (архивация использует
-                # archive_channel из app_settings). Передаём 0.
+            if not post or not post.get("file_path"):
+                return
+
+            mgid = post.get("media_group_id")
+            if mgid:
+                # Альбом: используем debounce-таймер (ждём остальные посты группы)
+                from app.services.archive import schedule_album_archive
+                await schedule_album_archive(mgid)
+            else:
+                # Одиночный пост: архивируем сразу
+                from app.services.archive import archive_post
                 await archive_post(post, 0, [post.get("file_type", "document")])
         except Exception as e:  # noqa: BLE001 — архивация не критична
             log.warning("Worker: архивация поста #%s не удалась: %s", post_id, e)

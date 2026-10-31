@@ -114,6 +114,94 @@ TYPE_TAGS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Debounce-архивация альбомов (fix: альбом архивировался N раз)
+#
+# Проблема: расширение присылает N постов альбома через N последовательных
+# HTTP-запросов (quick_add_upload). Каждый запрос видит все предыдущие посты
+# уже с file_path → архивирует частичный альбом (1, 2, 3... медиа).
+#
+# Также для смешанных альбомов (фото mode B + видео mode A): фото приходит
+# сразу (pending), видео скачивается 2-3 сек через worker. Нужно дождаться
+# скачивания видео перед архивацией.
+#
+# Решение: debounce-таймер. При каждом поступлении поста с media_group_id
+# откладываем архивацию на ALBUM_ARCHIVE_DELAY сек. Если за это время приходит
+# новый пост группы — сбрасываем таймер. Когда таймер срабатывает, проверяем
+# все ли посты имеют file_path, и если да — архивируем целиком.
+# ---------------------------------------------------------------------------
+
+_ALBUM_ARCHIVE_DELAY: float = float(os.getenv("ALBUM_ARCHIVE_DELAY", "5.0"))
+_album_archive_timers: dict[str, asyncio.Task] = {}
+_album_archive_timers_lock: asyncio.Lock | None = None
+
+
+def _get_album_timers_lock() -> asyncio.Lock:
+    global _album_archive_timers_lock
+    if _album_archive_timers_lock is None:
+        _album_archive_timers_lock = asyncio.Lock()
+    return _album_archive_timers_lock
+
+
+async def schedule_album_archive(media_group_id: str) -> None:
+    """Откладывает архивацию альбома на ALBUM_ARCHIVE_DELAY секунд.
+
+    Если уже есть запланированная архивация для этой группы — отменяем её
+    и начинаем новый отсчёт. Когда таймер срабатывает, проверяем все ли посты
+    группы имеют file_path, и если да — archive_album.
+    """
+    lock = _get_album_timers_lock()
+    async with lock:
+        # Отменяем существующий таймер для этой группы
+        existing = _album_archive_timers.get(media_group_id)
+        if existing and not existing.done():
+            existing.cancel()
+
+        # Планируем новый
+        task = asyncio.create_task(_do_album_archive_check(media_group_id))
+        _album_archive_timers[media_group_id] = task
+
+
+async def _do_album_archive_check(media_group_id: str) -> None:
+    """Ждёт ALBUM_ARCHIVE_DELAY сек, затем архивирует альбом если все посты готовы."""
+    try:
+        await asyncio.sleep(_ALBUM_ARCHIVE_DELAY)
+
+        from app.repositories import posts as posts_repo
+
+        group_posts = await posts_repo.find_posts_by_media_group_id(media_group_id)
+        if not group_posts:
+            return
+
+        # Проверяем: все ли посты имеют file_path (скачаны/загружены)?
+        ready = [p for p in group_posts if p.get("file_path")]
+        not_ready = [p for p in group_posts if not p.get("file_path")]
+
+        if not_ready:
+            log.info(
+                "Альбом %s: %d/%d постов готовы (%d без file_path) — пропускаем, "
+                "ждём когда скачаются остальные",
+                media_group_id, len(ready), len(group_posts), len(not_ready),
+            )
+            return
+
+        # Все посты готовы → архивируем как один альбом
+        await archive_album(group_posts, 0)
+        log.info(
+            "Альбом %s архивирован после debounce (%d постов)",
+            media_group_id, len(group_posts),
+        )
+    except asyncio.CancelledError:
+        # Таймер отменён новым постом группы — нормально
+        pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("Album archive check failed for %s: %s", media_group_id, e)
+    finally:
+        lock = _get_album_timers_lock()
+        async with lock:
+            _album_archive_timers.pop(media_group_id, None)
+
+
 def _sanitize_tag_id(value: str | int | None) -> str:
     """Убирает минус из chat_id для тегов (Telegram ломает #from_-100...).
 
