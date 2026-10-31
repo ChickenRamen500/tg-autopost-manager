@@ -402,9 +402,27 @@ async def increment_attempt(post_id: int) -> int:
 
 
 async def assign_queue(post_id: int, queue_id: int | None) -> bool:
-    """Назначить/перенести пост в очередь (или во «Входящие» при queue_id=None)."""
+    """Назначить/перенести пост в очередь (или во «Входящие» при queue_id=None).
+
+    ВАЖНО: при назначении в очередь (queue_id не None) статус possible_duplicate
+    или duplicate меняется на pending — пользователь вручную одобрил пост,
+    игнорируя дедупликацию. Иначе scheduler пропустит его (ищет только pending),
+    и для альбомов find_album_posts тоже его не найдёт.
+    """
     db = get_db()
-    cur = await db.execute("UPDATE posts SET queue_id = ? WHERE id = ?", (queue_id, post_id))
+    if queue_id is not None:
+        # Назначаем в очередь + если статус был duplicate/possible_duplicate → pending
+        cur = await db.execute(
+            "UPDATE posts SET queue_id = ?, "
+            "status = CASE WHEN status IN ('duplicate', 'possible_duplicate') "
+            "              THEN 'pending' ELSE status END "
+            "WHERE id = ?",
+            (queue_id, post_id),
+        )
+    else:
+        # Перенос во Входящие — статус не меняем (возможный дубликат остаётся
+        # possible_duplicate для ручной проверки)
+        cur = await db.execute("UPDATE posts SET queue_id = ? WHERE id = ?", (queue_id, post_id))
     await db.commit()
     changed = cur.rowcount > 0
     await cur.close()
