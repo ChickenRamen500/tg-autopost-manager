@@ -240,7 +240,12 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
 
 
 async def archive_album(posts: list[dict[str, Any]], target_channel_id: int) -> bool:
-    """Дублирует альбом (несколько постов) в служебный канал через send_media_group."""
+    """Дублирует альбом (несколько постов) в служебный канал через send_media_group.
+
+    Поддерживает два источника медиа (как archive_post):
+      1. tg_file_id — посты из Telegram (отправка по file_id).
+      2. file_path — посты из расширения/парсера (FSInputFile, локальный файл).
+    """
     archive_channel = await app_settings_repo.get_archive_channel_id()
     if not archive_channel:
         return False
@@ -249,7 +254,15 @@ async def archive_album(posts: list[dict[str, Any]], target_channel_id: int) -> 
     tags = _build_tags(posts[0] if posts else {}, target_channel_id, all_types)
 
     try:
-        from aiogram.types import InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo
+        import os
+
+        from aiogram.types import (
+            FSInputFile,
+            InputMediaAudio,
+            InputMediaDocument,
+            InputMediaPhoto,
+            InputMediaVideo,
+        )
 
         from app.bot.runtime import get_bot
 
@@ -258,20 +271,25 @@ async def archive_album(posts: list[dict[str, Any]], target_channel_id: int) -> 
         sent_idx = 0
         for p in posts:
             fid = p.get("tg_file_id")
-            if not fid:
-                log.warning("Пост #%s альбома без tg_file_id — пропущен в архиве", p.get("id"))
+            file_path = p.get("file_path")
+            if not fid and not file_path:
+                log.warning("Пост #%s альбома без tg_file_id и file_path — пропущен в архиве", p.get("id"))
                 continue
             ft = p.get("file_type", "document")
             cap = tags if sent_idx == 0 else None
             sent_idx += 1
+            # Определяем медиа-объект: tg_file_id (приоритет) или FSInputFile из file_path
+            media_obj = fid
+            if not media_obj and file_path:
+                media_obj = FSInputFile(file_path, filename=os.path.basename(file_path))
             if ft == "photo":
-                media.append(InputMediaPhoto(media=fid, caption=cap))
+                media.append(InputMediaPhoto(media=media_obj, caption=cap))
             elif ft == "video":
-                media.append(InputMediaVideo(media=fid, caption=cap))
+                media.append(InputMediaVideo(media=media_obj, caption=cap))
             elif ft == "audio":
-                media.append(InputMediaAudio(media=fid, caption=cap))
+                media.append(InputMediaAudio(media=media_obj, caption=cap))
             else:
-                media.append(InputMediaDocument(media=fid, caption=cap))
+                media.append(InputMediaDocument(media=media_obj, caption=cap))
 
         if not media:
             return False

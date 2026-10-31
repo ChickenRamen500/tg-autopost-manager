@@ -334,24 +334,37 @@ class Worker:
 
         # 3б. Скачивание внешнего файла
         await posts_repo.update_status(post_id, "downloading")
-        try:
-            from app.services.media.downloader import (
-                DownloadError,
-                PermanentDownloadError,
-                download_media,
-            )
 
-            result = await download_media(
-                url=url,
-                post_id=post_id,
-                referer=payload.get("referer"),
-                user_agent=payload.get("user_agent"),
-                extra_headers=payload.get("headers"),
-            )
-        except PermanentDownloadError as e:
-            raise _PermanentTaskError(str(e)) from e
-        except DownloadError as e:
-            raise _RetryableTaskError(str(e)) from e
+        # Если URL — m3u8 (HLS плейлист), download_media не справится (получит текст).
+        # Используем yt-dlp для скачивания (он умеет HLS) — на тот же tweet URL,
+        # но с --write-download-cache и форматом bestvideo+bestaudio.
+        is_m3u8 = url.endswith(".m3u8") or "m3u8" in url.lower()
+
+        if is_m3u8:
+            # Для m3u8 (GIF-видео Twitter) — скачиваем через yt-dlp напрямую.
+            # Используем исходный tweet URL из post.source_url, не m3u8 URL.
+            tweet_url = post.get("source_url") or payload.get("url") or url
+            log.info("Worker: пост #%s — m3u8 URL, скачиваем через yt-dlp: %s", post_id, tweet_url)
+            result = await self._download_via_ytdlp(tweet_url, post_id)
+        else:
+            try:
+                from app.services.media.downloader import (
+                    DownloadError,
+                    PermanentDownloadError,
+                    download_media,
+                )
+
+                result = await download_media(
+                    url=url,
+                    post_id=post_id,
+                    referer=payload.get("referer"),
+                    user_agent=payload.get("user_agent"),
+                    extra_headers=payload.get("headers"),
+                )
+            except PermanentDownloadError as e:
+                raise _PermanentTaskError(str(e)) from e
+            except DownloadError as e:
+                raise _RetryableTaskError(str(e)) from e
 
         # Сохраняем метаданные файла + переводим в pending (готов к отправке)
         await posts_repo.set_file_info(
@@ -435,6 +448,75 @@ class Worker:
             return None
         # ExternalPost.source_url — прямая ссылка на файл (pbs.twimg.com/... или video.twimg.com/...)
         return external_post.source_url
+
+    async def _download_via_ytdlp(self, tweet_url: str, post_id: int) -> dict[str, Any]:
+        """Скачивает медиа из твита через yt-dlp напрямую (с HLS-поддержкой).
+
+        Используется когда XcomParser вернул m3u8 URL (HLS плейлист) — обычный
+        download_media не умеет HLS и скачает текстовый плейлист вместо видео.
+        yt-dlp умеет HLS: он сам парсит m3u8 и скачивает сегменты.
+
+        Сохраняет файл в settings.downloads_dir/post_{id}.mp4 (или .jpg).
+
+        Возвращает dict с ключами: file_path, file_type, file_size, mime_type.
+        """
+        import asyncio
+        import os
+
+        from app.config.settings import settings
+
+        cookies_path = getattr(settings, "xcom_cookies_path", "") or ""
+        ydl_opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+        }
+        if cookies_path and os.path.exists(cookies_path):
+            ydl_opts["cookiefile"] = cookies_path
+
+        # Выходной файл: post_{id}.mp4 (yt-dlp добавит расширение если нужно)
+        out_tmpl = str(settings.downloads_dir / f"post_{post_id}.%(ext)s")
+        ydl_opts["outtmpl"] = out_tmpl
+
+        loop = asyncio.get_event_loop()
+
+        def _download_sync() -> dict[str, Any]:
+            import yt_dlp
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(tweet_url, download=True)
+                if not info:
+                    raise RuntimeError(f"yt-dlp extract_info вернул None для {tweet_url}")
+                # Определяем путь к скачанному файлу
+                # yt-dlp сохраняет по outtmpl; достаём через prepare_filename
+                filename = ydl.prepare_filename(info)
+                if not os.path.exists(filename):
+                    raise RuntimeError(f"yt-dlp не сохранил файл {filename}")
+                ext = (info.get("ext") or "").lower()
+                if ext in ("mp4", "webm", "mov", "avi", "mkv"):
+                    file_type = "video"
+                elif ext == "gif":
+                    file_type = "gif"
+                elif ext in ("jpg", "jpeg", "png", "webp", "bmp"):
+                    file_type = "photo"
+                else:
+                    file_type = "document"
+                size = os.path.getsize(filename)
+                ct_map = {"mp4": "video/mp4", "webm": "video/webm", "jpg": "image/jpeg",
+                          "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif"}
+                mime = ct_map.get(ext, "application/octet-stream")
+                return {"file_path": filename, "file_type": file_type, "file_size": size, "mime_type": mime}
+
+        try:
+            result = await loop.run_in_executor(None, _download_sync)
+        except Exception as e:
+            raise _RetryableTaskError(f"yt-dlp download failed для {tweet_url} (post #{post_id}): {e}") from e
+
+        log.info(
+            "Worker: пост #%s — yt-dlp скачал %s (%d байт, type=%s)",
+            post_id, result["file_path"], result["file_size"], result["file_type"],
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Stale-cleanup цикл

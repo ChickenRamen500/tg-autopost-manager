@@ -45,6 +45,9 @@ class ExternalPost:
     extra_headers: dict[str, str] | None = None
     # Оригинальный caption (если есть) — сохраняется в posts.original_caption
     caption: str | None = None
+    # Note: если URL — m3u8 (HLS), worker использует yt-dlp для скачивания
+    # (download_media не умеет HLS). Заполняется парсером при fallback.
+    note: str | None = None
 
 
 class BaseParser:

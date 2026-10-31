@@ -313,12 +313,39 @@ async def quick_add_upload(
     # поэтому worker никогда не видит эти посты и не вызывает archive_post.
     # Архивируем напрямую здесь — иначе фото/GIF из расширения не попадают в архив
     # (только видео через quick_add → worker download path → archive).
+    #
+    # Для альбомов (media_group_id): расширение присылает N постов по одному
+    # (N запросов quick_add_upload). Мы НЕ можем архивировать каждый отдельно —
+    # получим N отдельных сообщений вместо 1 альбома. Поэтому:
+    #   - При каждом quick_add_upload проверяем: все ли посты группы уже загружены?
+    #   - Если да (все N постов в БД с file_path) → archive_album всей группой.
+    #   - Если нет (ещё не все загрузились) → пропускаем, ждём последний.
     try:
-        from app.services.archive import archive_post
-
-        post_for_archive = await posts_repo.get_post(post_id)
-        if post_for_archive and post_for_archive.get("file_path"):
-            await archive_post(post_for_archive, 0, [guessed_type])
+        if media_group_id:
+            # Альбом: проверяем, все ли посты группы уже созданы.
+            # Расширение шлёт media_group_id = "tgq:..." и все посты группы имеют
+            # одинаковый source_id (URL твита). Считаем сколько постов с этим
+            # media_group_id уже в БД.
+            group_posts = await posts_repo.find_posts_by_media_group_id(media_group_id)
+            if group_posts and all(p.get("file_path") for p in group_posts):
+                # Все посты группы загружены — архивируем как один альбом.
+                from app.services.archive import archive_album
+                await archive_album(group_posts, 0)
+                log.info("quick_add_upload: альбом %s (%d постов) архивирован", media_group_id, len(group_posts))
+            else:
+                # Не все посты группы ещё загружены — ждём последний запрос.
+                log.info(
+                    "quick_add_upload: пост #%s — часть альбома %s (%d/%d загружено), ждём остальные",
+                    post_id, media_group_id,
+                    sum(1 for p in group_posts if p.get("file_path")),
+                    len(group_posts),
+                )
+        else:
+            # Одиночный пост — архивируем сразу.
+            from app.services.archive import archive_post
+            post_for_archive = await posts_repo.get_post(post_id)
+            if post_for_archive and post_for_archive.get("file_path"):
+                await archive_post(post_for_archive, 0, [guessed_type])
     except Exception as e:  # noqa: BLE001 — архивация не критична
         log.warning("quick_add_upload: архивация поста #%s не удалась: %s", post_id, e)
 

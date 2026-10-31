@@ -97,6 +97,11 @@ class XcomParser(BaseParser):
         info['url']. Прямое скачивание m3u8 даёт текстовый плейлист, а не видео.
         Поэтому мы ищем в formats прямой mp4 (или другой прямой медиа-формат),
         пропуская m3u8/m3u записи.
+
+        FALLBACK: если прямых форматов нет (только m3u8 — часто для GIF-видео),
+        используем m3u8 URL но меняем ext на 'mp4'. Worker тогда должен скачать
+        через yt-dlp (а не через download_media), т.к. m3u8 требует HLS-парсинга.
+        Сигнализируем это через ExternalPost.note = 'hls_m3u8'.
         """
         tweet_id = str(info.get("id", "") or "")
         if not tweet_id:
@@ -104,6 +109,7 @@ class XcomParser(BaseParser):
 
         ext = (info.get("ext") or "").lower()
         source_url = info.get("url") or ""
+        hls_fallback = False  # True если используем m3u8 как fallback
 
         # Если основной URL — m3u8 (HLS плейлист), НЕ используем его напрямую.
         # Ищем прямой mp4 в formats.
@@ -139,8 +145,23 @@ class XcomParser(BaseParser):
                     ext, best.get("tbr") or best.get("vbr"), tweet_id,
                 )
 
+        # FALLBACK: если прямых форматов нет (только m3u8) — используем m3u8 URL.
+        # Это часто бывает для GIF-видео в Twitter. Worker не сможет скачать m3u8
+        # через download_media (получит текстовый плейлист), но сможем через
+        # yt-dlp (который умеет HLS). Помечаем через note='hls_m3u8'.
+        if not source_url and is_hls:
+            m3u8_url = info.get("url") or ""
+            if m3u8_url and m3u8_url.endswith(".m3u8"):
+                source_url = m3u8_url
+                ext = "mp4"  # yt-dlp скачает как mp4
+                hls_fallback = True
+                log.info(
+                    "XcomParser: нет прямого mp4 — fallback на m3u8 (HLS) для твита %s "
+                    "(worker скачает через yt-dlp)", tweet_id,
+                )
+
         if not source_url:
-            log.warning("XcomParser: нет прямого URL (только m3u8?) для твита %s", tweet_id)
+            log.warning("XcomParser: нет прямого URL для твита %s", tweet_id)
             return None
 
         # file_type по расширению
@@ -173,6 +194,7 @@ class XcomParser(BaseParser):
             rating=None,  # X.com не имеет rating
             referer="https://x.com/",
             caption=title[:1000] if title else None,
+            note="hls_m3u8" if hls_fallback else None,
         )
 
     async def close(self) -> None:
