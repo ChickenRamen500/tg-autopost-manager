@@ -251,6 +251,71 @@ async def list_inbox(limit: int = 100) -> list[dict[str, Any]]:
     return [_row_to_post(r) for r in rows]
 
 
+async def list_inbox_grouped(limit: int = 100) -> list[dict[str, Any]]:
+    """«Входящие» с группировкой по media_group_id.
+
+    Возвращает список «групп» — каждая группа это словарь:
+      {
+        "media_group_id": str | None,  # None для одиночных постов
+        "posts": [post1, post2, ...],  # посты в группе (для одиночного — 1 элемент)
+        "count": int,                  # количество постов
+        "first": post,                 # первый пост (для отображения в UI)
+        "file_type": str,              # тип первого поста
+        "source_type": str,            # источник первого поста
+        "created_at": str,            # created_at первого поста
+      }
+
+    Логика:
+    - Посты с одинаковым media_group_id (IS NOT NULL) объединяются в одну группу.
+    - Посты с media_group_id=NULL — каждая своя группа (count=1).
+    - Группы сортируются по created_at DESC.
+    """
+    posts = await list_inbox(limit=limit)
+    groups: dict[str, dict[str, Any]] = {}
+    singles: list[dict[str, Any]] = []
+    for p in posts:
+        mgid = p.get("media_group_id")
+        if mgid:
+            if mgid not in groups:
+                groups[mgid] = {
+                    "media_group_id": mgid,
+                    "posts": [],
+                    "count": 0,
+                    "first": p,
+                    "file_type": p["file_type"],
+                    "source_type": p["source_type"],
+                    "created_at": p["created_at"],
+                }
+            groups[mgid]["posts"].append(p)
+            groups[mgid]["count"] += 1
+        else:
+            singles.append({
+                "media_group_id": None,
+                "posts": [p],
+                "count": 1,
+                "first": p,
+                "file_type": p["file_type"],
+                "source_type": p["source_type"],
+                "created_at": p["created_at"],
+            })
+    # Объединяем группы и одиночные, сортируем по created_at DESC
+    all_groups = list(groups.values()) + singles
+    all_groups.sort(key=lambda g: g["created_at"], reverse=True)
+    return all_groups
+
+
+async def find_posts_by_media_group_id(media_group_id: str) -> list[dict[str, Any]]:
+    """Все посты с данным media_group_id (для назначения группы в очередь разом)."""
+    db = get_db()
+    cur = await db.execute(
+        "SELECT * FROM posts WHERE media_group_id = ? ORDER BY id ASC",
+        (media_group_id,),
+    )
+    rows = await cur.fetchall()
+    await cur.close()
+    return [_row_to_post(r) for r in rows]
+
+
 async def list_sent(limit: int = 200, queue_id: int | None = None) -> list[dict[str, Any]]:
     """Список отправленных постов (status='sent') — для страницы «Архив/Sent».
 

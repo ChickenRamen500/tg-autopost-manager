@@ -6,14 +6,15 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h1 class="h3 mb-0"><i class="bi bi-inbox"></i> Входящие</h1>
-    <span class="badge bg-secondary">{{ posts|length }} шт.</span>
+    <span class="badge bg-secondary">{{ groups|length }} шт.</span>
 </div>
 
 <p class="text-muted small">
-    Посты без очереди (queue_id = NULL): дедупы, manually маршрутизируемые, или для которых не подошло ни одно правило маршрутизации.
+    Посты без очереди (queue_id = NULL). Посты с одинаковым media_group_id
+    объединены в альбом — при назначении в очередь отправляются все картинки альбома.
 </p>
 
-{% if posts %}
+{% if groups %}
 <div class="card">
     <div class="card-body p-0">
         <div class="table-responsive">
@@ -29,13 +30,27 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for p in posts %}
+                    {% for g in groups %}
+                    {% set p = g.first %}
                     <tr id="post-{{ p.id }}" style="scroll-margin-top: 1rem;">
-                        <td>{{ p.id }}</td>
-                        <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
+                        <td>
+                            {{ p.id }}
+                            {% if g.count > 1 %}
+                            <span class="badge bg-info ms-1" title="Альбом из {{ g.count }} медиа">📷 {{ g.count }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ file_type_icon(p.file_type) }} {{ p.file_type }}
+                            {% if g.count > 1 %}
+                            <div class="small text-muted">альбом: {{ g.count }} медиа</div>
+                            {% endif %}
+                        </td>
                         <td>
                             {{ source_icon(p.source_type) }} {{ p.source_type }}
                             {% if p.source_url %}<a href="{{ p.source_url }}" target="_blank" rel="noopener" class="ms-1 small" title="Открыть источник"><i class="bi bi-box-arrow-up-right"></i></a>{% endif %}
+                            {% if g.media_group_id %}
+                            <div class="small text-muted" title="{{ g.media_group_id }}">{{ g.media_group_id[:30] }}{% if g.media_group_id|length > 30 %}…{% endif %}</div>
+                            {% endif %}
                         </td>
                         <td>{{ status_badge(p.status) }}</td>
                         <td class="small text-muted">{{ p.created_at }}</td>
@@ -47,18 +62,26 @@
                                             data-bs-toggle="dropdown" aria-expanded="false"
                                             data-bs-auto-close="true">
                                         <i class="bi bi-send"></i> В очередь
+                                        {% if g.count > 1 %}<span class="badge bg-danger ms-1">{{ g.count }}</span>{% endif %}
                                     </button>
-                                    {# dropdown-menu без max-height/overflow-y — пусть открывается полностью,
-                                       Popper.js сам развернёт вверх если внизу нет места (Task 9 fix). #}
                                     <ul class="dropdown-menu dropdown-menu-end">
                                         {% for q in queues %}
                                         <li>
+                                            {% if g.media_group_id %}
+                                            <form method="post" action="/web/group/{{ g.media_group_id }}/assign/{{ q.id }}" class="m-0">
+                                                <button type="submit" class="dropdown-item">
+                                                    {% if not q.is_active %}<i class="bi bi-pause-circle text-muted"></i> {% endif %}
+                                                    {{ q.name }} <span class="text-muted small">#{{ q.id }}</span>
+                                                </button>
+                                            </form>
+                                            {% else %}
                                             <form method="post" action="/web/posts/{{ p.id }}/assign/{{ q.id }}" class="m-0">
                                                 <button type="submit" class="dropdown-item">
                                                     {% if not q.is_active %}<i class="bi bi-pause-circle text-muted"></i> {% endif %}
                                                     {{ q.name }} <span class="text-muted small">#{{ q.id }}</span>
                                                 </button>
                                             </form>
+                                            {% endif %}
                                         </li>
                                         {% endfor %}
                                     </ul>
@@ -66,11 +89,19 @@
                                 {% else %}
                                 <span class="text-muted small">нет очередей</span>
                                 {% endif %}
+                                {% if g.media_group_id %}
+                                <form method="post" action="/web/group/{{ g.media_group_id }}/delete" class="d-inline" data-confirm="Удалить альбом ({{ g.count }} постов)?">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger" title="Удалить альбом ({{ g.count }} постов)">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </form>
+                                {% else %}
                                 <form method="post" action="/web/posts/{{ p.id }}/delete" class="d-inline" data-confirm="Удалить пост #{{ p.id }}?">
                                     <button type="submit" class="btn btn-sm btn-outline-danger" title="Удалить">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                 </form>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
@@ -89,4 +120,3 @@
 </div>
 {% endif %}
 {% endblock %}
-

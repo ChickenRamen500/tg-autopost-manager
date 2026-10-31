@@ -79,7 +79,7 @@
                     <input class="form-check-input" type="checkbox" id="qa-crop_video-{{ scope_id }}"
                            name="crop_video" value="on"
                            {% if q and q.crop_video %}checked{% endif %} />
-                    <label class="form-check-label" for="qa-crop_video-{{ scope_id }}">Crop видео</label>
+                    <label class="form-check-label" for="qa-crop_video-{{ scope_id }}">Crop видео <small class="text-muted">(не реализовано)</small></label>
                 </div>
             </div>
             <div class="col">
@@ -91,6 +91,75 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    {# Подпись поста (signature_template) — добавляется к caption при отправке #}
+    <div class="col-12">
+        <label class="form-label" for="qa-signature-{{ scope_id }}">
+            Подпись (signature) <small class="text-muted">— добавляется к каждому посту при отправке</small>
+        </label>
+        <input type="text" class="form-control" id="qa-signature-{{ scope_id }}"
+               name="signature_template" maxlength="500"
+               placeholder="например: © @username или рекламный текст"
+               value="{{ q.signature_template if q and q.signature_template else '' }}" />
+    </div>
+
+    {# Время работы очереди: absolute dates start_at / end_at #}
+    <div class="col-12 col-md-6">
+        <label class="form-label" for="qa-start_at-{{ scope_id }}">
+            Начало работы <small class="text-muted">(пусто = сразу)</small>
+        </label>
+        <input type="datetime-local" class="form-control" id="qa-start_at-{{ scope_id }}"
+               name="start_at"
+               value="{{ q.start_at if q and q.start_at else '' }}" />
+    </div>
+    <div class="col-12 col-md-6">
+        <label class="form-label" for="qa-end_at-{{ scope_id }}">
+            Конец работы <small class="text-muted">(пусто = бесконечно)</small>
+        </label>
+        <input type="datetime-local" class="form-control" id="qa-end_at-{{ scope_id }}"
+               name="end_at"
+               value="{{ q.end_at if q and q.end_at else '' }}" />
+    </div>
+
+    {# Daily window: временной интервал отправки каждый день #}
+    <div class="col-6 col-md-3">
+        <label class="form-label" for="qa-window_start-{{ scope_id }}">
+            Окно отправки с <small class="text-muted">HH:MM</small>
+        </label>
+        <input type="time" class="form-control" id="qa-window_start-{{ scope_id }}"
+               name="daily_window_start"
+               value="{{ q.daily_window_start if q and q.daily_window_start else '' }}" />
+    </div>
+    <div class="col-6 col-md-3">
+        <label class="form-label" for="qa-window_end-{{ scope_id }}">
+            Окно отправки до <small class="text-muted">HH:MM</small>
+        </label>
+        <input type="time" class="form-control" id="qa-window_end-{{ scope_id }}"
+               name="daily_window_end"
+               value="{{ q.daily_window_end if q and q.daily_window_end else '' }}" />
+    </div>
+
+    {# end_strategy: что делать с неотправленными постами при end_at #}
+    <div class="col-12 col-md-6">
+        <label class="form-label" for="qa-end_strategy-{{ scope_id }}">
+            Стратегия при окончании времени
+        </label>
+        <select class="form-select" id="qa-end_strategy-{{ scope_id }}" name="end_strategy">
+            {% set cur_strategy = q.end_strategy if q and q.end_strategy else 'continue_next_day' %}
+            <option value="continue_next_day" {% if cur_strategy == 'continue_next_day' %}selected{% endif %}>
+                Продолжить на след. день (по умолчанию)
+            </option>
+            <option value="continue_after_end" {% if cur_strategy == 'continue_after_end' %}selected{% endif %}>
+                Игнорировать end_at (шлём по интервалу)
+            </option>
+            <option value="move_to_inbox" {% if cur_strategy == 'move_to_inbox' %}selected{% endif %}>
+                Перенести во Входящие
+            </option>
+            <option value="delete" {% if cur_strategy == 'delete' %}selected{% endif %}>
+                Удалить неотправленные
+            </option>
+        </select>
     </div>
 </form>
 {% endmacro %}

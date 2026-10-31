@@ -235,20 +235,44 @@ def test_xcom_parse_info_no_url():
 
 
 def test_xcom_parse_info_formats_fallback():
-    """Если нет прямого url, берём из formats[-1]."""
+    """Если нет прямого url, берём из formats с максимальным битрейтом.
+
+    Раньше брали formats[-1] (последний = лучший), но это не всегда верно:
+    yt-dlp может возвращать m3u8 последним. Теперь сортируем по tbr/vbr DESC
+    и пропускаем m3u8. Тест с tbr=800 должен победить tbr=400.
+    """
     from app.services.parsers.xcom import parse_info_dict
 
     info = {
         "id": "1",
         "ext": "",
         "formats": [
-            {"ext": "mp4", "url": "https://x.com/low.mp4"},
-            {"ext": "mp4", "url": "https://x.com/high.mp4"},  # последний = лучший
+            {"ext": "mp4", "url": "https://x.com/low.mp4", "tbr": 400},
+            {"ext": "mp4", "url": "https://x.com/high.mp4", "tbr": 800},  # больший битрейт = лучше
         ],
     }
     post = parse_info_dict(info)
     assert post is not None
     assert post.source_url == "https://x.com/high.mp4"
+    assert post.file_type == "video"
+
+
+def test_xcom_parse_info_skips_m3u8():
+    """m3u8 (HLS playlist) URL'ы пропускаются — выбираем прямой mp4."""
+    from app.services.parsers.xcom import parse_info_dict
+
+    info = {
+        "id": "2",
+        "ext": "m3u8",  # основной URL — HLS плейлист
+        "url": "https://video.twimg.com/playlist.m3u8",
+        "formats": [
+            {"ext": "m3u8", "url": "https://video.twimg.com/playlist.m3u8"},
+            {"ext": "mp4", "url": "https://video.twimg.com/direct.mp4", "tbr": 1200},
+        ],
+    }
+    post = parse_info_dict(info)
+    assert post is not None
+    assert post.source_url == "https://video.twimg.com/direct.mp4"
     assert post.file_type == "video"
 
 

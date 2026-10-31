@@ -169,13 +169,18 @@ async def page_queue_detail(
 
 @router.get("/inbox")
 async def page_inbox(request: Request, _user: str = Depends(verify_web_user)) -> Any:
-    """Входящие посты (queue_id IS NULL) + выбор очереди для назначения."""
-    inbox_posts = await posts_repo.list_inbox(limit=200)
+    """Входящие посты (queue_id IS NULL) + выбор очереди для назначения.
+
+    Посты с одинаковым media_group_id группируются в одну строку с указанием
+    количества картинок (например «4 фото»). При назначении такой группы
+    в очередь — назначаются ВСЕ посты группы одновременно.
+    """
+    groups = await posts_repo.list_inbox_grouped(limit=200)
     queues = await queues_repo.list_queues(active_only=False)
     ctx = {
         "request": request,
         "active_page": "inbox",
-        "posts": inbox_posts,
+        "groups": groups,
         "queues": queues,
     }
     return templates.TemplateResponse(request, "pages/inbox.html", ctx)
@@ -306,12 +311,73 @@ async def action_assign_post(
     request: Request,
     _user: str = Depends(verify_web_user),
 ) -> RedirectResponse:
-    """Назначить пост в очередь (queue_id=0 → во Входящие, queue_id=NULL)."""
-    target = None if queue_id == 0 else queue_id
-    ok = await posts_repo.assign_queue(post_id, target)
-    if not ok:
+    """Назначить пост в очередь (queue_id=0 → во Входящие, queue_id=NULL).
+
+    Если у поста есть media_group_id — назначаем ВСЕ посты с тем же
+    media_group_id (чтобы альбом не дробился по разным очередям).
+    """
+    post = await posts_repo.get_post(post_id)
+    if post is None:
         raise HTTPException(status_code=404, detail=f"Пост #{post_id} не найден")
-    log.info("web: пост #%s → очередь %s (user=%s)", post_id, target or "Входящие", _user)
+
+    target = None if queue_id == 0 else queue_id
+    mgid = post.get("media_group_id")
+    if mgid:
+        # Группа: назначаем все посты с этим media_group_id
+        group_posts = await posts_repo.find_posts_by_media_group_id(mgid)
+        count = 0
+        for p in group_posts:
+            await posts_repo.assign_queue(p["id"], target)
+            count += 1
+        log.info(
+            "web: группа %s (%d постов) → очередь %s (user=%s)",
+            mgid, count, target or "Входящие", _user,
+        )
+    else:
+        # Одиночный пост
+        await posts_repo.assign_queue(post_id, target)
+        log.info("web: пост #%s → очередь %s (user=%s)", post_id, target or "Входящие", _user)
+    return _redirect_back(request)
+
+
+@router.post("/web/group/{media_group_id}/assign/{queue_id}")
+async def action_assign_group(
+    media_group_id: str,
+    queue_id: int,
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    """Назначить ВСЕ посты альбома (по media_group_id) в очередь."""
+    target = None if queue_id == 0 else queue_id
+    group_posts = await posts_repo.find_posts_by_media_group_id(media_group_id)
+    if not group_posts:
+        raise HTTPException(status_code=404, detail=f"Группа {media_group_id} не найдена")
+    count = 0
+    for p in group_posts:
+        await posts_repo.assign_queue(p["id"], target)
+        count += 1
+    log.info(
+        "web: группа %s (%d постов) → очередь %s (user=%s)",
+        media_group_id, count, target or "Входящие", _user,
+    )
+    return _redirect_back(request)
+
+
+@router.post("/web/group/{media_group_id}/delete")
+async def action_delete_group(
+    media_group_id: str,
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    """Удалить ВСЕ посты альбома (по media_group_id)."""
+    group_posts = await posts_repo.find_posts_by_media_group_id(media_group_id)
+    if not group_posts:
+        raise HTTPException(status_code=404, detail=f"Группа {media_group_id} не найдена")
+    count = 0
+    for p in group_posts:
+        await posts_repo.delete_post(p["id"])
+        count += 1
+    log.info("web: удалена группа %s (%d постов) (user=%s)", media_group_id, count, _user)
     return _redirect_back(request)
 
 
@@ -431,6 +497,12 @@ async def action_create_queue(
     shuffle_enabled: str | None = Form(None),
     group_albums: str | None = Form(None),
     strip_caption: str | None = Form(None),
+    signature_template: str | None = Form(None),
+    start_at: str | None = Form(None),
+    end_at: str | None = Form(None),
+    daily_window_start: str | None = Form(None),
+    daily_window_end: str | None = Form(None),
+    end_strategy: str | None = Form(None),
     _user: str = Depends(verify_web_user),
 ) -> RedirectResponse:
     name = name.strip()
@@ -456,6 +528,12 @@ async def action_create_queue(
         shuffle_enabled=_checkbox(shuffle_enabled),
         group_albums=_checkbox(group_albums),
         strip_caption=_checkbox(strip_caption),
+        signature_template=(signature_template or None),
+        start_at=(start_at or None),
+        end_at=(end_at or None),
+        daily_window_start=(daily_window_start or None),
+        daily_window_end=(daily_window_end or None),
+        end_strategy=(end_strategy or "continue_next_day"),
     )
     log.info(
         "web: создана очередь #%s name=%r channel_id=%s interval=%s (user=%s)",
@@ -476,6 +554,12 @@ async def action_edit_queue(
     shuffle_enabled: str | None = Form(None),
     group_albums: str | None = Form(None),
     strip_caption: str | None = Form(None),
+    signature_template: str | None = Form(None),
+    start_at: str | None = Form(None),
+    end_at: str | None = Form(None),
+    daily_window_start: str | None = Form(None),
+    daily_window_end: str | None = Form(None),
+    end_strategy: str | None = Form(None),
     _user: str = Depends(verify_web_user),
 ) -> RedirectResponse:
     q = await queues_repo.get_queue(queue_id)
@@ -504,6 +588,12 @@ async def action_edit_queue(
         shuffle_enabled=_checkbox(shuffle_enabled),
         group_albums=_checkbox(group_albums),
         strip_caption=_checkbox(strip_caption),
+        signature_template=(signature_template or None),
+        start_at=(start_at or None),
+        end_at=(end_at or None),
+        daily_window_start=(daily_window_start or None),
+        daily_window_end=(daily_window_end or None),
+        end_strategy=(end_strategy or "continue_next_day"),
     )
     log.info(
         "web: обновлена очередь #%s name=%r channel_id=%s interval=%s (user=%s)",

@@ -91,26 +91,56 @@ class XcomParser(BaseParser):
         return self._parse_info(info, tweet_url)
 
     def _parse_info(self, info: dict[str, Any], tweet_url: str) -> ExternalPost | None:
-        """Преобразует yt-dlp info dict в ExternalPost."""
-        # yt-dlp возвращает: url, ext, title, thumbnail, formats, ...
-        # Для фото: info['__type'] == 'photo' или info['ext'] in (jpg, png)
+        """Преобразует yt-dlp info dict в ExternalPost.
+
+        ВАЖНО: yt-dlp для Twitter видео возвращает m3u8 (HLS playlist) URL как
+        info['url']. Прямое скачивание m3u8 даёт текстовый плейлист, а не видео.
+        Поэтому мы ищем в formats прямой mp4 (или другой прямой медиа-формат),
+        пропуская m3u8/m3u записи.
+        """
         tweet_id = str(info.get("id", "") or "")
         if not tweet_id:
             return None
 
         ext = (info.get("ext") or "").lower()
-        # Прямой URL файла
         source_url = info.get("url") or ""
-        # Для видео может быть несколько форматов — берём лучший
+
+        # Если основной URL — m3u8 (HLS плейлист), НЕ используем его напрямую.
+        # Ищем прямой mp4 в formats.
+        is_hls = source_url.endswith(".m3u8") or ext == "m3u8" or "m3u8" in source_url.lower()
+        if is_hls:
+            source_url = ""
+
+        # Для видео ищем прямой mp4 формат, пропуская m3u8 плейлисты.
         if not source_url and info.get("formats"):
-            # Берём последний (обычно лучший качество)
-            best = info["formats"][-1] if info["formats"] else None
-            if best and isinstance(best, dict):
+            # Фильтруем: только прямые медиа-форматы (не m3u8 плейлисты)
+            direct_formats = [
+                f for f in info["formats"]
+                if isinstance(f, dict)
+                and f.get("url")
+                and not f.get("url", "").endswith(".m3u8")
+                and f.get("ext", "").lower() != "m3u8"
+                and "m3u8" not in f.get("url", "").lower()
+            ]
+            if direct_formats:
+                # Предпочитаем mp4, затем по убыванию битрейта (tbr или vbr)
+                mp4_formats = [f for f in direct_formats if f.get("ext", "").lower() == "mp4"]
+                candidates = mp4_formats if mp4_formats else direct_formats
+                # Сортируем по битрейту (tbr/vbr) убывание — лучший качество первым
+                candidates.sort(
+                    key=lambda f: float(f.get("tbr") or f.get("vbr") or f.get("abr") or 0),
+                    reverse=True,
+                )
+                best = candidates[0]
                 source_url = best.get("url", "") or ""
                 ext = (best.get("ext") or ext).lower()
+                log.info(
+                    "XcomParser: выбран прямой %s формат (tbr=%s) для твита %s",
+                    ext, best.get("tbr") or best.get("vbr"), tweet_id,
+                )
 
         if not source_url:
-            log.warning("XcomParser: нет source_url для твита %s", tweet_id)
+            log.warning("XcomParser: нет прямого URL (только m3u8?) для твита %s", tweet_id)
             return None
 
         # file_type по расширению
