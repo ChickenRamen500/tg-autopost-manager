@@ -6,9 +6,12 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.db import get_db
+
+log = logging.getLogger("repositories.duplicates")
 
 
 async def add_hash(post_id: int, hash_value: str, hash_type: str) -> int:
@@ -93,9 +96,22 @@ async def set_phash_atomic(post_id: int, phash: str) -> None:
 
     Idempotent: при повторном вызове для того же post_id старая phash-запись
     в duplicate_hashes заменяется новой (DELETE + INSERT), а не дублируется.
+
+    Устойчива к already-active transaction: если quick_add_upload сделал INSERT
+    (неявный BEGIN), а затем вызвал compute_and_store_phash → set_phash_atomic,
+    BEGIN IMMEDIATE падает с 'cannot start a transaction within a transaction'.
+    В этом случае пропускаем BEGIN и работаем в текущей транзакции —
+    commit в конце всё зафиксирует.
     """
     db = get_db()
-    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+    except Exception as begin_err:
+        # already in transaction — проверяем по сообщению ошибки
+        if "cannot start a transaction" in str(begin_err):
+            log.debug("set_phash_atomic: уже в транзакции — работаем без явного BEGIN")
+        else:
+            raise
     try:
         await db.execute("UPDATE posts SET phash = ? WHERE id = ?", (phash, post_id))
         # Удаляем старую запись phash для этого поста (для idempotency)
