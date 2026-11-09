@@ -165,3 +165,20 @@ async def count_by_status(status: str) -> int:
     row = await cur.fetchone()
     await cur.close()
     return row["c"] if row else 0
+
+
+async def has_queued_task(post_id: int, task_type: str = "download") -> bool:
+    """Проверяет, есть ли уже queued-задача данного типа для поста.
+
+    Защита от дублирования: если файл уже пере-скачивается (задача в очереди),
+    не создаём вторую — worker обработает первую и файл появится.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "SELECT COUNT(*) AS c FROM task_queue "
+        "WHERE post_id = ? AND task_type = ? AND status = 'queued'",
+        (post_id, task_type),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    return bool(row and row["c"] > 0)

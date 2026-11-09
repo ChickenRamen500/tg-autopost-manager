@@ -39,6 +39,21 @@ _scheduler: AsyncIOScheduler | None = None
 _last_send: dict[int, float] = {}
 
 
+class FileMissingError(Exception):
+    """Файл поста не найден на диске, но можно перекачать через worker.
+
+    Поднимается в _send_one_post / _send_album_group когда file_path указывает
+    на несуществующий файл. Если у поста есть source_url — worker может
+    перекачать. Scheduler ловит это исключение и enqueues download task.
+    """
+
+    def __init__(self, post_id: int, file_path: str, source_url: str, message: str) -> None:
+        super().__init__(message)
+        self.post_id = post_id
+        self.file_path = file_path
+        self.source_url = source_url
+
+
 def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
@@ -147,13 +162,25 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
 
     # Проверка существования файла. Файл мог быть удалён (cleanup, пересборка
     # контейнера, изменение MEDIA_DIR, ручная очистка data/downloads). В этом
-    # случае помечаем пост как failed с понятным сообщением — иначе получаем
-    # загадочное 'ClientOSError: [Errno 2] Can not write request body'.
+    # случае пытаемся перекачать через worker (если есть source_url).
     if not os.path.exists(file_path):
+        # Если у поста есть source_url — можно перекачать. Enqueue download task.
+        source_url = post.get("source_url")
+        if source_url:
+            raise FileMissingError(
+                post_id=post["id"],
+                file_path=file_path,
+                source_url=source_url,
+                message=(
+                    f"Пост #{post['id']}: файл не найден на диске: {file_path}. "
+                    f"Перекачиваем через worker (source_url={source_url})."
+                ),
+            )
+        # Нет source_url — перекачать нельзя, помечаем failed
         raise RuntimeError(
             f"Пост #{post['id']}: файл не найден на диске: {file_path}. "
-            f"Возможно, файл был удалён (cleanup/data/downloads очищен) или "
-            f"пересоздан контейнер. Удалите пост или переотправьте через расширение."
+            f"source_url отсутствует — перекачать нельзя. "
+            f"Удалите пост или переотправьте через расширение."
         )
 
     # P2-11: FSInputFile (streaming, не грузит файл в RAM) вместо BufferedInputFile (OOM на 2GB)
@@ -268,6 +295,73 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
     log.info("Альбом (%d постов, media_group_id=%s) отправлен в канал %s", len(posts), posts[0].get("media_group_id"), chat_id)
 
 
+async def _redownload_post(post_id: int, queue_id: int, queue_name: str) -> None:
+    """Перекачивает файл поста через worker (когда файл удалён с диска).
+
+    Вызывается когда scheduler при попытке отправки обнаруживает, что file_path
+    указывает на несуществующий файл, но у поста есть source_url.
+
+    Действия:
+    1. Проверяем, нет ли уже queued download-задачи для этого поста
+       (защита от дублирования — если уже в очереди, ждём).
+    2. Обнуляем file_path (worker не должен считать файл готовым).
+    3. Меняем статус на 'new' (worker ищет new → downloading → pending).
+    4. Enqueue download-задачу с payload из source_url + referer из post.
+    5. Пост останется в очереди, но не будет отправлен пока worker не скачает.
+       Worker переведёт в pending → scheduler отправит на следующем тике.
+    """
+    from app.repositories import task_queue as tq_repo
+
+    # 1. Проверяем, нет ли уже queued download-задачи
+    if await tq_repo.has_queued_task(post_id, "download"):
+        log.info(
+            "Пост #%s: файл не найден, но download-задача уже в очереди — ждём worker",
+            post_id,
+        )
+        return
+
+    # Достаём пост (нужен source_url для payload)
+    post = await posts_repo.get_post(post_id)
+    if not post:
+        log.warning("Пост #%s не найден (удалён?) — перекачка отменена", post_id)
+        return
+
+    source_url = post.get("source_url")
+    if not source_url:
+        log.error(
+            "Пост #%s: файл не найден, но source_url отсутствует — перекачать нельзя",
+            post_id,
+        )
+        await posts_repo.mark_failed(
+            post_id,
+            "Файл не найден на диске и source_url отсутствует — перекачать нельзя",
+        )
+        return
+
+    # 2. Обнуляем file_path (worker не должен считать файл готовым)
+    db = posts_repo.get_db()
+    await db.execute("UPDATE posts SET file_path = NULL WHERE id = ?", (post_id,))
+    await db.commit()
+
+    # 3. Меняем статус на 'new' (worker ищет new для скачивания)
+    await posts_repo.update_status(post_id, "new")
+
+    # 4. Enqueue download-задачу с payload (referer, site — для yt-dlp path)
+    payload: dict[str, Any] = {
+        "media_url": source_url,
+        "url": source_url,
+        "referer": post.get("source_channel") or None,
+        "site": post.get("source_type") or None,
+    }
+    await tq_repo.enqueue(post_id, "download", payload)
+
+    log.warning(
+        "Пост #%s: файл не найден на диске → перекачиваем через worker "
+        "(queue '%s' #%s, source_url=%s). Пост вернётся в pending после скачивания.",
+        post_id, queue_name, queue_id, source_url,
+    )
+
+
 async def send_post_from_queue(queue_id: int) -> None:
     """Отправляет следующий pending-пост из очереди (ТЗ §2.5.1).
 
@@ -331,6 +425,12 @@ async def send_post_from_queue(queue_id: int) -> None:
                     sent_ids = post_ids
                     log.info("Альбом отправлен: посты %s", sent_ids)
                     return
+                except FileMissingError as e:
+                    # Один из постов альбома потерял файл → перекачиваем.
+                    # Пост вернётся в pending после скачивания, альбом отправится
+                    # на следующем тике scheduler'а (когда все посты снова pending).
+                    await _redownload_post(e.post_id, queue_id, queue["name"])
+                    return
                 except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
                     last_error = str(e)
                     # Инкрементим попытки для всех постов альбома
@@ -365,6 +465,11 @@ async def send_post_from_queue(queue_id: int) -> None:
             # Уведомления (блок C): проверяем остаток очереди
             await _check_queue_notifications(queue, channel)
             return
+        except FileMissingError as e:
+            # Файл удалён, но есть source_url → перекачиваем через worker.
+            # Не ретраим отправку (бесполезно до скачивания), не mark_failed.
+            await _redownload_post(e.post_id, queue_id, queue["name"])
+            return
         except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
             last_error = str(e)
             # P2-6: permanent-error classification (ТЗ §2.5.2 п.5)
@@ -374,8 +479,8 @@ async def send_post_from_queue(queue_id: int) -> None:
             is_permanent = any(keyword in error_str for keyword in [
                 "forbidden", "chat not found", "chat_id_invalid",
                 "entity_too_large", "bot was blocked", "not enough rights",
-                # Файл удалён с диска — ретрай бессмысленен, файл не восстановится
-                "файл не найден на диске", "file not found",
+                # Файл удалён, source_url нет — перекачать нельзя
+                "source_url отсутствует",
             ])
             if is_permanent:
                 await posts_repo.mark_failed(post["id"], last_error)
