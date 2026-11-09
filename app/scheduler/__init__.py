@@ -144,6 +144,18 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
         raise RuntimeError(
             f"Пост #{post['id']}: нет ни tg_file_id, ни file_path — отправить невозможно"
         )
+
+    # Проверка существования файла. Файл мог быть удалён (cleanup, пересборка
+    # контейнера, изменение MEDIA_DIR, ручная очистка data/downloads). В этом
+    # случае помечаем пост как failed с понятным сообщением — иначе получаем
+    # загадочное 'ClientOSError: [Errno 2] Can not write request body'.
+    if not os.path.exists(file_path):
+        raise RuntimeError(
+            f"Пост #{post['id']}: файл не найден на диске: {file_path}. "
+            f"Возможно, файл был удалён (cleanup/data/downloads очищен) или "
+            f"пересоздан контейнер. Удалите пост или переотправьте через расширение."
+        )
+
     # P2-11: FSInputFile (streaming, не грузит файл в RAM) вместо BufferedInputFile (OOM на 2GB)
     from aiogram.types import FSInputFile
 
@@ -226,6 +238,13 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
         if fid:
             media_obj = fid
         elif file_path:
+            # Проверка существования файла (см. комментарий в _send_one_post)
+            if not os.path.exists(file_path):
+                raise RuntimeError(
+                    f"Пост #{p['id']}: файл не найден на диске: {file_path}. "
+                    f"Файл удалён или контейнер пересоздан. "
+                    f"Удалите пост или переотправьте через расширение."
+                )
             media_obj = FSInputFile(file_path)
             log.info("Пост #%s альбома: отправка локального файла %s", p["id"], file_path)
         else:
@@ -355,6 +374,8 @@ async def send_post_from_queue(queue_id: int) -> None:
             is_permanent = any(keyword in error_str for keyword in [
                 "forbidden", "chat not found", "chat_id_invalid",
                 "entity_too_large", "bot was blocked", "not enough rights",
+                # Файл удалён с диска — ретрай бессмысленен, файл не восстановится
+                "файл не найден на диске", "file not found",
             ])
             if is_permanent:
                 await posts_repo.mark_failed(post["id"], last_error)
