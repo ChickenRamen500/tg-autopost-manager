@@ -78,6 +78,22 @@ def _checkbox(value: str | None) -> bool:
     return value is not None and value.lower() not in ("", "off", "false", "0")
 
 
+async def _reload_scheduler_safe() -> None:
+    """Перерегистрирует job'ы scheduler'а после изменения очередей.
+
+    Без этого новые очереди, созданные через веб-интерфейс, не получают
+    APScheduler job → посты в них никогда не отправляются (scheduler просто
+    не знает об очереди). Бот вызывает reload_scheduler в /add_queue,
+    но веб-роуты раньше этого не делали.
+    """
+    try:
+        from app.scheduler import reload_scheduler
+        n = await reload_scheduler()
+        log.info("web: scheduler перерегистрирован (%d очередей)", n)
+    except Exception as e:  # noqa: BLE001
+        log.warning("web: reload_scheduler не удался: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # HTML страницы
 # ---------------------------------------------------------------------------
@@ -422,6 +438,7 @@ async def action_toggle_queue(
     new_state = not bool(q["is_active"])
     await queues_repo.set_active(queue_id, new_state)
     log.info("web: очередь #%s is_active=%s (user=%s)", queue_id, new_state, _user)
+    await _reload_scheduler_safe()
     return _redirect_back(request)
 
 
@@ -435,6 +452,7 @@ async def action_delete_queue(
     if not ok:
         raise HTTPException(status_code=404, detail=f"Очередь #{queue_id} не найдена")
     log.info("web: удалена очередь #%s (user=%s)", queue_id, _user)
+    await _reload_scheduler_safe()
     # Удаление очереди — возвращаем на /queues, а не на referer (там удалённой очереди уже нет)
     return RedirectResponse(url="/queues", status_code=303)
 
@@ -539,6 +557,7 @@ async def action_create_queue(
         "web: создана очередь #%s name=%r channel_id=%s interval=%s (user=%s)",
         qid, name, channel_id, interval_minutes, _user,
     )
+    await _reload_scheduler_safe()
     return RedirectResponse(url=f"/queues/{qid}", status_code=303)
 
 
@@ -599,6 +618,7 @@ async def action_edit_queue(
         "web: обновлена очередь #%s name=%r channel_id=%s interval=%s (user=%s)",
         queue_id, name, channel_id, interval_minutes, _user,
     )
+    await _reload_scheduler_safe()
     return RedirectResponse(url=f"/queues/{queue_id}", status_code=303)
 
 
