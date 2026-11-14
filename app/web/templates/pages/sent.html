@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import status_badge, file_type_icon, source_icon %}
+{% from "macros.html" import status_badge, file_type_icon, source_icon, source_link %}
 
 {% block title %}Архив отправленных — TG Media Queue Bot{% endblock %}
 
@@ -36,7 +36,7 @@
                         <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
                         <td>
                             {{ source_icon(p.source_type) }} {{ p.source_type }}
-                            {% if p.source_url %}<a href="{{ p.source_url }}" target="_blank" rel="noopener" class="ms-1 small" title="Открыть источник"><i class="bi bi-box-arrow-up-right"></i></a>{% endif %}
+                            {{ source_link(p) }}
                         </td>
                         <td>
                             {% if p.queue_obj %}

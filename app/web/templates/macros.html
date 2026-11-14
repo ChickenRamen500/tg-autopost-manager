@@ -47,7 +47,20 @@
     'telegram_channel': 'bi-telegram',
     'web': 'bi-globe',
     'extension': 'bi-puzzle',
+    'local_file': 'bi-folder',
     'any': 'bi-asterisk'
 } %}
 <i class="bi {{ icons.get(source_type, 'bi-cloud') }}" aria-label="{{ source_type }}"></i>
+{%- endmacro %}
+
+{# Ссылка на источник файла: если локальный файл — через /web/local_files/serve,
+   иначе — прямая ссылка #}
+{% macro source_link(post) -%}
+{% if post.source_url %}
+    {% if post.source_type == 'local_file' or post.source_url.startswith('/') or post.source_url.startswith('\\') %}
+        <a href="/web/local_files/serve?path={{ post.source_url | urlencode }}" target="_blank" rel="noopener" class="ms-1 small" title="Открыть файл"><i class="bi bi-box-arrow-up-right"></i></a>
+    {% else %}
+        <a href="{{ post.source_url }}" target="_blank" rel="noopener" class="ms-1 small" title="Открыть источник"><i class="bi bi-box-arrow-up-right"></i></a>
+    {% endif %}
+{% endif %}
 {%- endmacro %}

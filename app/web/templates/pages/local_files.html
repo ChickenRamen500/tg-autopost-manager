@@ -6,17 +6,49 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h1 class="h3 mb-0"><i class="bi bi-folder2-open"></i> Локальные файлы</h1>
-    <span class="badge bg-secondary" id="file-count">—</span>
+    <div class="d-flex gap-2 align-items-center">
+        <span class="badge bg-secondary" id="file-count">—</span>
+        <button class="btn btn-sm btn-outline-secondary" id="btn-manage-roots" title="Управление папками">
+            <i class="bi bi-gear"></i>
+        </button>
+    </div>
 </div>
 
 <p class="text-muted small">
-    Просмотр медиа-файлов на сервере (в папке <code>media_dir</code>).
-    Выберите файлы и добавьте в очередь — посты создаются мгновенно (без перекачивания).
+    Просмотр медиа-файлов. Выберите файлы → добавьте в очередь (по одному или как альбом).
 </p>
+
+{# Панель инструментов: корень, сортировка, вид #}
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+    <select class="form-select form-select-sm" id="root-select" style="width: auto;">
+    </select>
+
+    <div class="btn-group btn-group-sm" role="group">
+        <select class="form-select form-select-sm" id="sort-select" style="width: auto;">
+            <option value="name">Имя ↑</option>
+            <option value="-name">Имя ↓</option>
+            <option value="size">Размер ↑</option>
+            <option value="-size">Размер ↓</option>
+            <option value="modified">Дата ↑</option>
+            <option value="-modified">Дата ↓</option>
+            <option value="type">Тип ↑</option>
+            <option value="-type">Тип ↓</option>
+        </select>
+    </div>
+
+    <div class="btn-group btn-group-sm">
+        <button class="btn btn-outline-secondary active" id="view-grid" title="Сетка">
+            <i class="bi bi-grid"></i>
+        </button>
+        <button class="btn btn-outline-secondary" id="view-list" title="Список">
+            <i class="bi bi-list-ul"></i>
+        </button>
+    </div>
+</div>
 
 <nav aria-label="breadcrumb" class="mb-3">
     <ol class="breadcrumb mb-0" id="breadcrumb">
-        <li class="breadcrumb-item"><a href="#" data-path=""><i class="bi bi-house"></i> media_dir</a></li>
+        <li class="breadcrumb-item"><a href="#"><i class="bi bi-house"></i></a></li>
     </ol>
 </nav>
 
@@ -28,13 +60,6 @@
 <div id="error-msg" class="alert alert-danger d-none" role="alert"></div>
 
 <div id="content" class="d-none">
-    {# Переключатель корневых директорий #}
-    <div id="roots-selector" class="mb-3 d-none">
-        <label class="form-label small text-muted"><i class="bi bi-hdd"></i> Источник:</label>
-        <select class="form-select form-select-sm" id="root-select" style="width: auto; display: inline-block; margin-left: 0.5rem;">
-        </select>
-    </div>
-
     <div id="dirs-section" class="mb-3 d-none">
         <h6 class="text-muted"><i class="bi bi-folder"></i> Папки</h6>
         <div id="dirs-list" class="d-flex flex-wrap gap-2"></div>
@@ -44,15 +69,11 @@
         <div class="d-flex justify-content-between align-items-center mb-2">
             <h6 class="text-muted mb-0"><i class="bi bi-file-earmark-image"></i> Файлы</h6>
             <div class="btn-group btn-group-sm">
-                <button type="button" class="btn btn-outline-secondary" id="select-all">
-                    <i class="bi bi-check2-all"></i> Выбрать все
-                </button>
-                <button type="button" class="btn btn-outline-secondary" id="deselect-all">
-                    <i class="bi bi-x-circle"></i> Снять
-                </button>
+                <button type="button" class="btn btn-outline-secondary" id="select-all">Все</button>
+                <button type="button" class="btn btn-outline-secondary" id="deselect-all">Снять</button>
             </div>
         </div>
-        <div id="files-list" class="row row-cols-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-6 g-2"></div>
+        <div id="files-list"></div>
     </div>
 
     <div id="action-bar" class="sticky-bottom bg-dark text-light p-3 rounded-3 mt-3 d-none">
@@ -61,11 +82,15 @@
             <select class="form-select form-select-sm" id="queue-select" style="width: auto;">
                 <option value="">— Входящие —</option>
                 {% for q in queues %}
-                <option value="{{ q.id }}">{{ q.name }}{% if not q.is_active %} (выкл){% endif %}</option>
+                <option value="{{ q.id }}">{{ q.name }}</option>
                 {% endfor %}
             </select>
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="as-album">
+                <label class="form-check-label small" for="as-album">Как альбом</label>
+            </div>
             <button type="button" class="btn btn-sm btn-primary" id="add-to-queue-btn" disabled>
-                <i class="bi bi-send"></i> Добавить в очередь
+                <i class="bi bi-send"></i> Добавить
             </button>
         </div>
     </div>
@@ -74,7 +99,29 @@
 <div id="empty-folder" class="card d-none">
     <div class="card-body p-5 text-center text-muted">
         <i class="bi bi-folder-x fs-1 d-block mb-3"></i>
-        <p class="mb-0">В этой папке нет медиа-файлов.</p>
+        <p class="mb-0">Нет медиа-файлов.</p>
+    </div>
+</div>
+
+{# Модальное окно управления папками #}
+<div class="modal fade" id="roots-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Источники (корневые папки)</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="roots-list-modal" class="mb-3"></div>
+                <hr>
+                <label class="form-label">Добавить путь:</label>
+                <div class="input-group">
+                    <input type="text" class="form-control" id="new-root-path" placeholder="/mnt/saved_files">
+                    <button class="btn btn-outline-primary" id="add-root-btn">Добавить</button>
+                </div>
+                <div class="form-text">В Docker: путь внутри контейнера (добавьте volume в compose).</div>
+            </div>
+        </div>
     </div>
 </div>
 {% endblock %}
@@ -83,31 +130,38 @@
 <script>
 (function() {
     "use strict";
-
     let currentPath = "";
     let currentRoot = 0;
+    let currentSort = "name";
+    let viewMode = "grid";
     const selectedFiles = new Set();
 
-    const loading = document.getElementById("loading");
-    const errorMsg = document.getElementById("error-msg");
-    const content = document.getElementById("content");
-    const dirsSection = document.getElementById("dirs-section");
-    const dirsList = document.getElementById("dirs-list");
-    const filesList = document.getElementById("files-list");
-    const fileCount = document.getElementById("file-count");
-    const breadcrumb = document.getElementById("breadcrumb");
-    const emptyFolder = document.getElementById("empty-folder");
-    const actionBar = document.getElementById("action-bar");
-    const selectedCount = document.getElementById("selected-count");
-    const addBtn = document.getElementById("add-to-queue-btn");
-    const queueSelect = document.getElementById("queue-select");
-    const rootSelect = document.getElementById("root-select");
-    const rootsSelector = document.getElementById("roots-selector");
+    const $ = (id) => document.getElementById(id);
+    const loading = $("loading");
+    const errorMsg = $("error-msg");
+    const content = $("content");
+    const dirsSection = $("dirs-section");
+    const dirsList = $("dirs-list");
+    const filesList = $("files-list");
+    const fileCount = $("file-count");
+    const breadcrumb = $("breadcrumb");
+    const emptyFolder = $("empty-folder");
+    const actionBar = $("action-bar");
+    const selectedCount = $("selected-count");
+    const addBtn = $("add-to-queue-btn");
+    const queueSelect = $("queue-select");
+    const rootSelect = $("root-select");
+    const sortSelect = $("sort-select");
 
-    function formatSize(bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
-        return (bytes / 1048576).toFixed(1) + " MB";
+    function fmtSize(b) {
+        if (b < 1024) return b + " B";
+        if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
+        return (b / 1048576).toFixed(1) + " MB";
+    }
+    function fmtDate(ts) {
+        if (!ts) return "—";
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString("ru-RU") + " " + d.toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"});
     }
 
     function updateBreadcrumb(path) {
@@ -115,18 +169,15 @@
         const li = document.createElement("li");
         li.className = "breadcrumb-item";
         const a = document.createElement("a");
-        a.href = "#";
-        a.innerHTML = '<i class="bi bi-house"></i> media_dir';
-        a.dataset.path = "";
-        a.addEventListener("click", (e) => { e.preventDefault(); navigateTo(""); });
+        a.href = "#"; a.innerHTML = '<i class="bi bi-house"></i>';
+        a.onclick = (e) => { e.preventDefault(); navigateTo(""); };
         li.appendChild(a);
         breadcrumb.appendChild(li);
-
         if (path) {
             const parts = path.split("/");
-            let accumulated = "";
+            let acc = "";
             for (let i = 0; i < parts.length; i++) {
-                accumulated = i === 0 ? parts[i] : accumulated + "/" + parts[i];
+                acc = i === 0 ? parts[i] : acc + "/" + parts[i];
                 const li2 = document.createElement("li");
                 if (i === parts.length - 1) {
                     li2.className = "breadcrumb-item active";
@@ -134,10 +185,8 @@
                 } else {
                     li2.className = "breadcrumb-item";
                     const a2 = document.createElement("a");
-                    a2.href = "#";
-                    a2.textContent = parts[i];
-                    a2.dataset.path = accumulated;
-                    a2.addEventListener("click", (e) => { e.preventDefault(); navigateTo(accumulated); });
+                    a2.href = "#"; a2.textContent = parts[i];
+                    a2.onclick = (e) => { e.preventDefault(); navigateTo(acc); };
                     li2.appendChild(a2);
                 }
                 breadcrumb.appendChild(li2);
@@ -146,49 +195,36 @@
     }
 
     async function navigateTo(path, root) {
-        currentPath = path;
         if (root !== undefined) currentRoot = root;
+        currentPath = path;
         selectedFiles.clear();
         updateActionBar();
         loading.classList.remove("d-none");
         content.classList.add("d-none");
         errorMsg.classList.add("d-none");
         emptyFolder.classList.add("d-none");
-
         try {
-            const resp = await fetch(`/web/local_files/list?path=${encodeURIComponent(path)}&root=${currentRoot}`);
-            if (!resp.ok) {
-                const data = await resp.json().catch(() => ({}));
-                throw new Error(data.detail || `HTTP ${resp.status}`);
-            }
-            const data = await resp.json();
-            render(data);
+            const r = await fetch(`/web/local_files/list?path=${encodeURIComponent(path)}&root=${currentRoot}&sort=${currentSort}`);
+            if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d.detail || `HTTP ${r.status}`); }
+            render(await r.json());
         } catch (e) {
             errorMsg.textContent = "Ошибка: " + e.message;
             errorMsg.classList.remove("d-none");
-        } finally {
-            loading.classList.add("d-none");
-        }
+        } finally { loading.classList.add("d-none"); }
     }
 
     function render(data) {
         updateBreadcrumb(data.path);
-
-        // Roots selector
-        if (data.roots && data.roots.length > 1) {
-            rootsSelector.classList.remove("d-none");
-            rootSelect.innerHTML = "";
-            for (const r of data.roots) {
-                const opt = document.createElement("option");
-                opt.value = r.index;
-                opt.textContent = r.name;
-                if (r.index === data.root) opt.selected = true;
-                rootSelect.appendChild(opt);
-            }
-        } else {
-            rootsSelector.classList.add("d-none");
+        // Roots
+        rootSelect.innerHTML = "";
+        for (const r of data.roots) {
+            const opt = document.createElement("option");
+            opt.value = r.index; opt.textContent = r.name;
+            if (r.index === data.root) opt.selected = true;
+            rootSelect.appendChild(opt);
         }
 
+        // Dirs
         dirsList.innerHTML = "";
         if (data.directories.length > 0) {
             dirsSection.classList.remove("d-none");
@@ -197,17 +233,16 @@
                 btn.className = "btn btn-sm btn-outline-secondary";
                 btn.href = "#";
                 btn.innerHTML = `<i class="bi bi-folder"></i> ${dir.name}`;
-                btn.addEventListener("click", (e) => {
+                btn.onclick = (e) => {
                     e.preventDefault();
-                    const newPath = data.path ? data.path + "/" + dir.name : dir.name;
-                    navigateTo(newPath);
-                });
+                    const np = data.path ? data.path + "/" + dir.name : dir.name;
+                    navigateTo(np);
+                };
                 dirsList.appendChild(btn);
             }
-        } else {
-            dirsSection.classList.add("d-none");
-        }
+        } else { dirsSection.classList.add("d-none"); }
 
+        // Files
         filesList.innerHTML = "";
         if (data.files.length === 0) {
             fileCount.textContent = "0 файлов";
@@ -216,73 +251,87 @@
                 content.classList.add("d-none");
                 return;
             }
+        } else { fileCount.textContent = `${data.files.length} файлов`; }
+
+        if (viewMode === "grid") {
+            filesList.className = "row row-cols-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-6 g-2";
+            for (const f of data.files) renderGridCard(f, data);
         } else {
-            fileCount.textContent = `${data.files.length} файлов`;
+            filesList.className = "list-group";
+            for (const f of data.files) renderListRow(f, data);
         }
-
-        for (const file of data.files) {
-            const col = document.createElement("div");
-            col.className = "col";
-
-            const card = document.createElement("div");
-            card.className = "card file-card h-100 position-relative";
-            card.style.cursor = "pointer";
-            card.dataset.path = file.relative_path;
-
-            const thumb = document.createElement("div");
-            thumb.className = "file-thumb";
-            thumb.style.cssText = "height: 120px; display: flex; align-items: center; justify-content: center; background: #f8f9fa; overflow: hidden;";
-            if (file.file_type === "photo" || file.file_type === "gif") {
-                const img = document.createElement("img");
-                img.src = `/web/local_files/preview?path=${encodeURIComponent(file.relative_path)}&root=${currentRoot}`;
-                img.style.cssText = "max-width: 100%; max-height: 120px; object-fit: contain;";
-                img.alt = file.name;
-                img.loading = "lazy";
-                img.addEventListener("error", () => {
-                    thumb.innerHTML = '<i class="bi bi-file-earmark-image fs-1 text-muted"></i>';
-                });
-                thumb.appendChild(img);
-            } else if (file.file_type === "video") {
-                thumb.innerHTML = '<i class="bi bi-play-circle fs-1 text-primary"></i>';
-            } else {
-                thumb.innerHTML = '<i class="bi bi-file-earmark fs-1 text-muted"></i>';
-            }
-            card.appendChild(thumb);
-
-            const body = document.createElement("div");
-            body.className = "card-body p-2";
-            const name = document.createElement("div");
-            name.className = "small text-truncate fw-semibold";
-            name.textContent = file.name;
-            name.title = file.name;
-            const meta = document.createElement("div");
-            meta.className = "small text-muted";
-            meta.textContent = formatSize(file.size);
-            body.appendChild(name);
-            body.appendChild(meta);
-            card.appendChild(body);
-
-            const check = document.createElement("div");
-            check.className = "file-check position-absolute top-0 end-0 m-1";
-            check.innerHTML = '<i class="bi bi-check-circle-fill text-success fs-4 d-none"></i>';
-            card.appendChild(check);
-
-            card.addEventListener("click", (e) => {
-                e.preventDefault();
-                toggleFile(file.relative_path, card, check);
-            });
-
-            col.appendChild(card);
-            filesList.appendChild(col);
-        }
-
         content.classList.remove("d-none");
+    }
+
+    function renderGridCard(f, data) {
+        const col = document.createElement("div");
+        col.className = "col";
+        const card = document.createElement("div");
+        card.className = "card file-card h-100 position-relative";
+        card.style.cursor = "pointer";
+        card.dataset.path = f.relative_path;
+
+        const thumb = document.createElement("div");
+        thumb.style.cssText = "height:120px;display:flex;align-items:center;justify-content:center;background:#f8f9fa;overflow:hidden;";
+        if (f.file_type === "photo" || f.file_type === "gif") {
+            const img = document.createElement("img");
+            img.src = `/web/local_files/preview?path=${encodeURIComponent(f.relative_path)}&root=${currentRoot}`;
+            img.style.cssText = "max-width:100%;max-height:120px;object-fit:contain;";
+            img.alt = f.name; img.loading = "lazy";
+            img.onerror = () => { thumb.innerHTML = '<i class="bi bi-file-earmark fs-1 text-muted"></i>'; };
+            thumb.appendChild(img);
+        } else if (f.file_type === "video") {
+            thumb.innerHTML = '<i class="bi bi-play-circle fs-1 text-primary"></i>';
+        } else { thumb.innerHTML = '<i class="bi bi-file-earmark fs-1 text-muted"></i>'; }
+        card.appendChild(thumb);
+
+        const body = document.createElement("div");
+        body.className = "card-body p-2";
+        body.innerHTML = `<div class="small text-truncate fw-semibold" title="${f.name}">${f.name}</div><div class="small text-muted">${fmtSize(f.size)}</div>`;
+        card.appendChild(body);
+
+        const check = document.createElement("div");
+        check.className = "position-absolute top-0 end-0 m-1";
+        check.innerHTML = '<i class="bi bi-check-circle-fill text-success fs-4 d-none"></i>';
+        card.appendChild(check);
+
+        card.onclick = (e) => { e.preventDefault(); toggleFile(f.relative_path, card, check); };
+        col.appendChild(card);
+        filesList.appendChild(col);
+    }
+
+    function renderListRow(f, data) {
+        const row = document.createElement("div");
+        row.className = "list-group-item list-group-item-action d-flex align-items-center gap-2 file-card position-relative";
+        row.style.cursor = "pointer";
+        row.dataset.path = f.relative_path;
+
+        const icon = document.createElement("span");
+        icon.className = "flex-shrink-0";
+        icon.innerHTML = f.file_type === "photo" ? '<i class="bi bi-image"></i>' :
+                         f.file_type === "video" ? '<i class="bi bi-film"></i>' :
+                         f.file_type === "gif" ? '<i class="bi bi-file-play"></i>' :
+                         '<i class="bi bi-file-earmark"></i>';
+        row.appendChild(icon);
+
+        const info = document.createElement("span");
+        info.className = "flex-grow-1 text-truncate";
+        info.innerHTML = `<span class="fw-semibold">${f.name}</span> <small class="text-muted ms-2">${fmtSize(f.size)} · ${fmtDate(f.modified)}</small>`;
+        row.appendChild(info);
+
+        const check = document.createElement("span");
+        check.className = "flex-shrink-0";
+        check.innerHTML = '<i class="bi bi-check-circle-fill text-success fs-5 d-none"></i>';
+        row.appendChild(check);
+
+        row.onclick = (e) => { e.preventDefault(); toggleFile(f.relative_path, row, check); };
+        filesList.appendChild(row);
     }
 
     function toggleFile(path, card, check) {
         if (selectedFiles.has(path)) {
             selectedFiles.delete(path);
-            card.classList.remove("border-primary", "border-2");
+            card.classList.remove("border-primary", "border-2", "active");
             check.querySelector("i").classList.add("d-none");
         } else {
             selectedFiles.add(path);
@@ -296,80 +345,105 @@
         const n = selectedFiles.size;
         selectedCount.textContent = `${n} выбрано`;
         addBtn.disabled = n === 0;
-        if (n > 0) {
-            actionBar.classList.remove("d-none");
-        } else {
-            actionBar.classList.add("d-none");
-        }
+        actionBar.classList.toggle("d-none", n === 0);
     }
 
-    document.getElementById("select-all").addEventListener("click", () => {
-        document.querySelectorAll(".file-card").forEach((card) => {
-            const path = card.dataset.path;
-            if (!selectedFiles.has(path)) {
-                selectedFiles.add(path);
-                card.classList.add("border-primary", "border-2");
-                card.querySelector(".file-check i").classList.remove("d-none");
+    // Events
+    $("select-all").onclick = () => {
+        document.querySelectorAll(".file-card").forEach(c => {
+            const p = c.dataset.path;
+            if (!selectedFiles.has(p)) {
+                selectedFiles.add(p);
+                c.classList.add("border-primary", "border-2");
+                c.querySelector("i.bi-check-circle-fill")?.classList.remove("d-none");
             }
         });
         updateActionBar();
-    });
-
-    document.getElementById("deselect-all").addEventListener("click", () => {
+    };
+    $("deselect-all").onclick = () => {
         selectedFiles.clear();
-        document.querySelectorAll(".file-card").forEach((card) => {
-            card.classList.remove("border-primary", "border-2");
-            card.querySelector(".file-check i").classList.add("d-none");
+        document.querySelectorAll(".file-card").forEach(c => {
+            c.classList.remove("border-primary", "border-2", "active");
+            c.querySelector("i.bi-check-circle-fill")?.classList.add("d-none");
         });
         updateActionBar();
-    });
+    };
+    sortSelect.onchange = () => { currentSort = sortSelect.value; navigateTo(currentPath); };
+    rootSelect.onchange = () => { currentRoot = parseInt(rootSelect.value); navigateTo("", currentRoot); };
+    $("view-grid").onclick = () => { viewMode = "grid"; $("view-grid").classList.add("active"); $("view-list").classList.remove("active"); navigateTo(currentPath); };
+    $("view-list").onclick = () => { viewMode = "list"; $("view-list").classList.add("active"); $("view-grid").classList.remove("active"); navigateTo(currentPath); };
 
-    addBtn.addEventListener("click", async () => {
-        const queueId = queueSelect.value || null;
+    // Add to queue
+    addBtn.onclick = async () => {
+        const qId = queueSelect.value || null;
+        const album = $("as-album").checked;
         const files = Array.from(selectedFiles);
         addBtn.disabled = true;
-        addBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Добавление...';
-
-        let success = 0;
-        let failed = 0;
-        for (let i = 0; i < files.length; i++) {
-            try {
-                const resp = await fetch("/web/local_files/add", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        file_path: files[i],
-                        root: currentRoot,
-                        queue_id: queueId ? parseInt(queueId) : null,
-                    }),
-                });
-                if (resp.ok) {
-                    success++;
-                } else {
-                    failed++;
-                }
-            } catch {
-                failed++;
-            }
-        }
-
+        addBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+        try {
+            const r = await fetch("/web/local_files/add", {
+                method: "POST",
+                headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({files, root: currentRoot, queue_id: qId ? parseInt(qId) : null, as_album: album})
+            });
+            const d = await r.json();
+            if (d.success) {
+                alert(`Добавлено ${d.created} постов в очередь "${d.queue_name}"${d.errors.length ? "\nОшибки: " + d.errors.join("; ") : ""}`);
+                selectedFiles.clear(); updateActionBar(); navigateTo(currentPath);
+            } else { alert("Ошибка: " + (d.errors.join("; ") || "неизвестно")); }
+        } catch (e) { alert("Сетевая ошибка: " + e.message); }
         addBtn.disabled = false;
-        addBtn.innerHTML = '<i class="bi bi-send"></i> Добавить в очередь';
-        selectedFiles.clear();
-        updateActionBar();
+        addBtn.innerHTML = '<i class="bi bi-send"></i> Добавить';
+    };
 
-        if (success > 0) {
-            alert(`Добавлено ${success} файлов в очередь${failed > 0 ? `, ошибок: ${failed}` : ""}`);
-            navigateTo(currentPath);
-        } else {
-            alert("Не удалось добавить файлы");
+    // Roots management
+    $("btn-manage-roots").onclick = async () => {
+        const modal = new bootstrap.Modal($("roots-modal"));
+        const r = await fetch("/web/local_files/roots");
+        const d = await r.json();
+        const listEl = $("roots-list-modal");
+        listEl.innerHTML = "";
+        for (const root of d.roots) {
+            const item = document.createElement("div");
+            item.className = "d-flex justify-content-between align-items-center mb-1 p-2 border rounded";
+            item.innerHTML = `<span class="small"><i class="bi bi-folder"></i> ${root.path}</span>`;
+            if (root.index > 0) { // can't remove default media_dir
+                const btn = document.createElement("button");
+                btn.className = "btn btn-sm btn-outline-danger";
+                btn.innerHTML = '<i class="bi bi-trash"></i>';
+                btn.onclick = async () => {
+                    await fetch("/web/local_files/roots/remove", {
+                        method: "POST", headers: {"Content-Type":"application/json"},
+                        body: JSON.stringify({path: root.path})
+                    });
+                    item.remove();
+                    navigateTo("", 0);
+                };
+                item.appendChild(btn);
+            } else {
+                item.innerHTML += '<span class="badge bg-secondary ms-2">основная</span>';
+            }
+            listEl.appendChild(item);
         }
-    });
-
-    // Переключение корневой директории
-    rootSelect.addEventListener("change", (e) => {
-        navigateTo("", parseInt(e.target.value));
-    });
+        modal.show();
+    };
+    $("add-root-btn").onclick = async () => {
+        const path = $("new-root-path").value.trim();
+        if (!path) return;
+        const r = await fetch("/web/local_files/roots/add", {
+            method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({path})
+        });
+        const d = await r.json();
+        if (r.ok) {
+            $("new-root-path").value = "";
+            $("btn-manage-roots").click(); // refresh modal
+            navigateTo("", 0);
+        } else {
+            const e = await d.json().catch(()=>({}));
+            alert("Ошибка: " + (e.detail || r.status));
+        }
+    };
 
     navigateTo("");
 })();
