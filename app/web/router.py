@@ -330,14 +330,62 @@ async def page_local_files(request: Request, _user: str = Depends(verify_web_use
 # --- JSON endpoints для AJAX из local_files страницы ---
 
 
+def _get_allowed_roots() -> list[Path]:
+    """Список корневых директорий, доступных для просмотра.
+
+    По умолчанию: settings.media_dir.
+    Дополнительно: пути из settings.extra_media_dirs (через запятую в .env).
+    Все пути resolve()'ятся.
+    """
+    from app.config.settings import settings
+
+    roots = [Path(settings.media_dir).resolve()]
+    extra = getattr(settings, "extra_media_dirs", "") or ""
+    if extra:
+        for part in extra.split(","):
+            part = part.strip()
+            if part:
+                roots.append(Path(part).resolve())
+    return list(dict.fromkeys(roots))  # dedup preserving order
+
+
+def _resolve_root_for_path(path: str) -> tuple[Path, str] | None:
+    r"""Определяет, к какому корню относится path, возвращает (root_resolved, subpath).
+
+    path может быть:
+      - "Files/photo.jpg" → относительно media_dir
+      - "D__media/photo.jpg" → корень D:\media (заменяем __ на :)
+      - "/abs/path/photo.jpg" → если совпадает с одним из корней
+
+    Возвращает (root_resolved, relative_subpath) или None если не подходит ни к одному корню.
+    """
+    roots = _get_allowed_roots()
+
+    if not path:
+        return roots[0], ""
+
+    # Пробуем каждый корень
+    for root in roots:
+        try:
+            joined = _safe_join(root, path)
+            if joined is not None:
+                return root, path
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 def _safe_join(base: Path, subpath: str) -> Path | None:
-    """Безопасно объединяет base с subpath, предотвращая path traversal."""
+    """Безопасно объединяет base с subpath, предотвращая path traversal.
+
+    base уже должен быть resolve()'нным.
+    """
+    base_resolved = base.resolve() if not base.is_absolute() else base
     if not subpath:
-        return base
+        return base_resolved
     parts = [p for p in subpath.replace("\\", "/").split("/") if p and p != ".."]
-    result = base.joinpath(*parts) if parts else base
+    result = base_resolved.joinpath(*parts) if parts else base_resolved
     resolved = result.resolve()
-    base_resolved = base.resolve()
     try:
         resolved.relative_to(base_resolved)
     except ValueError:
@@ -364,12 +412,29 @@ def _guess_ft(name: str) -> str:
 async def web_local_files_list(
     request: Request,
     path: str = "",
+    root: str = "",
     _user: str = Depends(verify_web_user),
 ) -> dict[str, Any]:
-    """JSON: список файлов и поддиректорий (для AJAX из local_files страницы)."""
-    from app.config.settings import settings
+    """JSON: список файлов и поддиректорий (для AJAX из local_files страницы).
 
-    base = settings.media_dir
+    Параметры:
+      path — относительный путь внутри корня (навигация по подпапкам)
+      root — индекс корня (0 = media_dir, 1+ = extra_media_dirs).
+    """
+
+    roots = _get_allowed_roots()
+    if not roots:
+        raise HTTPException(status_code=500, detail="Корневые директории не настроены")
+
+    # Выбираем корень по индексу
+    try:
+        root_idx = int(root) if root else 0
+    except ValueError:
+        root_idx = 0
+    if root_idx < 0 or root_idx >= len(roots):
+        raise HTTPException(status_code=400, detail=f"Неверный индекс корня: {root}")
+
+    base = roots[root_idx]
     target = _safe_join(base, path)
     if target is None:
         raise HTTPException(status_code=400, detail="Недопустимый путь")
@@ -388,12 +453,17 @@ async def web_local_files_list(
             ext = entry.suffix.lower()
             if ext in _MEDIA_EXTS_WEB:
                 stat = entry.stat()
+                # relative_path: относительно корня (resolve()'нного)
+                try:
+                    rel = str(entry.resolve().relative_to(base))
+                except ValueError:
+                    rel = entry.name
                 files.append({
                     "name": entry.name,
                     "size": stat.st_size,
                     "ext": ext,
                     "file_type": _guess_ft(entry.name),
-                    "relative_path": str(entry.relative_to(base)),
+                    "relative_path": rel,
                 })
 
     parent_path = ""
@@ -401,9 +471,16 @@ async def web_local_files_list(
         parts = path.rstrip("/").split("/")
         parent_path = "/".join(parts[:-1]) if len(parts) > 1 else ""
 
+    # Список всех корней (для переключателя в UI)
+    roots_info = []
+    for i, r in enumerate(roots):
+        roots_info.append({"index": i, "path": str(r), "name": str(r)})
+
     return {
         "path": path,
         "parent": parent_path,
+        "root": root_idx,
+        "roots": roots_info,
         "directories": directories,
         "files": files,
     }
@@ -414,15 +491,28 @@ async def web_local_files_add(
     request: Request,
     _user: str = Depends(verify_web_user),
 ) -> Any:
-    """JSON: создаёт пост из локального файла и добавляет в очередь."""
-    from app.config.settings import settings
+    """JSON: создаёт пост из локального файла и добавляет в очередь.
 
+    Тело: { "file_path": "sub/image.jpg", "root": 0, "queue_id": 1 }
+    """
     body = await request.json()
     file_rel = (body.get("file_path") or "").strip()
     if not file_rel:
         raise HTTPException(status_code=400, detail="file_path обязателен")
 
-    base = settings.media_dir
+    roots = _get_allowed_roots()
+    if not roots:
+        raise HTTPException(status_code=500, detail="Корневые директории не настроены")
+
+    root_idx = body.get("root", 0)
+    try:
+        root_idx = int(root_idx)
+    except (ValueError, TypeError):
+        root_idx = 0
+    if root_idx < 0 or root_idx >= len(roots):
+        raise HTTPException(status_code=400, detail=f"Неверный индекс корня: {root_idx}")
+
+    base = roots[root_idx]
     abs_path = _safe_join(base, file_rel)
     if abs_path is None or not abs_path.is_file():
         raise HTTPException(status_code=404, detail=f"Файл не найден: {file_rel}")
@@ -462,14 +552,24 @@ async def web_local_files_add(
 async def web_local_files_preview(
     request: Request,
     path: str = "",
+    root: str = "",
     _user: str = Depends(verify_web_user),
 ) -> Any:
     """Отдаёт превью изображения (для <img> в local_files странице)."""
     from fastapi.responses import FileResponse
 
-    from app.config.settings import settings
+    roots = _get_allowed_roots()
+    if not roots:
+        raise HTTPException(status_code=500, detail="Корневые директории не настроены")
 
-    base = settings.media_dir
+    try:
+        root_idx = int(root) if root else 0
+    except ValueError:
+        root_idx = 0
+    if root_idx < 0 or root_idx >= len(roots):
+        raise HTTPException(status_code=400, detail=f"Неверный индекс корня: {root}")
+
+    base = roots[root_idx]
     abs_path = _safe_join(base, path)
     if abs_path is None or not abs_path.is_file():
         raise HTTPException(status_code=404, detail="Файл не найден")

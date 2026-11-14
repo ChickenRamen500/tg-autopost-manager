@@ -28,6 +28,13 @@
 <div id="error-msg" class="alert alert-danger d-none" role="alert"></div>
 
 <div id="content" class="d-none">
+    {# Переключатель корневых директорий #}
+    <div id="roots-selector" class="mb-3 d-none">
+        <label class="form-label small text-muted"><i class="bi bi-hdd"></i> Источник:</label>
+        <select class="form-select form-select-sm" id="root-select" style="width: auto; display: inline-block; margin-left: 0.5rem;">
+        </select>
+    </div>
+
     <div id="dirs-section" class="mb-3 d-none">
         <h6 class="text-muted"><i class="bi bi-folder"></i> Папки</h6>
         <div id="dirs-list" class="d-flex flex-wrap gap-2"></div>
@@ -78,6 +85,7 @@
     "use strict";
 
     let currentPath = "";
+    let currentRoot = 0;
     const selectedFiles = new Set();
 
     const loading = document.getElementById("loading");
@@ -93,6 +101,8 @@
     const selectedCount = document.getElementById("selected-count");
     const addBtn = document.getElementById("add-to-queue-btn");
     const queueSelect = document.getElementById("queue-select");
+    const rootSelect = document.getElementById("root-select");
+    const rootsSelector = document.getElementById("roots-selector");
 
     function formatSize(bytes) {
         if (bytes < 1024) return bytes + " B";
@@ -135,8 +145,9 @@
         }
     }
 
-    async function navigateTo(path) {
+    async function navigateTo(path, root) {
         currentPath = path;
+        if (root !== undefined) currentRoot = root;
         selectedFiles.clear();
         updateActionBar();
         loading.classList.remove("d-none");
@@ -145,7 +156,7 @@
         emptyFolder.classList.add("d-none");
 
         try {
-            const resp = await fetch(`/web/local_files/list?path=${encodeURIComponent(path)}`);
+            const resp = await fetch(`/web/local_files/list?path=${encodeURIComponent(path)}&root=${currentRoot}`);
             if (!resp.ok) {
                 const data = await resp.json().catch(() => ({}));
                 throw new Error(data.detail || `HTTP ${resp.status}`);
@@ -162,6 +173,21 @@
 
     function render(data) {
         updateBreadcrumb(data.path);
+
+        // Roots selector
+        if (data.roots && data.roots.length > 1) {
+            rootsSelector.classList.remove("d-none");
+            rootSelect.innerHTML = "";
+            for (const r of data.roots) {
+                const opt = document.createElement("option");
+                opt.value = r.index;
+                opt.textContent = r.name;
+                if (r.index === data.root) opt.selected = true;
+                rootSelect.appendChild(opt);
+            }
+        } else {
+            rootsSelector.classList.add("d-none");
+        }
 
         dirsList.innerHTML = "";
         if (data.directories.length > 0) {
@@ -208,7 +234,7 @@
             thumb.style.cssText = "height: 120px; display: flex; align-items: center; justify-content: center; background: #f8f9fa; overflow: hidden;";
             if (file.file_type === "photo" || file.file_type === "gif") {
                 const img = document.createElement("img");
-                img.src = `/web/local_files/preview?path=${encodeURIComponent(file.relative_path)}`;
+                img.src = `/web/local_files/preview?path=${encodeURIComponent(file.relative_path)}&root=${currentRoot}`;
                 img.style.cssText = "max-width: 100%; max-height: 120px; object-fit: contain;";
                 img.alt = file.name;
                 img.loading = "lazy";
@@ -313,6 +339,7 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         file_path: files[i],
+                        root: currentRoot,
                         queue_id: queueId ? parseInt(queueId) : null,
                     }),
                 });
@@ -337,6 +364,11 @@
         } else {
             alert("Не удалось добавить файлы");
         }
+    });
+
+    // Переключение корневой директории
+    rootSelect.addEventListener("change", (e) => {
+        navigateTo("", parseInt(e.target.value));
     });
 
     navigateTo("");

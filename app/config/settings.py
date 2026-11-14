@@ -148,6 +148,10 @@ class Settings:
     db_path: Path = data_dir / "bot.db"
     downloads_dir: Path = data_dir / "downloads"   # автоочистка каждые 24 ч (ТЗ §3.1)
     media_dir: Path = Path(_get("MEDIA_DIR", str(data_dir / "media")))  # в Docker: /app/media
+    # Дополнительные корневые директории для браузера локальных файлов.
+    # Список путей через запятую: /mnt/media, D:\media_saver_bot\saved_files
+    # В Docker: монтируйте эти папки в compose и укажите их пути внутри контейнера.
+    extra_media_dirs: str = field(default_factory=lambda: _get("EXTRA_MEDIA_DIRS", ""))
 
     def validate(self) -> list[str]:
         """Возвращает список критических проблем конфигурации.
