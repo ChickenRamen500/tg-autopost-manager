@@ -1,11 +1,11 @@
-# watch_deploy.ps1 вЂ” С„РѕРЅРѕРІС‹Р№ watcher РґР»СЏ Р°РІС‚Рѕ-РґРµРїР»РѕСЏ РЅР° Windows.
+# watch_deploy.ps1 — фоновый watcher для авто-деплоя на Windows.
 #
-# РњРѕРЅРёС‚РѕСЂРёС‚ data/deploy.trigger. РџСЂРё РїРѕСЏРІР»РµРЅРёРё С„Р°Р№Р»Р° вЂ” git pull + docker compose.
+# Мониторит data/deploy.trigger. При появлении файла — git pull + docker compose.
 #
-# Р—Р°РїСѓСЃРє РІСЂСѓС‡РЅСѓСЋ:
+# Запуск вручную:
 #   powershell -ExecutionPolicy Bypass -File "C:\tg-autopost-manager\scripts\watch_deploy.ps1"
 #
-# Р РµРіРёСЃС‚СЂР°С†РёСЏ РєР°Рє С„РѕРЅРѕРІРѕР№ Р·Р°РґР°С‡Рё (Р°РІС‚РѕР·Р°РїСѓСЃРє):
+# Регистрация как фоновой задачи (автозапуск):
 #   powershell -ExecutionPolicy Bypass -File "C:\tg-autopost-manager\scripts\watch_deploy.ps1" -Register
 
 param(
@@ -27,7 +27,7 @@ function Write-DeployLog {
     Write-Host $line
 }
 
-# --- РќР°Р№С‚Рё git.exe ---
+# --- Найти git.exe ---
 function Find-Git {
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($git) { return $git.Source }
@@ -52,7 +52,7 @@ function Find-Git {
     return $null
 }
 
-# --- РќР°Р№С‚Рё docker.exe ---
+# --- Найти docker.exe ---
 function Find-Docker {
     $docker = Get-Command docker -ErrorAction SilentlyContinue
     if ($docker) { return $docker.Source }
@@ -69,14 +69,14 @@ function Find-Docker {
 $GitExe = Find-Git
 $DockerExe = Find-Docker
 
-# --- Р РµР¶РёРј СЂРµРіРёСЃС‚СЂР°С†РёРё ---
+# --- Режим регистрации ---
 if ($Register) {
     if (-not $GitExe) {
-        Write-Host "РћРЁРР‘РљРђ: Git РЅРµ РЅР°Р№РґРµРЅ!" -ForegroundColor Red
+        Write-Host "ОШИБКА: Git не найден!" -ForegroundColor Red
         exit 1
     }
     if (-not $DockerExe) {
-        Write-Host "РћРЁРР‘РљРђ: Docker РЅРµ РЅР°Р№РґРµРЅ!" -ForegroundColor Red
+        Write-Host "ОШИБКА: Docker не найден!" -ForegroundColor Red
         exit 1
     }
     $taskName = "TgAutoDeployWatcher"
@@ -92,32 +92,32 @@ if ($Register) {
     try {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force
-        Write-Host "Watcher Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅ РєР°Рє С„РѕРЅРѕРІР°СЏ Р·Р°РґР°С‡Р° '$taskName'." -ForegroundColor Green
+        Write-Host "Watcher зарегистрирован как фоновая задача '$taskName'." -ForegroundColor Green
         Write-Host "Git: $GitExe" -ForegroundColor Gray
         Write-Host "Docker: $DockerExe" -ForegroundColor Gray
     } catch {
-        Write-Host "РћС€РёР±РєР°: $_" -ForegroundColor Red
-        Write-Host "Р—Р°РїСѓСЃС‚РёС‚Рµ PowerShell РѕС‚ РёРјРµРЅРё РђРґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°." -ForegroundColor Yellow
+        Write-Host "Ошибка: $_" -ForegroundColor Red
+        Write-Host "Запустите PowerShell от имени Администратора." -ForegroundColor Yellow
     }
     exit
 }
 
-# --- РџСЂРѕРІРµСЂРєР° ---
+# --- Проверка ---
 if (-not $GitExe) {
-    Write-Host "РћРЁРР‘РљРђ: Git РЅРµ РЅР°Р№РґРµРЅ! РЈСЃС‚Р°РЅРѕРІРёС‚Рµ Git for Windows." -ForegroundColor Red
+    Write-Host "ОШИБКА: Git не найден! Установите Git for Windows." -ForegroundColor Red
     exit 1
 }
 if (-not $DockerExe) {
-    Write-Host "РћРЁРР‘РљРђ: Docker РЅРµ РЅР°Р№РґРµРЅ! РЈСЃС‚Р°РЅРѕРІРёС‚Рµ Docker Desktop." -ForegroundColor Red
+    Write-Host "ОШИБКА: Docker не найден! Установите Docker Desktop." -ForegroundColor Red
     exit 1
 }
 
-# --- РћСЃРЅРѕРІРЅРѕР№ С†РёРєР» ---
+# --- Основной цикл ---
 Write-DeployLog "=== Watcher started (poll=${PollInterval}s) ==="
 Write-DeployLog "Git: $GitExe"
 Write-DeployLog "Docker: $DockerExe"
-Write-Host "Watcher Р·Р°РїСѓС‰РµРЅ. Git: $GitExe" -ForegroundColor Green
-Write-Host "РњРѕРЅРёС‚РѕСЂСЋ С‚СЂРёРіРіРµСЂ РєР°Р¶РґС‹Рµ $PollInterval СЃРµРє. Ctrl+C РґР»СЏ РѕСЃС‚Р°РЅРѕРІРєРё." -ForegroundColor Gray
+Write-Host "Watcher запущен. Git: $GitExe" -ForegroundColor Green
+Write-Host "Мониторю триггер каждые $PollInterval сек. Ctrl+C для остановки." -ForegroundColor Gray
 Write-Host ""
 
 while ($true) {
@@ -166,7 +166,7 @@ while ($true) {
             Pop-Location
 
             Write-DeployLog "=== Deploy completed ==="
-            Write-Host "Deploy Р·Р°РІРµСЂС€С‘РЅ!" -ForegroundColor Green
+            Write-Host "Deploy завершён!" -ForegroundColor Green
         }
     } catch {
         Write-DeployLog "Watcher error: $_"
