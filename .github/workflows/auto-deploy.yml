@@ -1,0 +1,44 @@
+name: Auto Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deploy webhook
+        run: |
+          HOST="${{ secrets.DEPLOY_HOST }}"
+          PORT="${{ secrets.DEPLOY_PORT }}"
+          TOKEN="${{ secrets.DEPLOY_TOKEN }}"
+
+          if [ -z "$HOST" ] || [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
+            echo "Missing secrets (DEPLOY_HOST, DEPLOY_PORT, DEPLOY_TOKEN). Skipping deploy."
+            exit 0
+          fi
+
+          URL="http://${HOST}:${PORT}/webhook/deploy"
+          echo "Calling webhook: $URL"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST "$URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Token: $TOKEN" \
+            -d "{\"ref\": \"refs/heads/main\", \"after\": \"${{ github.sha }}\"}" \
+            --connect-timeout 10 \
+            --max-time 30)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP status: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Deploy webhook failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          echo "Deploy triggered successfully!"

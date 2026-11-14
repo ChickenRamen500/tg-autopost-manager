@@ -138,6 +138,11 @@ class Settings:
     # --- Веб-интерфейс (ТЗ §7) ---
     web_port: int = field(default_factory=lambda: _get_int("WEB_PORT", 8000))
 
+    # --- Auto-deploy (CI/CD) ---
+    # Токен для webhook /webhook/deploy — GitHub Actions вызывает с этим токеном.
+    # Если пусто — авто-деплой отключён (endpoint возвращает 404).
+    deploy_token: str = field(default_factory=lambda: _get("DEPLOY_TOKEN", ""))
+
     # --- Пути ---
     data_dir: Path = BASE_DIR / "data"
     db_path: Path = data_dir / "bot.db"

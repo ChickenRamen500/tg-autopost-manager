@@ -180,9 +180,39 @@ function extractMediaUrl(mediaEl, config) {
 
 function _absMediaUrl(u, config) {
   try {
-    return new URL(u, location.href).href;
+    let url = new URL(u, location.href).href;
+    url = _upgradeTwitterQuality(url);
+    return url;
   } catch (e) {
     return null;
+  }
+}
+
+// Апгрейд качества изображений Twitter до оригинала.
+// pbs.twimg.com/media/...?format=jpg&name=small → name=orig
+// Старый формат: /media/abc.jpg:small → /media/abc.jpg:orig
+function _upgradeTwitterQuality(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "pbs.twimg.com") return url;
+    const nameParam = u.searchParams.get("name");
+    if (nameParam) {
+      u.searchParams.set("name", "orig");
+      return u.href;
+    }
+    const path = u.pathname;
+    const colonIdx = path.lastIndexOf(":");
+    if (colonIdx > path.lastIndexOf("/")) {
+      u.pathname = path.substring(0, colonIdx) + ":orig";
+      return u.href;
+    }
+    if (!u.searchParams.has("format")) {
+      u.searchParams.set("format", "jpg");
+    }
+    u.searchParams.set("name", "orig");
+    return u.href;
+  } catch {
+    return url;
   }
 }
 

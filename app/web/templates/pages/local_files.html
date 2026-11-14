@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+{% from "macros.html" import file_type_icon %}
+
+{% block title %}Локальные файлы — TG Media Queue Bot{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0"><i class="bi bi-folder2-open"></i> Локальные файлы</h1>
+    <span class="badge bg-secondary" id="file-count">—</span>
+</div>
+
+<p class="text-muted small">
+    Просмотр медиа-файлов на сервере (в папке <code>media_dir</code>).
+    Выберите файлы и добавьте в очередь — посты создаются мгновенно (без перекачивания).
+</p>
+
+<nav aria-label="breadcrumb" class="mb-3">
+    <ol class="breadcrumb mb-0" id="breadcrumb">
+        <li class="breadcrumb-item"><a href="#" data-path=""><i class="bi bi-house"></i> media_dir</a></li>
+    </ol>
+</nav>
+
+<div id="loading" class="text-center py-4 d-none">
+    <div class="spinner-border text-primary" role="status"></div>
+    <p class="text-muted mt-2">Загрузка...</p>
+</div>
+
+<div id="error-msg" class="alert alert-danger d-none" role="alert"></div>
+
+<div id="content" class="d-none">
+    <div id="dirs-section" class="mb-3 d-none">
+        <h6 class="text-muted"><i class="bi bi-folder"></i> Папки</h6>
+        <div id="dirs-list" class="d-flex flex-wrap gap-2"></div>
+    </div>
+
+    <div id="files-section">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="text-muted mb-0"><i class="bi bi-file-earmark-image"></i> Файлы</h6>
+            <div class="btn-group btn-group-sm">
+                <button type="button" class="btn btn-outline-secondary" id="select-all">
+                    <i class="bi bi-check2-all"></i> Выбрать все
+                </button>
+                <button type="button" class="btn btn-outline-secondary" id="deselect-all">
+                    <i class="bi bi-x-circle"></i> Снять
+                </button>
+            </div>
+        </div>
+        <div id="files-list" class="row row-cols-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-6 g-2"></div>
+    </div>
+
+    <div id="action-bar" class="sticky-bottom bg-dark text-light p-3 rounded-3 mt-3 d-none">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="badge bg-primary" id="selected-count">0 выбрано</span>
+            <select class="form-select form-select-sm" id="queue-select" style="width: auto;">
+                <option value="">— Входящие —</option>
+                {% for q in queues %}
+                <option value="{{ q.id }}">{{ q.name }}{% if not q.is_active %} (выкл){% endif %}</option>
+                {% endfor %}
+            </select>
+            <button type="button" class="btn btn-sm btn-primary" id="add-to-queue-btn" disabled>
+                <i class="bi bi-send"></i> Добавить в очередь
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="empty-folder" class="card d-none">
+    <div class="card-body p-5 text-center text-muted">
+        <i class="bi bi-folder-x fs-1 d-block mb-3"></i>
+        <p class="mb-0">В этой папке нет медиа-файлов.</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function() {
+    "use strict";
+
+    let currentPath = "";
+    const selectedFiles = new Set();
+
+    const loading = document.getElementById("loading");
+    const errorMsg = document.getElementById("error-msg");
+    const content = document.getElementById("content");
+    const dirsSection = document.getElementById("dirs-section");
+    const dirsList = document.getElementById("dirs-list");
+    const filesList = document.getElementById("files-list");
+    const fileCount = document.getElementById("file-count");
+    const breadcrumb = document.getElementById("breadcrumb");
+    const emptyFolder = document.getElementById("empty-folder");
+    const actionBar = document.getElementById("action-bar");
+    const selectedCount = document.getElementById("selected-count");
+    const addBtn = document.getElementById("add-to-queue-btn");
+    const queueSelect = document.getElementById("queue-select");
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+        return (bytes / 1048576).toFixed(1) + " MB";
+    }
+
+    function updateBreadcrumb(path) {
+        breadcrumb.innerHTML = "";
+        const li = document.createElement("li");
+        li.className = "breadcrumb-item";
+        const a = document.createElement("a");
+        a.href = "#";
+        a.innerHTML = '<i class="bi bi-house"></i> media_dir';
+        a.dataset.path = "";
+        a.addEventListener("click", (e) => { e.preventDefault(); navigateTo(""); });
+        li.appendChild(a);
+        breadcrumb.appendChild(li);
+
+        if (path) {
+            const parts = path.split("/");
+            let accumulated = "";
+            for (let i = 0; i < parts.length; i++) {
+                accumulated = i === 0 ? parts[i] : accumulated + "/" + parts[i];
+                const li2 = document.createElement("li");
+                if (i === parts.length - 1) {
+                    li2.className = "breadcrumb-item active";
+                    li2.textContent = parts[i];
+                } else {
+                    li2.className = "breadcrumb-item";
+                    const a2 = document.createElement("a");
+                    a2.href = "#";
+                    a2.textContent = parts[i];
+                    a2.dataset.path = accumulated;
+                    a2.addEventListener("click", (e) => { e.preventDefault(); navigateTo(accumulated); });
+                    li2.appendChild(a2);
+                }
+                breadcrumb.appendChild(li2);
+            }
+        }
+    }
+
+    async function navigateTo(path) {
+        currentPath = path;
+        selectedFiles.clear();
+        updateActionBar();
+        loading.classList.remove("d-none");
+        content.classList.add("d-none");
+        errorMsg.classList.add("d-none");
+        emptyFolder.classList.add("d-none");
+
+        try {
+            const resp = await fetch(`/web/local_files/list?path=${encodeURIComponent(path)}`);
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.detail || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            render(data);
+        } catch (e) {
+            errorMsg.textContent = "Ошибка: " + e.message;
+            errorMsg.classList.remove("d-none");
+        } finally {
+            loading.classList.add("d-none");
+        }
+    }
+
+    function render(data) {
+        updateBreadcrumb(data.path);
+
+        dirsList.innerHTML = "";
+        if (data.directories.length > 0) {
+            dirsSection.classList.remove("d-none");
+            for (const dir of data.directories) {
+                const btn = document.createElement("a");
+                btn.className = "btn btn-sm btn-outline-secondary";
+                btn.href = "#";
+                btn.innerHTML = `<i class="bi bi-folder"></i> ${dir.name}`;
+                btn.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    const newPath = data.path ? data.path + "/" + dir.name : dir.name;
+                    navigateTo(newPath);
+                });
+                dirsList.appendChild(btn);
+            }
+        } else {
+            dirsSection.classList.add("d-none");
+        }
+
+        filesList.innerHTML = "";
+        if (data.files.length === 0) {
+            fileCount.textContent = "0 файлов";
+            if (data.directories.length === 0) {
+                emptyFolder.classList.remove("d-none");
+                content.classList.add("d-none");
+                return;
+            }
+        } else {
+            fileCount.textContent = `${data.files.length} файлов`;
+        }
+
+        for (const file of data.files) {
+            const col = document.createElement("div");
+            col.className = "col";
+
+            const card = document.createElement("div");
+            card.className = "card file-card h-100 position-relative";
+            card.style.cursor = "pointer";
+            card.dataset.path = file.relative_path;
+
+            const thumb = document.createElement("div");
+            thumb.className = "file-thumb";
+            thumb.style.cssText = "height: 120px; display: flex; align-items: center; justify-content: center; background: #f8f9fa; overflow: hidden;";
+            if (file.file_type === "photo" || file.file_type === "gif") {
+                const img = document.createElement("img");
+                img.src = `/web/local_files/preview?path=${encodeURIComponent(file.relative_path)}`;
+                img.style.cssText = "max-width: 100%; max-height: 120px; object-fit: contain;";
+                img.alt = file.name;
+                img.loading = "lazy";
+                img.addEventListener("error", () => {
+                    thumb.innerHTML = '<i class="bi bi-file-earmark-image fs-1 text-muted"></i>';
+                });
+                thumb.appendChild(img);
+            } else if (file.file_type === "video") {
+                thumb.innerHTML = '<i class="bi bi-play-circle fs-1 text-primary"></i>';
+            } else {
+                thumb.innerHTML = '<i class="bi bi-file-earmark fs-1 text-muted"></i>';
+            }
+            card.appendChild(thumb);
+
+            const body = document.createElement("div");
+            body.className = "card-body p-2";
+            const name = document.createElement("div");
+            name.className = "small text-truncate fw-semibold";
+            name.textContent = file.name;
+            name.title = file.name;
+            const meta = document.createElement("div");
+            meta.className = "small text-muted";
+            meta.textContent = formatSize(file.size);
+            body.appendChild(name);
+            body.appendChild(meta);
+            card.appendChild(body);
+
+            const check = document.createElement("div");
+            check.className = "file-check position-absolute top-0 end-0 m-1";
+            check.innerHTML = '<i class="bi bi-check-circle-fill text-success fs-4 d-none"></i>';
+            card.appendChild(check);
+
+            card.addEventListener("click", (e) => {
+                e.preventDefault();
+                toggleFile(file.relative_path, card, check);
+            });
+
+            col.appendChild(card);
+            filesList.appendChild(col);
+        }
+
+        content.classList.remove("d-none");
+    }
+
+    function toggleFile(path, card, check) {
+        if (selectedFiles.has(path)) {
+            selectedFiles.delete(path);
+            card.classList.remove("border-primary", "border-2");
+            check.querySelector("i").classList.add("d-none");
+        } else {
+            selectedFiles.add(path);
+            card.classList.add("border-primary", "border-2");
+            check.querySelector("i").classList.remove("d-none");
+        }
+        updateActionBar();
+    }
+
+    function updateActionBar() {
+        const n = selectedFiles.size;
+        selectedCount.textContent = `${n} выбрано`;
+        addBtn.disabled = n === 0;
+        if (n > 0) {
+            actionBar.classList.remove("d-none");
+        } else {
+            actionBar.classList.add("d-none");
+        }
+    }
+
+    document.getElementById("select-all").addEventListener("click", () => {
+        document.querySelectorAll(".file-card").forEach((card) => {
+            const path = card.dataset.path;
+            if (!selectedFiles.has(path)) {
+                selectedFiles.add(path);
+                card.classList.add("border-primary", "border-2");
+                card.querySelector(".file-check i").classList.remove("d-none");
+            }
+        });
+        updateActionBar();
+    });
+
+    document.getElementById("deselect-all").addEventListener("click", () => {
+        selectedFiles.clear();
+        document.querySelectorAll(".file-card").forEach((card) => {
+            card.classList.remove("border-primary", "border-2");
+            card.querySelector(".file-check i").classList.add("d-none");
+        });
+        updateActionBar();
+    });
+
+    addBtn.addEventListener("click", async () => {
+        const queueId = queueSelect.value || null;
+        const files = Array.from(selectedFiles);
+        addBtn.disabled = true;
+        addBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Добавление...';
+
+        let success = 0;
+        let failed = 0;
+        for (let i = 0; i < files.length; i++) {
+            try {
+                const resp = await fetch("/web/local_files/add", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        file_path: files[i],
+                        queue_id: queueId ? parseInt(queueId) : null,
+                    }),
+                });
+                if (resp.ok) {
+                    success++;
+                } else {
+                    failed++;
+                }
+            } catch {
+                failed++;
+            }
+        }
+
+        addBtn.disabled = false;
+        addBtn.innerHTML = '<i class="bi bi-send"></i> Добавить в очередь';
+        selectedFiles.clear();
+        updateActionBar();
+
+        if (success > 0) {
+            alert(`Добавлено ${success} файлов в очередь${failed > 0 ? `, ошибок: ${failed}` : ""}`);
+            navigateTo(currentPath);
+        } else {
+            alert("Не удалось добавить файлы");
+        }
+    });
+
+    navigateTo("");
+})();
+</script>
+{% endblock %}

@@ -315,6 +315,172 @@ async def page_channels(request: Request, _user: str = Depends(verify_web_user))
     return templates.TemplateResponse(request, "pages/channels.html", ctx)
 
 
+@router.get("/local_files")
+async def page_local_files(request: Request, _user: str = Depends(verify_web_user)) -> Any:
+    """Браузер локальных файлов — просмотр медиа, добавление в очереди."""
+    queues = await queues_repo.list_queues(active_only=False)
+    ctx = {
+        "request": request,
+        "active_page": "local_files",
+        "queues": queues,
+    }
+    return templates.TemplateResponse(request, "pages/local_files.html", ctx)
+
+
+# --- JSON endpoints для AJAX из local_files страницы ---
+
+
+def _safe_join(base: Path, subpath: str) -> Path | None:
+    """Безопасно объединяет base с subpath, предотвращая path traversal."""
+    if not subpath:
+        return base
+    parts = [p for p in subpath.replace("\\", "/").split("/") if p and p != ".."]
+    result = base.joinpath(*parts) if parts else base
+    resolved = result.resolve()
+    base_resolved = base.resolve()
+    try:
+        resolved.relative_to(base_resolved)
+    except ValueError:
+        return None
+    return resolved
+
+
+_MEDIA_EXTS_WEB = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
+                   ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
+
+
+def _guess_ft(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    if ext in (".gif", ".gifv"):
+        return "gif"
+    if ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"):
+        return "photo"
+    if ext in (".mp4", ".webm", ".mov", ".avi", ".mkv", ".m4v"):
+        return "video"
+    return "document"
+
+
+@router.get("/web/local_files/list")
+async def web_local_files_list(
+    request: Request,
+    path: str = "",
+    _user: str = Depends(verify_web_user),
+) -> dict[str, Any]:
+    """JSON: список файлов и поддиректорий (для AJAX из local_files страницы)."""
+    from app.config.settings import settings
+
+    base = settings.media_dir
+    target = _safe_join(base, path)
+    if target is None:
+        raise HTTPException(status_code=400, detail="Недопустимый путь")
+
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"Директория не найдена: {path}")
+
+    directories = []
+    files = []
+    for entry in sorted(target.iterdir(), key=lambda e: e.name.lower()):
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir():
+            directories.append({"name": entry.name})
+        elif entry.is_file():
+            ext = entry.suffix.lower()
+            if ext in _MEDIA_EXTS_WEB:
+                stat = entry.stat()
+                files.append({
+                    "name": entry.name,
+                    "size": stat.st_size,
+                    "ext": ext,
+                    "file_type": _guess_ft(entry.name),
+                    "relative_path": str(entry.relative_to(base)),
+                })
+
+    parent_path = ""
+    if path:
+        parts = path.rstrip("/").split("/")
+        parent_path = "/".join(parts[:-1]) if len(parts) > 1 else ""
+
+    return {
+        "path": path,
+        "parent": parent_path,
+        "directories": directories,
+        "files": files,
+    }
+
+
+@router.post("/web/local_files/add")
+async def web_local_files_add(
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> Any:
+    """JSON: создаёт пост из локального файла и добавляет в очередь."""
+    from app.config.settings import settings
+
+    body = await request.json()
+    file_rel = (body.get("file_path") or "").strip()
+    if not file_rel:
+        raise HTTPException(status_code=400, detail="file_path обязателен")
+
+    base = settings.media_dir
+    abs_path = _safe_join(base, file_rel)
+    if abs_path is None or not abs_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Файл не найден: {file_rel}")
+
+    ext = abs_path.suffix.lower()
+    if ext not in _MEDIA_EXTS_WEB:
+        raise HTTPException(status_code=400, detail=f"Неподдерживаемый тип: {ext}")
+
+    queue_id = body.get("queue_id")
+    title = body.get("title") or None
+    file_type = _guess_ft(abs_path.name)
+    file_size = abs_path.stat().st_size
+
+    queue_name = "Входящие"
+    if queue_id is not None:
+        q = await queues_repo.get_queue(queue_id)
+        if q is None:
+            raise HTTPException(status_code=404, detail=f"Очередь #{queue_id} не найдена")
+        queue_name = q["name"]
+
+    post_id = await posts_repo.create_post(
+        source_type="local_file",
+        file_type=file_type,
+        queue_id=queue_id,
+        source_id=str(abs_path),
+        source_url=str(abs_path),
+        file_path=str(abs_path),
+        file_size=file_size,
+        original_caption=title,
+        status="pending",
+    )
+    log.info("web: пост #%s из файла %s → '%s' (user=%s)", post_id, file_rel, queue_name, _user)
+    return {"success": True, "post_id": post_id, "queue_name": queue_name}
+
+
+@router.get("/web/local_files/preview")
+async def web_local_files_preview(
+    request: Request,
+    path: str = "",
+    _user: str = Depends(verify_web_user),
+) -> Any:
+    """Отдаёт превью изображения (для <img> в local_files странице)."""
+    from fastapi.responses import FileResponse
+
+    from app.config.settings import settings
+
+    base = settings.media_dir
+    abs_path = _safe_join(base, path)
+    if abs_path is None or not abs_path.is_file():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+
+    ext = abs_path.suffix.lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
+        raise HTTPException(status_code=400, detail="Превью доступно только для изображений")
+
+    return FileResponse(str(abs_path))
+
+
 # ---------------------------------------------------------------------------
 # POST-actions (redirect after submit)
 # ---------------------------------------------------------------------------
