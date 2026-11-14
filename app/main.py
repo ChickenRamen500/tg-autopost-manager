@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from app.bot import get_bot, get_dispatcher
-from app.config.settings import BASE_DIR, settings
+from app.config.settings import settings
 from app.db import bootstrap_admin, close_db, init_db
 from app.repositories import task_queue as tq_repo
 from app.scheduler import get_scheduler, setup_scheduler_async
@@ -359,10 +359,12 @@ async def health_worker(_token: None = Depends(verify_token)) -> dict:
 
 # ---------------------------------------------------------------------------
 # Auto-deploy webhook (CI/CD)
+#
+# Архитектура: webhook НЕ запускает скрипт внутри контейнера (там нет git/docker).
+# Вместо этого он создаёт файл-триггер data/deploy.trigger.
+# На хосте (Windows) работает scripts/watch_deploy.ps1 — watcher, который
+# мониторит этот файл и выполняет git pull + docker compose up --build -d.
 # ---------------------------------------------------------------------------
-
-import os  # noqa: E402
-import subprocess  # noqa: E402
 
 from fastapi import Body, Request  # noqa: E402
 
@@ -372,7 +374,7 @@ async def webhook_deploy(
     request: Request,
     payload: dict = Body(default={}),
 ) -> dict:
-    """Webhook для авто-деплоя: запускает scripts/auto_deploy.sh.
+    """Webhook для авто-деплоя: создаёт файл-триггер для watch_deploy.ps1.
 
     Защита: заголовок X-Deploy-Token должен совпадать с settings.deploy_token.
     Если DEPLOY_TOKEN не задан в .env — endpoint отключён (404).
@@ -385,26 +387,21 @@ async def webhook_deploy(
     if not provided or not secrets.compare_digest(provided, deploy_token):
         raise HTTPException(status_code=401, detail="Invalid deploy token")
 
-    project_dir = str(BASE_DIR)
-    deploy_script = str(BASE_DIR / "scripts" / "auto_deploy.sh")
-    log_file = str(settings.data_dir / "deploy.log")
-
+    # Создаём файл-триггер в data/ (примонтирован volume → виден на хосте).
+    # watch_deploy.ps1 на хосте проверяет наличие этого файла каждые 3 сек.
+    trigger_file = settings.data_dir / "deploy.trigger"
+    commit = payload.get("after", "unknown")
+    ref = payload.get("ref", "unknown")
     try:
-        process = subprocess.Popen(
-            ["bash", deploy_script],
-            env={**os.environ, "PROJECT_DIR": project_dir, "LOG_FILE": log_file},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        log.info("webhook/deploy: auto_deploy.sh started (PID %s)", process.pid)
+        trigger_file.write_text(f"{commit}\n{ref}\n", encoding="utf-8")
+        log.info("webhook/deploy: trigger file created %s (commit=%s)", trigger_file, commit)
     except Exception as e:
-        log.error("webhook/deploy: failed to start auto_deploy.sh: %s", e)
-        raise HTTPException(status_code=500, detail=f"Deploy failed: {e}") from e
+        log.error("webhook/deploy: failed to create trigger file: %s", e)
+        raise HTTPException(status_code=500, detail=f"Deploy trigger failed: {e}") from e
 
     return {
-        "status": "deploying",
-        "message": "Auto-deploy started. Check /health in ~30 seconds.",
-        "pid": process.pid,
-        "commit": payload.get("after", "unknown"),
-        "ref": payload.get("ref", "unknown"),
+        "status": "triggered",
+        "message": "Deploy trigger created. Watch script on host will pick it up.",
+        "commit": commit,
+        "ref": ref,
     }
