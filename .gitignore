@@ -30,3 +30,4 @@ Thumbs.db
 *.db-shm
 *.db-wal
 *.log
+DOCS/AI_AGENT_GUIDE.md
