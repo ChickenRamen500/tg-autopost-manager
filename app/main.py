@@ -167,11 +167,32 @@ async def lifespan(_app: FastAPI):
     _bot_polling_task = asyncio.create_task(_bot_polling())
     _bot_polling_task.add_done_callback(_on_polling_done)
 
+    # 8. Уведомления вне ТЗ (доработка CI/CD, см. DOCS/AUTO_DEPLOY.md):
+    # - если старт произошёл сразу после webhook'а /webhook/deploy — сообщаем
+    #   админу «бот перезапущен после автодеплоя» (ЛС + служебный канал);
+    # - фоновый наблюдатель шлёт админу ERROR/CRITICAL-строки из stdout-лога
+    #   контейнера (docker logs).
+    from app.services import deploy_notify
+
+    async def _notify_restart_after_deploy() -> None:
+        # Даём polling'у подняться (Bot готов отправлять), затем уведомляем.
+        await asyncio.sleep(5)
+        await deploy_notify.notify_deploy_restart()
+
+    _deploy_notify_task = asyncio.create_task(_notify_restart_after_deploy(), name="deploy_restart_notify")
+    _log_watcher_task = deploy_notify.start_log_error_watcher()
+
     try:
         yield
     finally:
         # Shutdown — закрываем ВСЕ ресурсы (code review CRITICAL #1)
         log.info("Остановка приложения…")
+        # Сначала отменяем свои фоновые задачи уведомлений (блок 8 lifespan) —
+        # они могут обращаться к Bot, который закрывается ниже.
+        for _t in (_deploy_notify_task, _log_watcher_task):
+            if _t and not _t.done():
+                _t.cancel()
+        await deploy_notify.stop_log_error_watcher()
         # Worker останавливаем ПЕРВЫМ — чтобы не было гонки между переводом постов
         # в pending и закрытием БД/scheduler. Worker.cancel → in_progress задачи
         # останутся (сбросятся cleanup'ом при следующем старте).

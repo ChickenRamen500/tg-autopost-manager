@@ -15,9 +15,10 @@
 - **Интеллектуальная обработка**: 
   - Гибкая маршрутизация по правилам (regex/точное совпадение). ✅
   - Конвейер обработки подписей (фильтрация, добавление случайных фраз). ⬜ Фаза 5
-  - Двухуровневый поиск дубликатов (точный по `file_unique_id`/`source_id` ✅ и визуальный по `pHash` ⬜ Фаза 3).
+  - Двухуровневый поиск дубликатов (точный по `file_unique_id`/`source_id` ✅ и визуальный по `pHash` ✅ Фаза 3).
   - Точечный кроп видео (удаление водяных знаков через `ffmpeg -preset ultrafast`). ⬜ Фаза 5
 - **Оптимизация под слабое железо**: Рассчитан на работу на AMD Athlon X4 / 8 ГБ RAM (строгие лимиты Docker, асинхронность, легковесный фронтенд).
+- **Автодеплой и операционные уведомления** (вне ТЗ v5, см. [`DOCS/AUTO_DEPLOY.md`](./DOCS/AUTO_DEPLOY.md)): push в `main` → GitHub Actions → webhook `/webhook/deploy` → watcher на хосте пересобирает контейнеры; после рестарта админ получает «🚀 Бот перезапущен после автодеплоя», ERROR/CRITICAL из лога контейнера шлются дайджестом в ЛС/служебный канал. ✅
 
 ## 🛠 Технологический стек
 
@@ -26,11 +27,11 @@
 | **Backend** | Python 3.11+, FastAPI, aiogram 3.x (через Local Bot API Server) |
 | **База данных** | SQLite (`aiosqlite`) |
 | **Планировщик** | APScheduler (`AsyncIOScheduler`) |
-| **Обработка медиа** | `ffmpeg` (кроп — ⬜ Фаза 5), `Pillow` + `imagehash` (pHash — ⬜ Фаза 3) |
+| **Обработка медиа** | `ffmpeg` (кроп — ⬜ Фаза 5), `Pillow` + `imagehash` (pHash — ✅ Фаза 3) |
 | **Парсинг** | `aiohttp`, `yt-dlp` (для X.com и сложных видео), опционально `pixivy` (устанавливается отдельно: `pip install pixivy`; в базовом образе отсутствует на PyPI — см. requirements.txt) |
-| **Frontend** | Jinja2 + Bootstrap 5 (⬜ Фаза 5) |
-| **Инфраструктура** | Docker Compose (контейнеры `bot` и `local-bot-api`) |
-| **Расширение** | Chrome Extension (Manifest V3) (⬜ Фаза 4) |
+| **Frontend** | Jinja2 + Bootstrap 5 (✅ веб-интерфейс реализован: dashboard/queues/inbox/sent/posts/routing/channels/local_files) |
+| **Инфраструктура** | Docker Compose (контейнеры `bot` и `local-bot-api`), GitHub Actions auto-deploy (Tailscale + webhook, вне ТЗ — см. `DOCS/AUTO_DEPLOY.md`) |
+| **Расширение** | Chrome Extension (Manifest V3) (✅ Фаза 4: quick_add через REST API) |
 
 ## 🚀 Быстрый старт
 
@@ -64,7 +65,8 @@
 - [`DOCS/PROJECT_STRUCTURE.md`](./DOCS/PROJECT_STRUCTURE.md) — Структура проекта и соответствие фазам ТЗ §13. ✅ актуально
 - [`DOCS/QUICKSTART_NEW_MACHINE.md`](./DOCS/QUICKSTART_NEW_MACHINE.md) — Простая инструкция «как запустить всё с 0 на новой машине». ✅ актуально
 - [`DOCS/my_telegram_org_troubleshooting.md`](./DOCS/my_telegram_org_troubleshooting.md) — Решение `ERROR` при создании приложения на my.telegram.org. ✅ актуально
-- `API_Reference.md`, `Chrome_Extension_Guide.md`, `Deployment.md` — будут добавлены на Фазах 3–4 (пока не существуют).
+- [`DOCS/AUTO_DEPLOY.md`](./DOCS/AUTO_DEPLOY.md) — Автодеплой (GitHub Actions → webhook → watcher) и операционные уведомления (рестарт после деплоя, ошибки из лога контейнера). ✅ актуально. ⚠️ Функциональность вне ТЗ v5.
+- `API_Reference.md`, `Chrome_Extension_Guide.md`, `Deployment.md` — будут добавлены по мере необходимости (код Фаз 3–5 уже реализован, см. таблицу ниже).
 
 ## ⚠️ Ограничения и безопасность
 

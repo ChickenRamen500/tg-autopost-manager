@@ -142,6 +142,25 @@ class Settings:
     # Токен для webhook /webhook/deploy — GitHub Actions вызывает с этим токеном.
     # Если пусто — авто-деплой отключён (endpoint возвращает 404).
     deploy_token: str = field(default_factory=lambda: _get("DEPLOY_TOKEN", ""))
+    # Окно (сек), в течение которого старт бота считается «перезапуском после
+    # автодеплоя»: файл data/deploy.trigger создаётся webhook'ом /webhook/deploy,
+    # watcher на хосте пересобирает контейнер — если с момента создания trigger'а
+    # прошло меньше этого времени, админу шлётся уведомление «🚀 Бот перезапущен
+    # после автодеплоя». 900 сек (15 мин) — запас на git pull + docker build.
+    deploy_restart_window_seconds: int = field(
+        default_factory=lambda: _get_int("DEPLOY_RESTART_WINDOW_SECONDS", 900)
+    )
+
+    # --- Уведомления об ошибках из лога контейнера ---
+    # Интервал (сек) сканирования stdout-лога контейнера на ERROR/CRITICAL.
+    # 0 — функция отключена.
+    log_errors_scan_interval_seconds: int = field(
+        default_factory=lambda: _get_int("LOG_ERRORS_SCAN_INTERVAL_SECONDS", 120)
+    )
+    # Максимум строк-ошибок в одном сообщении (защита от лимита Telegram 4096 симв.).
+    log_errors_max_lines_per_report: int = field(
+        default_factory=lambda: _get_int("LOG_ERRORS_MAX_LINES_PER_REPORT", 10)
+    )
 
     # --- Пути ---
     data_dir: Path = BASE_DIR / "data"
