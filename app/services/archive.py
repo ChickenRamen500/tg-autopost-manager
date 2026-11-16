@@ -131,14 +131,17 @@ TYPE_TAGS = {
 # все ли посты имеют file_path, и если да — архивируем целиком.
 # ---------------------------------------------------------------------------
 
-_ALBUM_ARCHIVE_DELAY: float = float(os.getenv("ALBUM_ARCHIVE_DELAY", "5.0"))
+_ALBUM_ARCHIVE_DELAY: float = float(os.getenv("ALBUM_ARCHIVE_DELAY", "15.0"))
 _album_archive_timers: dict[str, asyncio.Task] = {}
 _album_archive_timers_lock: asyncio.Lock | None = None
 # Множество уже архивированных групп — защита от повторной архивации.
 # После успешной archive_album группа добавляется сюда. Если debounce-таймер
 # срабатывает повторно (race condition), _do_album_archive_check видит группу
 # в этом множестве и пропускает.
-_archived_groups: set[str] = set()
+_archived_groups: dict[str, float] = {}  # media_group_id → timestamp
+# Таймаут для очистки _archived_groups — чтобы при повторной отправке того же
+# твита (через час) альбом мог архивироваться заново.
+_ARCHIVED_GROUPS_TTL: int = 3600  # 1 час
 
 
 def _get_album_timers_lock() -> asyncio.Lock:
@@ -169,13 +172,18 @@ async def schedule_album_archive(media_group_id: str) -> None:
 
 async def _do_album_archive_check(media_group_id: str) -> None:
     """Ждёт ALBUM_ARCHIVE_DELAY сек, затем архивирует альбом если все посты готовы."""
+    import time
+
     try:
         await asyncio.sleep(_ALBUM_ARCHIVE_DELAY)
 
+        # Очистка старых записей в _archived_groups (TTL)
+        now = time.time()
+        expired = [k for k, ts in _archived_groups.items() if now - ts > _ARCHIVED_GROUPS_TTL]
+        for k in expired:
+            _archived_groups.pop(k, None)
+
         # Защита от повторной архивации: если группа уже архивирована — пропускаем.
-        # Это решает race condition: два таймера для одной группы срабатывают
-        # одновременно (например, фото пришли через quick_add_upload, а видео
-        # через worker download — оба вызвали schedule_album_archive).
         if media_group_id in _archived_groups:
             log.info("Альбом %s уже архивирован — пропускаем", media_group_id)
             return
@@ -200,7 +208,7 @@ async def _do_album_archive_check(media_group_id: str) -> None:
 
         # Все посты готовы → помечаем как архивированную ДО вызова archive_album,
         # чтобы параллельный таймер не заархивировал повторно.
-        _archived_groups.add(media_group_id)
+        _archived_groups[media_group_id] = now
 
         # Все посты готовы → архивируем как один альбом
         await archive_album(group_posts, 0)
@@ -214,7 +222,7 @@ async def _do_album_archive_check(media_group_id: str) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("Album archive check failed for %s: %s", media_group_id, e)
         # При ошибке — убираем из archived, чтобы можно было повторить
-        _archived_groups.discard(media_group_id)
+        _archived_groups.pop(media_group_id, None)
     finally:
         lock = _get_album_timers_lock()
         async with lock:

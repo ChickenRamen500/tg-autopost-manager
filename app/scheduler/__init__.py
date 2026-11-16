@@ -161,12 +161,23 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
         )
 
     # Проверка существования файла. Файл мог быть удалён (cleanup, пересборка
-    # контейнера, изменение MEDIA_DIR, ручная очистка data/downloads). В этом
-    # случае пытаемся перекачать через worker (если есть source_url).
+    # контейнера, изменение MEDIA_DIR, ручная очистка data/downloads).
     if not os.path.exists(file_path):
-        # Если у поста есть source_url — можно перекачать. Enqueue download task.
-        source_url = post.get("source_url")
-        if source_url:
+        source_url = post.get("source_url") or ""
+        source_type = post.get("source_type") or ""
+
+        # Для локальных файлов (source_type='local_file') source_url = путь на диске.
+        # Перекачка бессмысленна (это не HTTP URL) → сразу mark_failed.
+        if source_type == "local_file" or source_url.startswith("/") or source_url.startswith("\\"):
+            raise RuntimeError(
+                f"Пост #{post['id']}: файл не найден на диске: {file_path}. "
+                f"Локальный файл удалён или перемещён. Удалите пост или "
+                f"переотправьте файл через браузер локальных файлов."
+            )
+
+        # Для внешних источников (x.com, gelbooru и т.п.) — source_url это HTTP URL,
+        # можно перекачать через worker.
+        if source_url.startswith("http"):
             raise FileMissingError(
                 post_id=post["id"],
                 file_path=file_path,
@@ -176,10 +187,11 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
                     f"Перекачиваем через worker (source_url={source_url})."
                 ),
             )
-        # Нет source_url — перекачать нельзя, помечаем failed
+
+        # Нет source_url или не HTTP — перекачать нельзя
         raise RuntimeError(
             f"Пост #{post['id']}: файл не найден на диске: {file_path}. "
-            f"source_url отсутствует — перекачать нельзя. "
+            f"source_url отсутствует или не HTTP — перекачать нельзя. "
             f"Удалите пост или переотправьте через расширение."
         )
 
@@ -479,8 +491,9 @@ async def send_post_from_queue(queue_id: int) -> None:
             is_permanent = any(keyword in error_str for keyword in [
                 "forbidden", "chat not found", "chat_id_invalid",
                 "entity_too_large", "bot was blocked", "not enough rights",
-                # Файл удалён, source_url нет — перекачать нельзя
+                # Файл удалён, перекачать нельзя
                 "source_url отсутствует",
+                "локальный файл удалён",
             ])
             if is_permanent:
                 await posts_repo.mark_failed(post["id"], last_error)
