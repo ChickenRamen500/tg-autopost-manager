@@ -123,6 +123,60 @@ async def _capture_sent_file_id(post_id: int, message: Any) -> None:
         log.warning("Пост #%s: не удалось сохранить захваченный file_id", post_id, exc_info=True)
 
 
+async def _auto_delete_sent_files(post_ids: list[int]) -> None:
+    """Удаляет файлы постов с диска после успешной отправки в TG (автоочистка).
+
+    Логика (AUTO_DELETE_SENT_FILES, по умолчанию включено): файл, скачанный из
+    внешнего источника (расширение/парсеры), больше не нужен на диске после
+    первой успешной отправки:
+      - повторные отправки идут по захваченному tg_file_id (стратегия 1);
+      - если файл удалён и file_id не захвачен — FileMissingError → перекачка
+        через worker по source_url (HTTP).
+
+    НЕ удаляются:
+      - локальные файлы пользователя (source_type='local_file') — это его
+        собственные файлы, управляются вручную через файловый браузер;
+      - посты без HTTP source_url (перекачать нельзя — файл единственная копия);
+      - файлы, нужные другим неотправленным постам (new/downloading/pending
+        с тем же file_path).
+
+    file_path в БД НЕ обнуляется: debounce-проверка архивации альбомов и
+    пометка «отправлено» в файловом браузере опираются на него, а попытка
+    отправки по несуществующему пути корректно обрабатывается через
+    FileMissingError. Ошибки удаления не влияют на результат отправки.
+    """
+    if not settings.auto_delete_sent_files:
+        return
+    for pid in post_ids:
+        try:
+            post = await posts_repo.get_post(pid)
+            if not post:
+                continue
+            if (post.get("source_type") or "") == "local_file":
+                continue
+            file_path = post.get("file_path")
+            if not file_path:
+                continue
+            if not str(post.get("source_url") or "").startswith("http"):
+                continue
+            others = await posts_repo.count_unsent_by_file_path(file_path, exclude_post_id=pid)
+            if others > 0:
+                log.info(
+                    "Пост #%s: файл %s нужен ещё %d неотправленным постам — не удаляем",
+                    pid, file_path, others,
+                )
+                continue
+            os.remove(file_path)
+            log.info(
+                "Пост #%s: файл %s удалён после успешной отправки (автоочистка)",
+                pid, file_path,
+            )
+        except FileNotFoundError:
+            pass  # файл уже удалён (например, предыдущим постом того же альбома)
+        except Exception as e:  # noqa: BLE001 — очистка не критична для отправки
+            log.warning("Пост #%s: не удалось удалить файл после отправки: %s", pid, e)
+
+
 async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: dict | None = None) -> None:
     """Отправляет один пост в канал по стратегии file_id → файл (ТЗ §2.5.1).
 
@@ -473,6 +527,8 @@ async def send_post_from_queue(queue_id: int) -> None:
                     await posts_repo.bulk_mark_sent(post_ids)
                     sent_ids = post_ids
                     log.info("Альбом отправлен: посты %s", sent_ids)
+                    # Автоочистка: скачанные файлы больше не нужны на диске
+                    await _auto_delete_sent_files(post_ids)
                     return
                 except FileMissingError as e:
                     # Один из постов альбома потерял файл → перекачиваем.
@@ -511,6 +567,8 @@ async def send_post_from_queue(queue_id: int) -> None:
             await _send_one_post(post, channel, queue)
             _last_send[queue_id] = asyncio.get_event_loop().time()
             await posts_repo.mark_sent(post["id"])
+            # Автоочистка: скачанный файл больше не нужен на диске
+            await _auto_delete_sent_files([post["id"]])
             # Уведомления (блок C): проверяем остаток очереди
             await _check_queue_notifications(queue, channel)
             return

@@ -1,8 +1,8 @@
 """Скачивание медиа из внешних источников (ТЗ §2.1.4, §4.2.2 — Фаза 3).
 
 Worker вызывает download_media() для постов с source_url (Gelbooru, Danbooru,
-Pikabu, Pixiv, ...). Файл сохраняется в data/downloads/ (временное хранилище,
-автоочистка каждые 24 ч — ТЗ §3.1), путь записывается в posts.file_path.
+Pikabu, Pixiv, ...). Файл сохраняется в data/downloads/ (временное хранилище),
+путь записывается в posts.file_path.
 
 Особенности:
 - Referer/UA обязательны для ряда источников (gelbooru отдаёт 403 без Referer,
@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -236,27 +235,3 @@ async def download_media(
         log.exception("Неожиданная ошибка скачивания %s (post #%s)", url, post_id)
         raise DownloadError(f"Неожиданная ошибка скачивания {url} (post #{post_id}): {e}") from e
 
-
-async def cleanup_old_downloads(max_age_hours: int = 24) -> int:
-    """Удаляет файлы из data/downloads старше max_age_hours (ТЗ §3.1).
-
-    Возвращает количество удалённых файлов. Запускается по расписанию (APScheduler)
-    или вручную через scripts/cleanup_downloads.py.
-    """
-    import time
-
-    downloads: Path = settings.downloads_dir
-    if not downloads.exists():
-        return 0
-    cutoff = time.time() - max_age_hours * 3600
-    removed = 0
-    for entry in downloads.iterdir():
-        try:
-            if entry.is_file() and entry.stat().st_mtime < cutoff:
-                entry.unlink()
-                removed += 1
-        except OSError as e:
-            log.warning("Не удалось удалить %s: %s", entry, e)
-    if removed:
-        log.info("cleanup_old_downloads: удалено %d файлов старше %dч", removed, max_age_hours)
-    return removed

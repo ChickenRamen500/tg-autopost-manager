@@ -218,6 +218,29 @@ async def repoint_file_path(old_path: str, new_path: str) -> int:
     return changed
 
 
+async def count_unsent_by_file_path(file_path: str, exclude_post_id: int | None = None) -> int:
+    """Сколько ДРУГИХ постов с тем же file_path ещё не отправлены.
+
+    Статусы 'new'/'downloading'/'pending' — файл ещё понадобится scheduler'у.
+    Используется автоочисткой после отправки (AUTO_DELETE_SENT_FILES): если файл
+    нужен неотправленному посту (например, один файл назначен в несколько
+    очередей) — удалять его с диска нельзя.
+    """
+    db = get_db()
+    cur = await db.execute(
+        """
+        SELECT COUNT(*) AS c FROM posts
+        WHERE file_path = ?
+          AND status IN ('new', 'downloading', 'pending')
+          AND (? IS NULL OR id != ?)
+        """,
+        (file_path, exclude_post_id, exclude_post_id),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row["c"]) if row else 0
+
+
 async def find_album_posts(queue_id: int, media_group_id: str, limit: int = 10) -> list[dict[str, Any]]:
     """Все pending-посты альбома (с одинаковым media_group_id) в очереди.
 

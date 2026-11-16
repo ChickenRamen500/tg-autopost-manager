@@ -31,6 +31,7 @@ JSON endpoints файлового браузера (local_files):
   POST /web/local_files/mkdir            — создать подпапку в текущей директории
   POST /web/local_files/move_sent        — переместить отправленные в <root>/sent/
   GET/POST /web/local_files/roots[...]   — управление корневыми папками
+  POST /web/local_files/roots/resolve    — переводчик путей: Windows-путь → контейнер
 """
 from __future__ import annotations
 
@@ -869,6 +870,51 @@ async def web_local_files_roots(
     return {"roots": [{"index": i, "path": str(r), "name": str(r)} for i, r in enumerate(roots)]}
 
 
+@router.post("/web/local_files/roots/resolve")
+async def web_local_files_roots_resolve(
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> dict[str, Any]:
+    """Переводчик путей: Windows-путь → путь(и) внутри контейнера.
+
+    Тело: { "path": "N:\\media_saver_bot\\saved_files" }
+
+    Пользователь знает только пути своего ПК (сетевые диски M:/N: могут
+    указывать на C:/D: сервера) — бот ищет папку ПО ХВОСТУ пути среди всех
+    примонтированных директорий (настроенные корни + точки монтирования +
+    well-known /mnt, /host_mnt, ...). Буква диска и способ монтирования
+    не имеют значения.
+
+    Возвращает:
+      { "windows_path": ..., "exists_as_is": bool,
+        "matches": [{ "container_path", "root" }, ...] }
+    """
+    from app.services.path_resolver import resolve_windows_path
+
+    body = await request.json()
+    raw = (body.get("path") or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="path обязателен")
+
+    # Путь уже существует в контейнере как есть (обычный Linux-путь) —
+    # поиск не нужен, единственное совпадение — сам путь.
+    try:
+        p = Path(raw)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Неверный путь") from None
+    if p.is_dir():
+        return {
+            "windows_path": raw,
+            "exists_as_is": True,
+            "matches": [{"container_path": str(p.resolve()), "root": str(p.resolve())}],
+        }
+
+    roots = await _get_allowed_roots()
+    matches = await resolve_windows_path(raw, roots)
+    log.info("web: resolve path %r → %d совпадений (user=%s)", raw, len(matches), _user)
+    return {"windows_path": raw, "exists_as_is": False, "matches": matches}
+
+
 @router.post("/web/local_files/roots/add")
 async def web_local_files_roots_add(
     request: Request,
@@ -876,10 +922,16 @@ async def web_local_files_roots_add(
 ) -> Any:
     """Добавляет новую корневую директорию (динамически).
 
-    Тело: { "path": "/mnt/saved_files" }
-    Сохраняет в app_settings (ключ 'web_local_roots'), newline-separated.
+    Тело: { "path": "/mnt/saved_files" } или { "path": "N:\\media_saver_bot\\saved_files" }
+
+    Если путь не существует в контейнере как есть — запускается «переводчик»:
+    папка ищется по хвосту пути среди всех примонтированных директорий.
+    Найдено ровно одно совпадение → добавляем его. Несколько → возвращаем
+    needs_choice=true со списком кандидатов (UI предложит выбрать).
+    Сохраняется в app_settings (ключ 'web_local_roots'), newline-separated.
     """
     from app.repositories import app_settings as app_settings_repo
+    from app.services.path_resolver import resolve_windows_path
 
     body = await request.json()
     new_path = (body.get("path") or "").strip()
@@ -887,20 +939,47 @@ async def web_local_files_roots_add(
         raise HTTPException(status_code=400, detail="path обязателен")
 
     try:
-        p = Path(new_path).resolve()
+        p = Path(new_path)
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Неверный путь") from None
+
+    # --- Переводчик путей (Windows-путь → путь контейнера) ---
+    if not p.is_dir():
+        roots_cfg = await _get_allowed_roots()
+        matches = await resolve_windows_path(new_path, roots_cfg)
+        if len(matches) == 1:
+            p = Path(matches[0]["container_path"])
+            log.info("web: путь %r найден по хвосту: %s", new_path, p)
+        elif len(matches) > 1:
+            log.info("web: путь %r неоднозначен (%d кандидатов) — выбор пользователя", new_path, len(matches))
+            return {
+                "success": False,
+                "needs_choice": True,
+                "windows_path": new_path,
+                "matches": matches,
+            }
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Директория «{new_path}» не найдена ни в одной примонтированной папке. "
+                    f"Проверьте, что диск/папка смонтирована в Docker (volumes в docker-compose.yml), "
+                    f"или укажите путь внутри контейнера."
+                ),
+            ) from None
 
     if not p.is_dir():
         raise HTTPException(status_code=404, detail=f"Директория не существует: {p}")
 
+    resolved = str(p.resolve())
+
     # Читаем текущие пути из БД
     current = app_settings_repo.get_setting("web_local_roots") or ""
     paths = [line.strip() for line in current.split("\n") if line.strip()]
-    if str(p) not in paths:
-        paths.append(str(p))
+    if resolved not in paths:
+        paths.append(resolved)
         app_settings_repo.set_setting("web_local_roots", "\n".join(paths))
-        log.info("web: добавлен корень local_files: %s (user=%s)", p, _user)
+        log.info("web: добавлен корень local_files: %s (user=%s)", resolved, _user)
     return {"success": True, "roots": _get_allowed_roots_list()}
 
 
