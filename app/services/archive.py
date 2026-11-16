@@ -53,6 +53,28 @@ def _get_archive_lock() -> asyncio.Lock:
     return _archive_lock
 
 
+async def _capture_archive_file_id(post_id: int, result: Any) -> None:
+    """Сохраняет file_id из архивного сообщения в posts.tg_file_id (если был пуст).
+
+    Архивация идёт при приёме медиа (ингест), ДО первой отправки в целевой
+    канал: захваченный file_id позволяет scheduler'у отправлять пост по
+    file_id (стратегия 1) даже если локальный файл позже удалён с диска.
+
+    Для list[Message] (send_media_group) берётся первый элемент — полная
+    привязка всех постов альбома выполняется в archive_album.
+    Ошибки захвата не влияют на архивацию (архив и так не критичен).
+    """
+    try:
+        from app.repositories import posts as posts_repo
+        from app.utils.telegram_files import extract_file_id_from_message
+
+        fid = extract_file_id_from_message(result)
+        if fid and await posts_repo.set_tg_file_id(post_id, fid):
+            log.info("Пост #%s: захвачен tg_file_id из архивного сообщения", post_id)
+    except Exception:  # noqa: BLE001 — захват не критичен
+        log.warning("Пост #%s: не удалось захватить file_id из архива", post_id, exc_info=True)
+
+
 async def _throttled_archive_send(
     send_callable,
     *,
@@ -101,6 +123,10 @@ async def _throttled_archive_send(
         # успешного retry сервер Telegram уже не считает запрос flood'ом, но
         # всё равно лучше выдержать паузу перед следующим)
         _last_archive_send_time = time.monotonic()
+        # Захват file_id из архивного сообщения — повторные отправки поста
+        # смогут идти по file_id без файла на диске
+        if post_id is not None:
+            await _capture_archive_file_id(post_id, result)
         return result
 
 # Маппинг типов файлов в теги
@@ -422,6 +448,23 @@ async def archive_album(posts: list[dict[str, Any]], target_channel_id: int) -> 
         if result is None:
             log.warning("Не удалось архивировать альбом (первый пост #%s) — все retry исчерпаны", first_post_id)
             return False
+        # Захват file_id для всех постов альбома (message[i] ↔ media[i] ↔ posts[i])
+        try:
+            from app.repositories import posts as posts_repo
+            from app.utils.telegram_files import extract_file_id_from_message
+
+            if isinstance(result, (list, tuple)):
+                for i, msg in enumerate(result):
+                    if i < len(posts):
+                        fid = extract_file_id_from_message(msg)
+                        if fid:
+                            await posts_repo.set_tg_file_id(posts[i]["id"], fid)
+            elif posts:
+                fid = extract_file_id_from_message(result)
+                if fid:
+                    await posts_repo.set_tg_file_id(posts[0]["id"], fid)
+        except Exception:  # noqa: BLE001 — захват не критичен
+            log.warning("Не удалось захватить file_id после архивации альбома", exc_info=True)
         log.info("Альбом (%d медиа) архивирован", len(media))
         return True
     except Exception as e:  # noqa: BLE001

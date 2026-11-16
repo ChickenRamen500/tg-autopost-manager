@@ -16,6 +16,8 @@
 
 <p class="text-muted small">
     Просмотр медиа-файлов. Выберите файлы → добавьте в очередь (по одному или как альбом).
+    Отправленные файлы помечаются галочкой и по умолчанию скрываются; их можно
+    переместить в папку <code>sent/</code> кнопкой ниже.
 </p>
 
 {# Панель инструментов: корень, сортировка, вид #}
@@ -44,6 +46,20 @@
             <i class="bi bi-list-ul"></i>
         </button>
     </div>
+
+    <div class="form-check form-switch ms-2">
+        <input class="form-check-input" type="checkbox" role="switch" id="hide-sent" checked>
+        <label class="form-check-label small" for="hide-sent">Скрывать отправленные</label>
+    </div>
+
+    <button class="btn btn-sm btn-outline-secondary" id="mkdir-btn" title="Создать папку в текущей директории">
+        <i class="bi bi-folder-plus"></i> Папка
+    </button>
+
+    <button class="btn btn-sm btn-outline-success" id="move-sent-btn" disabled
+            title="Переместить отправленные файлы текущей папки в <root>/sent/ (структура подпапок сохраняется)">
+        <i class="bi bi-box-arrow-right"></i> В sent/ (<span id="sent-count">0</span>)
+    </button>
 </div>
 
 <nav aria-label="breadcrumb" class="mb-3">
@@ -99,7 +115,28 @@
 <div id="empty-folder" class="card d-none">
     <div class="card-body p-5 text-center text-muted">
         <i class="bi bi-folder-x fs-1 d-block mb-3"></i>
-        <p class="mb-0">Нет медиа-файлов.</p>
+        <p class="mb-0" id="empty-folder-text">Нет медиа-файлов.</p>
+    </div>
+</div>
+
+{# Модальное окно создания папки #}
+<div class="modal fade" id="mkdir-modal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Новая папка</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <label class="form-label" for="new-folder-name">Имя папки:</label>
+                <input type="text" class="form-control" id="new-folder-name" placeholder="моя-папка">
+                <div class="form-text">Создаётся в текущей директории браузера.</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" id="create-folder-btn">Создать</button>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -134,6 +171,8 @@
     let currentRoot = 0;
     let currentSort = "name";
     let viewMode = "grid";
+    let lastData = null;                 // последний ответ /list — для перерендера без перезапроса
+    let hideSent = localStorage.getItem("lf_hide_sent") !== "0";  // по умолчанию — скрывать
     const selectedFiles = new Set();
 
     const $ = (id) => document.getElementById(id);
@@ -152,6 +191,11 @@
     const queueSelect = $("queue-select");
     const rootSelect = $("root-select");
     const sortSelect = $("sort-select");
+    const hideSentToggle = $("hide-sent");
+    const moveSentBtn = $("move-sent-btn");
+    let sentCountEl = $("sent-count");
+    const emptyFolderText = $("empty-folder-text");
+    hideSentToggle.checked = hideSent;
 
     function fmtSize(b) {
         if (b < 1024) return b + " B";
@@ -206,7 +250,9 @@
         try {
             const r = await fetch(`/web/local_files/list?path=${encodeURIComponent(path)}&root=${currentRoot}&sort=${currentSort}`);
             if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d.detail || `HTTP ${r.status}`); }
-            render(await r.json());
+            const data = await r.json();
+            lastData = data;
+            render(data);
         } catch (e) {
             errorMsg.textContent = "Ошибка: " + e.message;
             errorMsg.classList.remove("d-none");
@@ -242,23 +288,36 @@
             }
         } else { dirsSection.classList.add("d-none"); }
 
-        // Files
+        // Files (с учётом фильтра «скрывать отправленные»)
         filesList.innerHTML = "";
-        if (data.files.length === 0) {
-            fileCount.textContent = "0 файлов";
+        const visibleFiles = data.files.filter(f => !hideSent || !f.sent);
+        const hiddenSent = data.files.length - visibleFiles.length;
+
+        // Кнопка «В sent/»: активна, если в текущей папке есть отправленные файлы
+        const sentInDir = data.files.filter(f => f.sent).length;
+        sentCountEl.textContent = sentInDir;
+        moveSentBtn.disabled = sentInDir === 0;
+
+        if (visibleFiles.length === 0) {
+            fileCount.textContent = data.files.length === 0 ? "0 файлов" : `${data.files.length} файлов (скрыто: ${hiddenSent})`;
             if (data.directories.length === 0) {
+                emptyFolderText.textContent = (hiddenSent > 0)
+                    ? "Все медиа-файлы этой папки уже отправлены и скрыты. Нажмите «В sent/», чтобы переместить их в папку отправленных, или включите показ отправленных."
+                    : "Нет медиа-файлов.";
                 emptyFolder.classList.remove("d-none");
                 content.classList.add("d-none");
                 return;
             }
-        } else { fileCount.textContent = `${data.files.length} файлов`; }
+        } else {
+            fileCount.textContent = `${visibleFiles.length} файлов` + (hiddenSent > 0 ? ` (скрыто: ${hiddenSent})` : "");
+        }
 
         if (viewMode === "grid") {
             filesList.className = "row row-cols-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-6 g-2";
-            for (const f of data.files) renderGridCard(f, data);
+            for (const f of visibleFiles) renderGridCard(f, data);
         } else {
             filesList.className = "list-group";
-            for (const f of data.files) renderListRow(f, data);
+            for (const f of visibleFiles) renderListRow(f, data);
         }
         content.classList.remove("d-none");
     }
@@ -295,6 +354,16 @@
         check.innerHTML = '<i class="bi bi-check-circle-fill text-success fs-4 d-none"></i>';
         card.appendChild(check);
 
+        // Бейдж «отправлено»: существует sent-пост с этим file_path
+        if (f.sent) {
+            const badge = document.createElement("span");
+            badge.className = "position-absolute bottom-0 start-0 m-1 badge bg-success";
+            badge.style.fontSize = "0.65rem";
+            badge.title = "Файл уже отправлен в TG (есть пост со статусом sent)";
+            badge.innerHTML = '<i class="bi bi-check2-circle"></i> отправлено';
+            card.appendChild(badge);
+        }
+
         card.onclick = (e) => { e.preventDefault(); toggleFile(f.relative_path, card, check); };
         col.appendChild(card);
         filesList.appendChild(col);
@@ -323,6 +392,15 @@
         check.className = "flex-shrink-0";
         check.innerHTML = '<i class="bi bi-check-circle-fill text-success fs-5 d-none"></i>';
         row.appendChild(check);
+
+        // Бейдж «отправлено»
+        if (f.sent) {
+            const badge = document.createElement("span");
+            badge.className = "badge bg-success flex-shrink-0";
+            badge.title = "Файл уже отправлен в TG (есть пост со статусом sent)";
+            badge.innerHTML = '<i class="bi bi-check2-circle"></i> отправлено';
+            row.appendChild(badge);
+        }
 
         row.onclick = (e) => { e.preventDefault(); toggleFile(f.relative_path, row, check); };
         filesList.appendChild(row);
@@ -370,6 +448,64 @@
     };
     sortSelect.onchange = () => { currentSort = sortSelect.value; navigateTo(currentPath); };
     rootSelect.onchange = () => { currentRoot = parseInt(rootSelect.value); navigateTo("", currentRoot); };
+    hideSentToggle.onchange = () => {
+        hideSent = hideSentToggle.checked;
+        localStorage.setItem("lf_hide_sent", hideSent ? "1" : "0");
+        if (lastData) render(lastData);   // перерендер без перезапроса
+    };
+
+    // Создание папки в текущей директории
+    $("mkdir-btn").onclick = () => {
+        $("new-folder-name").value = "";
+        bootstrap.Modal.getOrCreateInstance($("mkdir-modal")).show();
+    };
+    $("create-folder-btn").onclick = async () => {
+        const name = $("new-folder-name").value.trim();
+        if (!name) return;
+        const btn = $("create-folder-btn");
+        btn.disabled = true;
+        try {
+            const r = await fetch("/web/local_files/mkdir", {
+                method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({root: currentRoot, path: currentPath, name})
+            });
+            const d = await r.json().catch(()=>({}));
+            if (r.ok && d.success) {
+                bootstrap.Modal.getOrCreateInstance($("mkdir-modal")).hide();
+                navigateTo(currentPath);
+            } else {
+                alert("Ошибка: " + (d.detail || r.status));
+            }
+        } catch (e) { alert("Сетевая ошибка: " + e.message); }
+        btn.disabled = false;
+    };
+
+    // Перемещение отправленных файлов текущей папки в <root>/sent/
+    moveSentBtn.onclick = async () => {
+        if (!lastData) return;
+        const files = lastData.files.filter(f => f.sent).map(f => f.relative_path);
+        if (files.length === 0) return;
+        if (!confirm(`Переместить ${files.length} отправленных файл(ов) в папку sent/?\nПосты будут перепривязаны на новый путь.`)) return;
+        moveSentBtn.disabled = true;
+        moveSentBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Перемещаю...';
+        try {
+            const r = await fetch("/web/local_files/move_sent", {
+                method: "POST", headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({root: currentRoot, files})
+            });
+            const d = await r.json();
+            if (r.ok) {
+                const msg = `Перемещено: ${d.moved}` + (d.repointed ? `, постов перепривязано: ${d.repointed}` : "") +
+                    (d.errors.length ? `\nОшибки:\n- ` + d.errors.join("\n- ") : "");
+                alert(msg);
+            } else {
+                alert("Ошибка: " + (d.detail || r.status));
+            }
+        } catch (e) { alert("Сетевая ошибка: " + e.message); }
+        moveSentBtn.innerHTML = '<i class="bi bi-box-arrow-right"></i> В sent/ (<span id="sent-count">0</span>)';
+        sentCountEl = $("sent-count");   // innerHTML пересоздал span — обновляем ссылку
+        navigateTo(currentPath);
+    };
     $("view-grid").onclick = () => { viewMode = "grid"; $("view-grid").classList.add("active"); $("view-list").classList.remove("active"); navigateTo(currentPath); };
     $("view-list").onclick = () => { viewMode = "list"; $("view-list").classList.add("active"); $("view-grid").classList.remove("active"); navigateTo(currentPath); };
 

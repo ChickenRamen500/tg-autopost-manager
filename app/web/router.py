@@ -22,6 +22,15 @@ POST-actions (возвращают redirect на referer):
   /web/channels/create                   — создать канал (Task 8)
   /web/channels/{id}/edit                — обновить канал (Task 8)
   /web/channels/{id}/delete              — удалить канал (Task 8)
+
+JSON endpoints файлового браузера (local_files):
+  GET  /web/local_files/list             — список файлов/папок (+флаг sent)
+  POST /web/local_files/add              — создать посты из файлов
+  GET  /web/local_files/preview          — превью файла
+  GET  /web/local_files/serve            — файл по абсолютному пути
+  POST /web/local_files/mkdir            — создать подпапку в текущей директории
+  POST /web/local_files/move_sent        — переместить отправленные в <root>/sent/
+  GET/POST /web/local_files/roots[...]   — управление корневыми папками
 """
 from __future__ import annotations
 
@@ -408,6 +417,11 @@ async def web_local_files_list(
       path — относительный путь внутри корня
       root — индекс корня (0 = media_dir, 1+ = extra)
       sort — сортировка: name (по умолч.), size, type, modified
+
+    Каждый файл содержит флаг "sent": true, если существует пост со
+    статусом 'sent', чей file_path совпадает с этим файлом. Фильтрация
+    (скрытие) выполняется на клиенте — так тумблер работает без перезапроса,
+    а кнопка «Переместить отправленные» знает актуальное количество.
     """
     roots = await _get_allowed_roots()
     if not roots:
@@ -428,6 +442,13 @@ async def web_local_files_list(
     if not target.is_dir():
         raise HTTPException(status_code=404, detail=f"Директория не найдена: {path}")
 
+    # Пути файлов отправленных постов — для пометки "sent" в браузере.
+    sent_paths: set[str] = set()
+    try:
+        sent_paths = {str(Path(p).resolve()) for p in await posts_repo.get_sent_file_paths()}
+    except Exception:  # noqa: BLE001 — БД недоступна: браузер должен работать без пометок
+        log.warning("web: не удалось получить sent-пути для local_files list", exc_info=True)
+
     directories = []
     files = []
     try:
@@ -444,6 +465,10 @@ async def web_local_files_list(
                         rel = str(entry.resolve().relative_to(base))
                     except ValueError:
                         rel = entry.name
+                    abs_resolved = base.joinpath(rel) if rel != entry.name else entry.resolve()
+                    is_sent = (
+                        str(abs_resolved) in sent_paths or str(entry.resolve()) in sent_paths
+                    )
                     files.append({
                         "name": entry.name,
                         "size": stat.st_size,
@@ -451,6 +476,7 @@ async def web_local_files_list(
                         "file_type": _guess_ft(entry.name),
                         "relative_path": rel,
                         "modified": stat.st_mtime,
+                        "sent": is_sent,
                     })
     except PermissionError:
         raise HTTPException(status_code=403, detail="Нет доступа к директории") from None
@@ -654,6 +680,180 @@ async def web_local_files_serve(
         raise HTTPException(status_code=404, detail="Файл не найден")
 
     return FileResponse(str(target))
+
+
+@router.post("/web/local_files/mkdir")
+async def web_local_files_mkdir(
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> dict[str, Any]:
+    """JSON: создаёт подпапку в текущей директории браузера файлов.
+
+    Тело: { "root": 0, "path": "sub/dir", "name": "Новая папка" }
+    path — текущая директория относительно корня ("" = корень).
+    name — имя новой папки (без слешей, без "..", не начинается с ".").
+    """
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name обязателен")
+    if "/" in name or "\\" in name or name == ".." or name.startswith("."):
+        raise HTTPException(
+            status_code=400,
+            detail="Недопустимое имя папки: слеши, '..' и точки в начале запрещены",
+        )
+
+    roots = await _get_allowed_roots()
+    if not roots:
+        raise HTTPException(status_code=500, detail="Корневые директории не настроены")
+
+    root_idx = body.get("root", 0)
+    try:
+        root_idx = int(root_idx)
+    except (ValueError, TypeError):
+        root_idx = 0
+    if root_idx < 0 or root_idx >= len(roots):
+        raise HTTPException(status_code=400, detail=f"Неверный индекс корня: {root_idx}")
+
+    base = roots[root_idx]
+    parent = _safe_join(base, body.get("path") or "")
+    if parent is None or not parent.is_dir():
+        raise HTTPException(status_code=404, detail="Родительская директория не найдена")
+
+    new_dir = _safe_join(parent, name)
+    if new_dir is None:
+        raise HTTPException(status_code=400, detail="Недопустимый путь")
+    if new_dir.exists():
+        raise HTTPException(status_code=409, detail=f"Уже существует: {new_dir.name}")
+
+    try:
+        new_dir.mkdir(parents=True)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось создать папку: {e}") from None
+
+    log.info("web: создана папка %s (user=%s)", new_dir, _user)
+    return {"success": True, "name": name, "path": str(new_dir)}
+
+
+@router.post("/web/local_files/move_sent")
+async def web_local_files_move_sent(
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> dict[str, Any]:
+    """JSON: перемещает отправленные файлы в папку <root>/sent/.
+
+    Тело: { "root": 0, "files": ["sub/img1.jpg", "img2.mp4"] }
+
+    Правила:
+    - Перемещаются только файлы, у которых есть пост со статусом 'sent'
+      с совпадающим file_path (защита от случайного перемещения файлов
+      из очереди).
+    - Структура подпапок сохраняется: <root>/a/b/img.jpg → <root>/sent/a/b/img.jpg.
+    - Конфликты имён решаются суффиксом _1, _2, ...
+    - Все посты, ссылающиеся на файл, перепривязываются на новый путь
+      (posts.file_path), чтобы scheduler не потерял файл.
+
+    Возвращает { moved, errors, repointed }.
+    """
+    body = await request.json()
+    files_list = body.get("files") or []
+    if not files_list:
+        raise HTTPException(status_code=400, detail="files обязателен (массив путей)")
+
+    roots = await _get_allowed_roots()
+    if not roots:
+        raise HTTPException(status_code=500, detail="Корневые директории не настроены")
+
+    root_idx = body.get("root", 0)
+    try:
+        root_idx = int(root_idx)
+    except (ValueError, TypeError):
+        root_idx = 0
+    if root_idx < 0 or root_idx >= len(roots):
+        raise HTTPException(status_code=400, detail=f"Неверный индекс корня: {root_idx}")
+    base = roots[root_idx]
+
+    # Актуальные sent-пути — сверяем каждый файл перед перемещением
+    sent_paths: set[str] = set()
+    try:
+        sent_paths = {str(Path(p).resolve()) for p in await posts_repo.get_sent_file_paths()}
+    except Exception:  # noqa: BLE001
+        log.warning("web: не удалось получить sent-пути для move_sent", exc_info=True)
+
+    sent_root = _safe_join(base, "sent")
+    if sent_root is None:
+        raise HTTPException(status_code=400, detail="Недопустимый путь для папки sent")
+
+    moved = 0
+    repointed_total = 0
+    errors: list[str] = []
+    for file_rel in files_list:
+        file_rel = (file_rel or "").strip()
+        if not file_rel:
+            continue
+        src = _safe_join(base, file_rel)
+        if src is None or not src.is_file():
+            errors.append(f"Не найден: {file_rel}")
+            continue
+
+        try:
+            rel_norm = src.relative_to(base)
+        except ValueError:
+            errors.append(f"Вне корня: {file_rel}")
+            continue
+
+        # Уже в sent/ — пропускаем без ошибки (идемпотентность повторных кликов)
+        if rel_norm.parts[0] == "sent":
+            continue
+
+        if str(src.resolve()) not in sent_paths:
+            errors.append(f"Нет отправленного поста для: {file_rel}")
+            continue
+
+        # Целевая папка: <root>/sent/<относительный путь родителя>
+        dest_dir = _safe_join(sent_root, str(rel_norm.parent)) if str(rel_norm.parent) != "." else sent_root
+        if dest_dir is None:
+            errors.append(f"Недопустимый целевой путь: {file_rel}")
+            continue
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            errors.append(f"{file_rel}: {e}")
+            continue
+
+        # Разрешение конфликтов имён: img.jpg → img_1.jpg, img_2.jpg ...
+        dest = dest_dir / src.name
+        if dest.exists():
+            stem, suffix = src.stem, src.suffix
+            for i in range(1, 1000):
+                candidate = dest_dir / f"{stem}_{i}{suffix}"
+                if not candidate.exists():
+                    dest = candidate
+                    break
+            else:
+                errors.append(f"Не удалось подобрать имя для: {file_rel}")
+                continue
+
+        try:
+            src.rename(dest)
+        except OSError as e:
+            errors.append(f"{file_rel}: {e}")
+            continue
+
+        moved += 1
+        # Перепривязываем посты на новый путь (старая строка и resolved-вариант)
+        old_abs = str(src)
+        old_resolved = str(src.resolve())
+        new_abs = str(dest)
+        repointed_total += await posts_repo.repoint_file_path(old_abs, new_abs)
+        if old_resolved != old_abs:
+            repointed_total += await posts_repo.repoint_file_path(old_resolved, new_abs)
+
+    log.info(
+        "web: move_sent → перемещено %d файлов, перепривязано %d постов, ошибок %d (user=%s)",
+        moved, repointed_total, len(errors), _user,
+    )
+    return {"success": moved > 0, "moved": moved, "repointed": repointed_total, "errors": errors}
 
 
 # --- Управление корневыми директориями (динамически через веб) ---

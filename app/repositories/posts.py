@@ -159,6 +159,65 @@ async def delete_post(post_id: int) -> bool:
     return changed
 
 
+async def set_tg_file_id(post_id: int, tg_file_id: str) -> bool:
+    """Сохраняет tg_file_id поста, если его ещё нет.
+
+    Используется для захвата file_id после успешной отправки/архивации:
+    исходный tg_file_id есть только у постов из Telegram (ЛС/каналы), а посты
+    из расширения и парсеров хранят лишь file_path. Захваченный file_id
+    позволяет повторные отправки без файла на диске (стратегия 1, ТЗ §2.5.1).
+
+    Возвращает True если file_id записан (был пустым), False если уже был.
+    """
+    if not tg_file_id:
+        return False
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE posts SET tg_file_id = ? WHERE id = ? AND (tg_file_id IS NULL OR tg_file_id = '')",
+        (tg_file_id, post_id),
+    )
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
+async def get_sent_file_paths() -> list[str]:
+    """Пути к файлам всех отправленных постов (status='sent').
+
+    Для файлового браузера: помечаем файлы, у которых есть отправленный пост.
+    Возвращает уникальные непустые file_path.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "SELECT DISTINCT file_path FROM posts WHERE status = 'sent' AND file_path IS NOT NULL AND file_path != ''"
+    )
+    rows = await cur.fetchall()
+    await cur.close()
+    return [r["file_path"] for r in rows]
+
+
+async def repoint_file_path(old_path: str, new_path: str) -> int:
+    """Перепривязывает все посты со старого пути файла на новый.
+
+    Используется при перемещении файла в файловом браузере (папка sent/):
+    без этого scheduler не найдёт файл по старому пути и пост уйдёт в failed
+    или запустит бессмысленную перекачку.
+    Возвращает количество обновлённых постов.
+    """
+    if not old_path or not new_path or old_path == new_path:
+        return 0
+    db = get_db()
+    cur = await db.execute(
+        "UPDATE posts SET file_path = ? WHERE file_path = ?",
+        (new_path, old_path),
+    )
+    await db.commit()
+    changed = cur.rowcount
+    await cur.close()
+    return changed
+
+
 async def find_album_posts(queue_id: int, media_group_id: str, limit: int = 10) -> list[dict[str, Any]]:
     """Все pending-посты альбома (с одинаковым media_group_id) в очереди.
 

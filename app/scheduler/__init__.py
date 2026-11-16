@@ -31,6 +31,7 @@ from app.repositories import (
     queues as queues_repo,
 )
 from app.services.queue_time import handle_end_strategy, is_in_time_window
+from app.utils.telegram_files import extract_file_id_from_message
 
 log = logging.getLogger("scheduler")
 
@@ -94,6 +95,32 @@ def reset_scheduler() -> None:
         _scheduler = None
         # Также чистим троттлинг-словарь — иначе между тестами сохраняются last_send.
         _last_send.clear()
+
+
+async def _capture_sent_file_id(post_id: int, message: Any) -> None:
+    """Сохраняет file_id из результата отправки в posts.tg_file_id (если был пуст).
+
+    У постов из расширения/парсеров/локальных файлов исходного tg_file_id нет —
+    каждая отправка перечитывала файл с диска и падала FileMissingError,
+    если файл удалён (cleanup, пересборка контейнера). После первой успешной
+    отправки Telegram возвращает Message с file_id: сохраняем его, и все
+    повторные отправки идут по file_id (стратегия 1) без файла на диске.
+
+    Ошибки захвата логируются и не влияют на результат отправки.
+    """
+    fid = extract_file_id_from_message(message)
+    if not fid:
+        return
+    try:
+        saved = await posts_repo.set_tg_file_id(post_id, fid)
+        if saved:
+            log.info(
+                "Пост #%s: захвачен tg_file_id после отправки — "
+                "повторные отправки пойдут по file_id без файла на диске",
+                post_id,
+            )
+    except Exception:  # noqa: BLE001 — захват file_id не критичен для отправки
+        log.warning("Пост #%s: не удалось сохранить захваченный file_id", post_id, exc_info=True)
 
 
 async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: dict | None = None) -> None:
@@ -201,17 +228,17 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
     doc = FSInputFile(file_path, filename=os.path.basename(file_path))
     try:
         if file_type == "photo":
-            await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
+            result = await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
         elif file_type == "video":
-            await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
+            result = await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
         elif file_type == "gif":
-            await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
+            result = await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
         elif file_type == "audio":
-            await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
+            result = await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
         elif file_type == "voice":
-            await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
+            result = await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
         else:
-            await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
+            result = await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
     except Exception as e:
         # PHOTO_INVALID_DIMENSIONS: fallback на document
         if "PHOTO_INVALID_DIMENSIONS" in str(e) and file_type == "photo":
@@ -220,10 +247,13 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
                 post["id"],
             )
             doc2 = FSInputFile(file_path, filename=os.path.basename(file_path))
-            await bot.send_document(chat_id=chat_id, document=doc2, caption=caption)
+            result = await bot.send_document(chat_id=chat_id, document=doc2, caption=caption)
+            await _capture_sent_file_id(post["id"], result)
             log.info("Пост #%s отправлен как document (fallback)", post["id"])
             return
         raise
+    # Захват file_id из результата отправки: повторные отправки пойдут по file_id
+    await _capture_sent_file_id(post["id"], result)
     log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
 
 
@@ -303,7 +333,14 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
         await _send_one_post(posts[0], channel, queue)
         return
 
-    await bot.send_media_group(chat_id=chat_id, media=media)
+    result = await bot.send_media_group(chat_id=chat_id, media=media)
+    # Захват file_id для каждого поста альбома (message[i] ↔ media[i] ↔ posts[i])
+    if isinstance(result, (list, tuple)):
+        for i, msg in enumerate(result):
+            if i < len(posts):
+                await _capture_sent_file_id(posts[i]["id"], msg)
+    else:
+        await _capture_sent_file_id(posts[0]["id"], result)
     log.info("Альбом (%d постов, media_group_id=%s) отправлен в канал %s", len(posts), posts[0].get("media_group_id"), chat_id)
 
 
