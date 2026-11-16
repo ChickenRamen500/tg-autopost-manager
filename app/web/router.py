@@ -976,13 +976,13 @@ async def web_local_files_roots_add(
     resolved = str(p.resolve())
 
     # Читаем текущие пути из БД
-    current = app_settings_repo.get_setting("web_local_roots") or ""
+    current = await app_settings_repo.get("web_local_roots") or ""
     paths = [line.strip() for line in current.split("\n") if line.strip()]
     if resolved not in paths:
         paths.append(resolved)
-        app_settings_repo.set_setting("web_local_roots", "\n".join(paths))
+        await app_settings_repo.set("web_local_roots", "\n".join(paths))
         log.info("web: добавлен корень local_files: %s (user=%s)", resolved, _user)
-    return {"success": True, "roots": _get_allowed_roots_list()}
+    return {"success": True, "roots": await _get_allowed_roots_list()}
 
 
 @router.post("/web/local_files/roots/remove")
@@ -1006,13 +1006,13 @@ async def web_local_files_roots_remove(
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Неверный путь") from None
 
-    current = app_settings_repo.get_setting("web_local_roots") or ""
+    current = await app_settings_repo.get("web_local_roots") or ""
     paths = [line.strip() for line in current.split("\n") if line.strip()]
     if str(p) in paths:
         paths.remove(str(p))
-        app_settings_repo.set_setting("web_local_roots", "\n".join(paths))
+        await app_settings_repo.set("web_local_roots", "\n".join(paths))
         log.info("web: удалён корень local_files: %s (user=%s)", p, _user)
-    return {"success": True, "roots": _get_allowed_roots_list()}
+    return {"success": True, "roots": await _get_allowed_roots_list()}
 
 
 async def _get_allowed_roots_list() -> list[dict]:
