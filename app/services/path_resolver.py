@@ -18,8 +18,10 @@
    - well-known директории: /mnt, /media, /host_mnt, /host, /data, /srv,
      /run/desktop/mnt/host + их подкаталоги первого уровня.
 3. Быстрый путь: для каждого корня проверить существование <root>/<components>.
-4. Если не нашлось — ограниченный BFS по каждому корню (лимиты глубины и числа
-   посещённых директорий): совпадение = хвост относительного пути корня
+4. Если не нашлось — спуск по компонентам пути без учёта регистра
+   (guided_descent: пара scandir, мгновенно даже на целых дисках C:/D:).
+5. Если всё ещё не нашлось — ограниченный BFS по каждому корню (лимиты глубины
+   и числа посещённых директорий): совпадение = хвост относительного пути корня
    совпадает с компонентами Windows-пути (регистронезависимо — Windows
    нечувствителен к регистру).
 
@@ -139,6 +141,31 @@ def _is_virtual(p: Path) -> bool:
     return False
 
 
+def guided_descent(root: Path, parts: list[str]) -> Path | None:
+    """Спуск по компонентам пути от root (регистронезависимо, O(depth × детей)).
+
+    Быстрее и надёжнее BFS на больших примонтированных дисках (весь C:/D:):
+    не зависит от лимитов обхода и находит папку за несколько scandir.
+    """
+    node = root
+    for part in parts:
+        target = part.lower()
+        found: Path | None = None
+        try:
+            for ch in os.scandir(node):
+                if not ch.is_dir(follow_symlinks=False):
+                    continue
+                if ch.name.lower() == target:
+                    found = Path(ch.path)
+                    break
+        except OSError:
+            return None
+        if found is None:
+            return None
+        node = found
+    return node
+
+
 def search_tree_for_tail(root: Path, parts: list[str]) -> list[Path]:
     """BFS от root: ищет директории, чей путь от корня заканчивается на parts.
 
@@ -208,7 +235,23 @@ def resolve_windows_path_sync(
             if key not in matches:
                 matches[key] = str(r)
 
-    # 2. BFS по хвосту пути (если быстрый путь не нашёл или нужны все варианты)
+    # 2. Спуск по компонентам без учёта регистра (мгновенно даже на целых дисках:
+    #    /mnt/d + media_saver_bot + saved_files — пара scandir вместо BFS)
+    if not matches:
+        for r in roots:
+            if _is_virtual(r):
+                continue
+            m = guided_descent(r, parts)
+            if m is not None:
+                try:
+                    key = str(m.resolve())
+                except OSError:
+                    key = str(m)
+                if key not in matches:
+                    matches[key] = str(r)
+
+    # 3. BFS по хвосту пути (запасной вариант: части пути в другом порядке/регистре
+    #    или папка лежит глубже ожидаемого)
     if not matches:
         for r in roots:
             if _is_virtual(r):

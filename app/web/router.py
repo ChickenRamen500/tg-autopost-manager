@@ -963,7 +963,9 @@ async def web_local_files_roots_add(
                 status_code=404,
                 detail=(
                     f"Директория «{new_path}» не найдена ни в одной примонтированной папке. "
-                    f"Проверьте, что диск/папка смонтирована в Docker (volumes в docker-compose.yml), "
+                    f"Диски сервера C:\\ и D:\\ доступны в контейнере как /mnt/c и /mnt/d "
+                    f"(docker-compose.yml) — папка должна быть на одном из них. "
+                    f"Если она на другом диске, добавьте его в volumes, "
                     f"или укажите путь внутри контейнера."
                 ),
             ) from None

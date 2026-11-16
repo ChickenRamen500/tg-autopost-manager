@@ -53,13 +53,18 @@ MEDIA_EXTS = {
 
 
 def _norm(path: str | Path) -> str:
-    """Нормализация пути для сопоставления: absolute + forward slashes + lower."""
+    """Нормализация пути для сопоставления: absolute + forward slashes + lower.
+
+    ВАЖНО: без обращений к файловой системе. Path.resolve() здесь запрещён —
+    на Windows это десятки syscalls на КАЖДЫЙ вызов, а нормализуются сотни
+    тысяч путей (866 постов × сотни файлов). abspath/normpath — чистая работа
+    со строками, выполняется за микросекунды. Результат согласован по обеим
+    сторонам сравнения (БД и обход диска), симлинки в data/media не жонглируем.
+    """
     p = str(path).strip().replace("\\", "/")
-    try:
-        p = str(Path(p).resolve())
-    except OSError:
-        p = os.path.abspath(p)
-    return p.replace("\\", "/").lower()
+    if p:
+        p = os.path.normpath(os.path.abspath(p)).replace("\\", "/")
+    return p.lower()
 
 
 def _load_dotenv_silent() -> None:
@@ -141,8 +146,24 @@ def build_media_prefixes(posts: list[dict], media_dir: Path) -> list[str]:
     return sorted(prefixes, key=len, reverse=True)
 
 
-def match_refs(file: Path, media_dir: Path, posts: list[dict], prefixes: list[str]) -> list[dict]:
-    """Посты, ссылающиеся на этот файл.
+def normalize_posts(posts: list[dict]) -> list[tuple[str, dict]]:
+    """[(norm_path, post)] — путь каждого поста нормализуется ОДИН раз.
+
+    Раньше _norm вызывался для каждой пары (файл × пост) — при 866 постах и
+    345 файлах это ~300 000 вызовов Path.resolve() (десятки syscalls каждый
+    на Windows) → скрипт выглядел «зависшим» на десятки минут. Теперь один
+    проход по постам + чисто строковое сопоставление: < 1 секунды.
+    """
+    return [(_norm(p.get("file_path") or ""), p) for p in posts]
+
+
+def match_refs(
+    file: Path,
+    media_dir: Path,
+    posts_norm: list[tuple[str, dict]],
+    prefixes: list[str],
+) -> list[dict]:
+    """Посты, ссылающиеся на этот файл (posts_norm — предвычисленные пути).
 
     Сопоставление устойчиво к разнице путей хост/контейнер:
     1. точное совпадение нормализованных путей (local_file и актуальные пути);
@@ -159,8 +180,7 @@ def match_refs(file: Path, media_dir: Path, posts: list[dict], prefixes: list[st
         rel = file.name.lower()
 
     refs: list[dict] = []
-    for p in posts:
-        pp = _norm(p.get("file_path") or "")
+    for pp, p in posts_norm:
         if not pp:
             continue
         if pp == file_key:
@@ -230,8 +250,10 @@ def main() -> int:
     posts = load_posts(db_path)
     files = scan_files(media_dir, args.include_sent_dir)
     print(f"Постов в БД с файлами: {len(posts)}; файлов на диске: {len(files)}")
+    print("Сопоставление файлов с постами БД (без обращений к диску — секунды)...")
     print()
 
+    posts_norm = normalize_posts(posts)
     prefixes = build_media_prefixes(posts, media_dir)
     by_cat: dict[str, list[Path]] = {c: [] for c in CATEGORY_TITLES}
     skipped_ext: list[Path] = []
@@ -239,7 +261,7 @@ def main() -> int:
         if f.suffix.lower() not in MEDIA_EXTS:
             skipped_ext.append(f)
             continue
-        refs = match_refs(f, media_dir, posts, prefixes)
+        refs = match_refs(f, media_dir, posts_norm, prefixes)
         by_cat[classify(refs)].append(f)
 
     to_delete: list[Path] = list(by_cat["sent"])

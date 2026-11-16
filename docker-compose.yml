@@ -68,6 +68,21 @@ services:
       - ${MEDIA_HOST_DIR:-./data/media}:/app/media
       # Прямой доступ к файлам local-bot-api (файлы >20МБ нельзя скачать через облачное getFile)
       - bot-api-data:/app/bot-api-data:ro
+      # --- Полные диски сервера для переводчика путей и файлового браузера ---
+      # Windows-путь пользователя (например N:\media_saver_bot\saved_files, где N: —
+      # сетевой диск, указывающий на D: сервера) переводится в путь контейнера
+      # /mnt/d/media_saver_bot/saved_files. «File sharing» в Docker Desktop только
+      # РАЗРЕШАЕТ биндить эти диски — без записей ниже диски в контейнер НЕ попадают.
+      # Нужен ещё диск? Добавьте аналогичный блок (source: E:/, target: /mnt/e) —
+      # и проверьте, что диск есть в Docker Desktop → Settings → Resources → File sharing.
+      # Long-syntax (type/source/target) вместо короткого "C:\:/mnt/c" — чтобы
+      # двоеточие в букве диска не ломало разбор volumes старыми версиями compose.
+      - type: bind
+        source: C:/
+        target: /mnt/c
+      - type: bind
+        source: D:/
+        target: /mnt/d
     ports:
       - "8000:8000"     # только localhost: веб-интерфейс за reverse-proxy
     logging:
