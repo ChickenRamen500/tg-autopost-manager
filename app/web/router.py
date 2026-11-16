@@ -35,6 +35,7 @@ JSON endpoints файлового браузера (local_files):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -392,6 +393,31 @@ def _safe_join(base: Path, subpath: str) -> Path | None:
 _MEDIA_EXTS_WEB = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
                    ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 
+# Фоновые задачи архивации (держим ссылки, чтобы GC не убил task до завершения)
+_bg_tasks: set[asyncio.Task] = set()
+
+
+async def _archive_local_posts(post_ids: list[int], media_group_id: str | None) -> None:
+    """Архивирует только что созданные посты из локальных файлов в служебный канал.
+
+    Раньше посты с диска (source_type='local_file') НЕ архивировались вовсе:
+    архивация вызывалась только в worker (парсеры) и quick_add (расширение).
+    Теперь — как в quick_add_upload: одиночные — archive_post сразу,
+    альбом — schedule_album_archive (debounce, один send_media_group).
+    """
+    from app.services.archive import archive_post, schedule_album_archive
+
+    try:
+        if media_group_id:
+            await schedule_album_archive(media_group_id)
+            return
+        for pid in post_ids:
+            p = await posts_repo.get_post(pid)
+            if p and p.get("file_path"):
+                await archive_post(p, 0, [p.get("file_type", "document")])
+    except Exception as e:  # noqa: BLE001 — архивация не критична, не роняем пост
+        log.warning("web: архивация локальных постов %s не удалась: %s", post_ids, e)
+
 
 def _guess_ft(name: str) -> str:
     ext = Path(name).suffix.lower()
@@ -602,6 +628,20 @@ async def web_local_files_add(
 
     log.info("web: local_files → %d постов (album=%s, queue='%s', user=%s)",
              len(created_ids), as_album, queue_name, _user)
+
+    # Архивация в служебный канал (ТЗ §2.4.5, блок D) — как в quick_add_upload:
+    # одиночные посты — сразу, альбомы (media_group_id) — через debounce-таймер
+    # schedule_album_archive (весь альбом одним send_media_group).
+    # Выполняется ФОНОВО (asyncio.create_task): пакетное добавление не должно
+    # ждать загрузки каждого файла в служебный канал — архив не критичен.
+    if created_ids:
+        task = asyncio.create_task(
+            _archive_local_posts(created_ids, media_group_id),
+            name=f"archive-local-{created_ids[0]}",
+        )
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+
     return {
         "success": len(created_ids) > 0,
         "created": len(created_ids),
@@ -675,7 +715,37 @@ async def web_local_files_serve(
             continue
 
     if not allowed:
-        raise HTTPException(status_code=403, detail="Файл вне разрешённых директорий")
+        # Fallback для СТАРЫХ постов: путь сохранён в БД при другом раскладе
+        # контейнера (/app/media/... вместо /app/data/media/..., другой MEDIA_DIR)
+        # и не входит ни в один из текущих корней. Ищем файл по хвосту пути
+        # (последние 1..4 компонента) напрямую под каждым корнем — без рекурсивного
+        # обхода диска. Ровно одно совпадение → отдаём; ноль/несколько → 403.
+        parts = [p for p in target.parts if p not in ("/",)]
+        candidates: set[Path] = set()
+        for k in range(1, min(5, len(parts) + 1)):
+            tail = parts[-k:]
+            for root in roots:
+                cand = root.joinpath(*tail)
+                try:
+                    if cand.is_file():
+                        candidates.add(cand.resolve())
+                except OSError:
+                    continue
+        if len(candidates) == 1:
+            resolved_match = next(iter(candidates))
+            log.info("web: serve fallback: %s → %s (путь из старого хранилища)", path, resolved_match)
+            return FileResponse(str(resolved_match))
+
+        hint = ""
+        if len(candidates) > 1:
+            hint = " Найдено несколько файлов с таким именем — откройте файл через браузер локальных файлов."
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Путь поста не входит в разрешённые директории (путь из старого "
+                f"хранилища или файл был перемещён/удалён).{hint}"
+            ),
+        ) from None
 
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Файл не найден")

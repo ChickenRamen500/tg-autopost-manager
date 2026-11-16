@@ -239,7 +239,12 @@
                     li2.className = "breadcrumb-item";
                     const a2 = document.createElement("a");
                     a2.href = "#"; a2.textContent = parts[i];
-                    a2.onclick = (e) => { e.preventDefault(); navigateTo(acc); };
+                    // ВАЖНО: фиксируем значение acc для ЭТОГО крамба в const.
+                    // Замыкание на переменную acc захватывало ПОСЛЕДНЕЕ значение
+                    // (полный путь) — клик по любому промежуточному крамбу вёл
+                    // в текущую папку: «нажимаю — и ничего не происходит».
+                    const crumbPath = acc;
+                    a2.onclick = (e) => { e.preventDefault(); navigateTo(crumbPath); };
                     li2.appendChild(a2);
                 }
                 breadcrumb.appendChild(li2);

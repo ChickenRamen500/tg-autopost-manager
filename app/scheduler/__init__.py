@@ -39,6 +39,36 @@ _scheduler: AsyncIOScheduler | None = None
 # Троттлинг: время последней отправки по каждому queue_id (ТЗ §2.5.2 п.3)
 _last_send: dict[int, float] = {}
 
+# --- Диагностика «молчаливых» пропусков тиков (баг «очередь не отправляет») ---
+# Раньше все ранние return в send_post_from_queue были немыми: при зависшей
+# очереди в логе не было НИЧЕГО (только apscheduler «executed successfully») —
+# причину невозможно установить post factum. Теперь каждый пропуск с ожидающими
+# постами логируется INFO при СМЕНЕ состояния и повторно раз в
+# _SKIP_REMIND_SECONDS, пока состояние не изменится. Пустая очередь (нет постов)
+# — норма, без логов.
+_skip_state: dict[int, tuple[str, str]] = {}
+_last_skip_log: dict[int, float] = {}
+_SKIP_REMIND_SECONDS = 1800.0  # напоминание о зависшей очереди раз в 30 минут
+
+
+def _log_skip(queue_id: int, reason: str, message: str) -> None:
+    """Логирует причину пропуска тика очереди (INFO, без спама: по смене состояния)."""
+    state = (reason, message)
+    now = asyncio.get_event_loop().time()
+    if _skip_state.get(queue_id) == state and (
+        now - _last_skip_log.get(queue_id, 0.0)
+    ) < _SKIP_REMIND_SECONDS:
+        return
+    _skip_state[queue_id] = state
+    _last_skip_log[queue_id] = now
+    log.info("%s", message)
+
+
+def _clear_skip(queue_id: int) -> None:
+    """Сбрасывает состояние пропуска (очередь снова отправляет или опустела):
+    следующий пропуск залогируется сразу, без ожидания напоминания."""
+    _skip_state.pop(queue_id, None)
+
 
 class FileMissingError(Exception):
     """Файл поста не найден на диске, но можно перекачать через worker.
@@ -478,25 +508,52 @@ async def send_post_from_queue(queue_id: int) -> None:
     """
     queue = await queues_repo.get_queue(queue_id)
     if not queue or not queue["is_active"]:
+        pending = await queues_repo.count_pending(queue_id)
+        if pending:
+            _log_skip(
+                queue_id, "queue_inactive",
+                f"Очередь #{queue_id}: {pending} пост(ов) ждут, но очередь неактивна "
+                f"(is_active=0) — отправка на паузе. Включите очередь в разделе «Очереди».",
+            )
         return
     channel = await channels_repo.get_channel(queue["channel_id"])
     if not channel or not channel["is_active"]:
+        pending = await queues_repo.count_pending(queue_id)
+        if pending:
+            _log_skip(
+                queue_id, "channel_inactive",
+                f"Очередь #{queue_id} «{queue['name']}»: {pending} пост(ов) ждут, но канал "
+                f"#{queue['channel_id']} не найден или неактивен (is_active=0) — отправка "
+                f"заблокирована. Проверьте канал в разделе «Каналы».",
+            )
         return
 
     # Проверка временного окна очереди (блок B)
     if not is_in_time_window(queue):
         # Вне окна. Проверяем, не прошёл ли end_at со стратегией move_to_inbox/delete
-        from app.services.queue_time import _now_utc, _parse_iso_utc
+        from app.services.queue_time import _now_utc, _parse_iso_utc, format_queue_time_info
 
         end_at = _parse_iso_utc(queue.get("end_at"))
         if end_at is not None and _now_utc() > end_at:
             # end_at прошёл — обрабатываем стратегию завершения
             await handle_end_strategy(queue)
+        pending = await queues_repo.count_pending(queue_id)
+        if pending:
+            _log_skip(
+                queue_id, "outside_window",
+                f"Очередь #{queue_id} «{queue['name']}»: {pending} пост(ов) ждут отправки, "
+                f"но очередь вне временного окна — {format_queue_time_info(queue)}. "
+                f"Проверьте настройки очереди (start_at/end_at/ежедневное окно).",
+            )
+        else:
+            _clear_skip(queue_id)
         return  # вне окна — пропускаем тик
 
     post = await posts_repo.get_next_pending(queue_id)
     if post is None:
+        _clear_skip(queue_id)  # очередь пуста — норма, без логов
         return  # очередь пуста
+    _clear_skip(queue_id)  # пост найден — все проверки пройдены: сбрасываем состояние пропуска
 
     # Троттлинг (ТЗ §2.5.2 п.3) — защита от 429 при коротком интервале очереди
     now = asyncio.get_event_loop().time()
