@@ -816,31 +816,35 @@ def test_bulk_assign_and_delete_end_to_end(tmp_path):
 
 
 def test_preview_entry_prefers_file_path():
-    """_preview_entry: file_path → serve-URL с quote; source_url → прямая ссылка; видео-типы."""
-    from urllib.parse import quote
+    """_preview_entry: file_path → /web/posts/{id}/preview; source_url (прямая ссылка) → тот же эндпоинт.
 
+    Превью больше не идёт через /web/local_files/serve (он давал 403 для
+    /app/data/downloads — папка вне разрешённых корней файлового браузера) —
+    всегда выделенный эндпоинт по id поста.
+    """
     from app.web.router import _preview_entry
 
-    e = _preview_entry({"file_path": "/app/media/фото x.jpg", "file_type": "photo"})
-    assert e == {
-        "url": "/web/local_files/serve?path=" + quote("/app/media/фото x.jpg", safe=""),
-        "video": False,
-    }
+    e = _preview_entry({"id": 42, "file_path": "/app/media/фото x.jpg", "file_type": "photo"})
+    assert e == {"url": "/web/posts/42/preview", "video": False}
+
+    # Без id — превью нет
+    assert _preview_entry({"file_path": "/app/media/x.jpg", "file_type": "photo"}) is None
 
     # video/animation/gif → video=true
     for ft in ("video", "animation", "gif"):
-        assert _preview_entry({"file_path": "/app/media/x.mp4", "file_type": ft})["video"] is True
+        assert _preview_entry({"id": 1, "file_path": "/app/media/x.mp4", "file_type": ft})["video"] is True
 
-    # Без file_path: прямая ссылка с видео-расширением
-    e2 = _preview_entry({"file_path": None, "source_url": "https://cs.pikabu.ru/video/a.mp4", "file_type": "video"})
-    assert e2 == {"url": "https://cs.pikabu.ru/video/a.mp4", "video": True}
+    # Без file_path: прямая ссылка с видео-расширением (пост ещё не скачан)
+    e2 = _preview_entry({"id": 7, "file_path": None, "source_url": "https://cs.pikabu.ru/video/a.mp4", "file_type": "video"})
+    assert e2 == {"url": "/web/posts/7/preview", "video": True}
 
-    # Без file_path: прямая картинка
-    e3 = _preview_entry({"file_path": None, "source_url": "https://i.pximg.net/img/a.jpg", "file_type": "photo"})
-    assert e3["video"] is False
+    # Без file_path: прямая картинка (gelbooru не скачан)
+    e3 = _preview_entry({"id": 8, "file_path": None, "source_url": "https://img3.gelbooru.com/images/a/b/ab.jpg", "file_type": "photo"})
+    assert e3 == {"url": "/web/posts/8/preview", "video": False}
 
-    # HTML-страница (твит) без прямой ссылки — превью нет
-    assert _preview_entry({"file_path": None, "source_url": None}) is None
+    # HTML-страница (твит) без прямой ссылки — превью нет (не показываем сломанные ⚠)
+    assert _preview_entry({"id": 9, "file_path": None, "source_url": "https://x.com/user/status/123"}) is None
+    assert _preview_entry({"id": 10, "file_path": None, "source_url": None}) is None
 
 
 def test_inbox_page_includes_bulk_ui(tmp_path):

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import status_badge, file_type_icon, source_icon %}
+{% from "macros.html" import status_badge, file_type_icon, source_icon, row_preview_attr %}
 
 {% block title %}Дашборд — TG Media Queue Bot{% endblock %}
 
@@ -114,10 +114,10 @@
                         </thead>
                         <tbody>
                             {% for p in inbox %}
-                            <tr>
-                                <td>{{ p.id }}</td>
-                                <td>{{ source_icon(p.source_type) }} {{ p.source_type }}</td>
-                                <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
+                            <tr {{ row_preview_attr(p.preview) }}>
+                                <td class="tgq-preview-zone">{{ p.id }}</td>
+                                <td class="tgq-preview-zone">{{ source_icon(p.source_type) }} {{ p.source_type }}</td>
+                                <td class="tgq-preview-zone">{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
                                 <td>{{ status_badge(p.status) }}</td>
                                 <td class="small text-muted">{{ p.created_at }}</td>
                             </tr>

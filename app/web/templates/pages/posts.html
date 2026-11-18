@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import status_badge, file_type_icon, source_icon %}
+{% from "macros.html" import status_badge, file_type_icon, source_icon, source_link, row_preview_attr, pagination_nav %}
 
 {% block title %}Посты — TG Media Queue Bot{% endblock %}
 
@@ -20,7 +20,10 @@
     </form>
 </div>
 
-<p class="text-muted small">Показано максимум 200 постов (свежие сверху).</p>
+<p class="text-muted small">
+    Всего {{ total }} пост(ов), показана страница {{ page }} из {{ pages }} (по {{ page_size }}).
+    Наведите курсор на колонки # / Тип / Источник, чтобы увидеть миниатюру медиа.
+</p>
 
 {% if posts %}
 <div class="card">
@@ -40,10 +43,13 @@
                 </thead>
                 <tbody>
                     {% for p in posts %}
-                    <tr>
-                        <td>{{ p.id }}</td>
-                        <td>{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
-                        <td>{{ source_icon(p.source_type) }} {{ p.source_type }}</td>
+                    <tr id="post-{{ p.id }}" style="scroll-margin-top: 1rem;" {{ row_preview_attr(p.preview) }}>
+                        <td class="tgq-preview-zone">{{ p.id }}</td>
+                        <td class="tgq-preview-zone">{{ file_type_icon(p.file_type) }} {{ p.file_type }}</td>
+                        <td class="tgq-preview-zone">
+                            {{ source_icon(p.source_type) }} {{ p.source_type }}
+                            {{ source_link(p) }}
+                        </td>
                         <td>
                             {% if p.queue_obj %}
                             <a href="/queues/{{ p.queue_obj.id }}">{{ p.queue_obj.name }}</a>
@@ -67,6 +73,11 @@
         </div>
     </div>
 </div>
+{% if current_status %}
+{{ pagination_nav(page, pages, "/posts", "status=" ~ current_status ~ "&") }}
+{% else %}
+{{ pagination_nav(page, pages, "/posts", "") }}
+{% endif %}
 {% else %}
 <div class="card">
     <div class="card-body p-5 text-center text-muted">

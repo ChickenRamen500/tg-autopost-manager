@@ -12,7 +12,8 @@
 <p class="text-muted small">
     Посты без очереди (queue_id = NULL). Посты с одинаковым media_group_id
     объединены в альбом — при назначении в очередь отправляются все картинки альбома.
-    Наведите курсор на строку, чтобы увидеть миниатюру медиа.
+    Наведите курсор на колонки # / Тип / Источник, чтобы увидеть миниатюру медиа
+    (только там — чтобы миниатюра не закрывала кнопки и списки очередей).
 </p>
 
 {% if groups %}
@@ -80,19 +81,19 @@
                                    title="Альбом: {{ g.count }} медиа"{% else %}value="post:{{ p.id }}"
                                    aria-label="Выбрать пост {{ p.id }}"{% endif %}>
                         </td>
-                        <td>
+                        <td class="tgq-preview-zone">
                             {{ p.id }}
                             {% if g.count > 1 %}
                             <span class="badge bg-info ms-1" title="Альбом из {{ g.count }} медиа">📷 {{ g.count }}</span>
                             {% endif %}
                         </td>
-                        <td>
+                        <td class="tgq-preview-zone">
                             {{ file_type_icon(p.file_type) }} {{ p.file_type }}
                             {% if g.count > 1 %}
                             <div class="small text-muted">альбом: {{ g.count }} медиа</div>
                             {% endif %}
                         </td>
-                        <td>
+                        <td class="tgq-preview-zone">
                             {{ source_icon(p.source_type) }} {{ p.source_type }}
                             {{ source_link(p) }}
                             {% if g.media_group_id %}

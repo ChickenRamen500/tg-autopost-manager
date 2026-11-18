@@ -41,13 +41,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.repositories import (
@@ -129,6 +129,8 @@ async def page_dashboard(request: Request, _user: str = Depends(verify_web_user)
         queues.append({**q, "pending_count": pending})
 
     inbox = await posts_repo.list_inbox(limit=5)
+    for p in inbox:
+        p["preview"] = _preview_entry(p)
 
     # Worker stats (как в /health/worker)
     worker_stats = {
@@ -200,31 +202,74 @@ async def page_queue_detail(
     return templates.TemplateResponse(request, "pages/queue_detail.html", ctx)
 
 
-# --- Превью для «Входящих» (hover-миниатюры) --------------------------------
+# --- Превью для «Входящих»/«Постов»/«Архива»/«Дашборда» (hover-миниатюры) ---
 
 _VIDEO_FILE_TYPES = {"video", "animation", "gif"}
 _VIDEO_URL_RE = re.compile(r"\.(mp4|webm|mkv|mov|m3u8)(\?|#|$)", re.IGNORECASE)
+# Прямая ссылка на медиа (для redirect-превью ещё не скачанных/удалённых постов)
+_MEDIA_URL_RE = re.compile(r"\.(jpe?g|png|webp|bmp|gif|avif|mp4|webm|mkv|mov|m4v)(\?|#|$)", re.IGNORECASE)
 
 
 def _preview_entry(post: dict[str, Any]) -> dict[str, Any] | None:
-    """Данные для hover-превью поста во «Входящих».
+    """Данные для hover-превью поста (Входящие/Посты/Архив/Дашборд).
 
-    Приоритет: file_path (файл уже на диске — отдаём через serve-эндпоинт,
-    он умеет fallback для старых путей) → source_url (ещё не скачанные посты
-    с прямой ссылкой на медиа). Если source_url это HTML-страница (твит без
-    прямой ссылки), превью не будет — img/video не сможет загрузиться.
+    Всегда отдаём URL выделенного эндпоинта /web/posts/{id}/preview — он сам
+    решает: файл на диске (data/downloads ИЛИ media — раньше пути в
+    data/downloads давали 403 через local_files/serve, т.к. папка не входит в
+    разрешённые корни веб-браузера файлов) → FileResponse; файла нет
+    (удалён после отправки / ещё не скачан), но source_url — прямая ссылка
+    на медиа (gelbooru/pikabu) → redirect на источник.
+
+    Если у поста нет ни файла, ни прямой ссылки (твит с HTML-permalink) —
+    запись не создаём: панель превью не будет показывать сломанные ⚠.
     """
-    file_path = post.get("file_path")
+    pid = post.get("id")
+    if not pid:
+        return None
     file_type = (post.get("file_type") or "photo").lower()
-    if file_path:
-        return {
-            "url": "/web/local_files/serve?path=" + quote(str(file_path), safe=""),
-            "video": file_type in _VIDEO_FILE_TYPES,
-        }
+    if post.get("file_path"):
+        return {"url": f"/web/posts/{pid}/preview", "video": file_type in _VIDEO_FILE_TYPES}
     src = (post.get("source_url") or "").strip()
-    if src.startswith("http"):
-        return {"url": src, "video": bool(_VIDEO_URL_RE.search(src))}
+    if src.startswith("http") and _MEDIA_URL_RE.search(src):
+        return {"url": f"/web/posts/{pid}/preview", "video": bool(_VIDEO_URL_RE.search(src))}
     return None
+
+
+@router.get("/web/posts/{post_id}/preview")
+async def web_post_preview(
+    post_id: int,
+    _user: str = Depends(verify_web_user),
+) -> Any:
+    """Медиа-превью поста по id (для hover-миниатюр во всех таблицах).
+
+    Приоритет:
+      1. file_path из БД (любой путь внутри контейнера — путь приходит из БД,
+         а не от пользователя, поэтому проверка allowed roots не нужна;
+         local_files/serve ограничен корнями файлового браузера и давал
+         403 для /app/data/downloads — из-за этого миниатюры gelbooru/
+         pikabu/twitter-видео не работали).
+      2. source_url — прямая ссылка на медиа (пост ещё не скачан или файл
+         удалён после отправки) → redirect на источник.
+      3. Иначе 404 — панель превью не покажет медиа.
+    """
+    p = await posts_repo.get_post(post_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+
+    file_path = p.get("file_path")
+    if file_path:
+        try:
+            path = Path(str(file_path))
+        except (OSError, ValueError):
+            path = None
+        if path is not None and path.is_file():
+            return FileResponse(str(path))
+
+    src = (p.get("source_url") or "").strip()
+    if src.startswith("http") and _MEDIA_URL_RE.search(src):
+        return RedirectResponse(url=src, status_code=302)
+
+    raise HTTPException(status_code=404, detail="Медиа для превью недоступно (файл удалён и source_url не прямая ссылка)")
 
 
 @router.get("/inbox")
@@ -257,22 +302,35 @@ async def page_inbox(request: Request, _user: str = Depends(verify_web_user)) ->
 
 
 @router.get("/sent")
-async def page_sent(request: Request, _user: str = Depends(verify_web_user)) -> Any:
-    """Архив отправленных постов (status='sent').
+async def page_sent(
+    request: Request,
+    page: int = 1,
+    _user: str = Depends(verify_web_user),
+) -> Any:
+    """Архив отправленных постов (status='sent') с пагинацией.
 
     Сюда попадают посты из активных очередей после успешной отправки в канал.
     При удалении очереди sent посты удаляются (remove_queue), а не засоряют Inbox.
     """
-    sent_posts = await posts_repo.list_sent(limit=200)
+    PAGE_SIZE = 50
+    total = await posts_repo.count_sent()
+    pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = max(1, min(page, pages))
+
+    sent_posts = await posts_repo.list_sent(limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
     queues = await queues_repo.list_queues(active_only=False)
     queues_by_id = {q["id"]: q for q in queues}
     for p in sent_posts:
         p["queue_obj"] = queues_by_id.get(p["queue_id"]) if p["queue_id"] else None
+        p["preview"] = _preview_entry(p)
     ctx = {
         "request": request,
         "active_page": "sent",
         "posts": sent_posts,
-        "total": len(sent_posts),
+        "total": total,
+        "page": page,
+        "pages": pages,
+        "page_size": PAGE_SIZE,
     }
     return templates.TemplateResponse(request, "pages/sent.html", ctx)
 
@@ -281,52 +339,41 @@ async def page_sent(request: Request, _user: str = Depends(verify_web_user)) -> 
 async def page_posts(
     request: Request,
     status: str | None = None,
+    page: int = 1,
     _user: str = Depends(verify_web_user),
 ) -> Any:
-    """Все посты с опциональным фильтром по статусу."""
+    """Все посты с опциональным фильтром по статусу и пагинацией.
+
+    Заменяет прежний обход list_queue_posts по всем очередям (лимит 500 на
+    очередь + срез [:200]): один запрос list_all с ORDER BY id DESC —
+    пагинация видит ВСЕ посты, не только первые 200.
+    """
     if status and status not in POST_STATUSES:
         status = None
+
+    PAGE_SIZE = 50
+    total = await posts_repo.count_all(status)
+    pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = max(1, min(page, pages))
+
     queues = await queues_repo.list_queues(active_only=False)
     queues_by_id = {q["id"]: q for q in queues}
 
-    if status:
-        # list_queue_posts фильтрует по одной очереди, нам нужен глобальный список.
-        # Делаем простой запрос через list_inbox (нет) — берём все очереди и inbox.
-        # Чтобы не плодить SQL в репозитории (требование: использовать repo-функции),
-        # собираем посты по всем очередям + inbox.
-        all_posts = []
-        for q in queues:
-            qs = await posts_repo.list_queue_posts(q["id"], status=status, limit=500)
-            for p in qs:
-                p["queue_obj"] = queues_by_id.get(p["queue_id"])
-            all_posts.extend(qs)
-        # Входящие тоже могут иметь любой статус (например, possible_duplicate).
-        inbox_posts = await posts_repo.list_inbox(limit=500)
-        for p in inbox_posts:
-            if p["status"] == status:
-                p["queue_obj"] = None
-                all_posts.append(p)
-    else:
-        all_posts = []
-        for q in queues:
-            qs = await posts_repo.list_queue_posts(q["id"], limit=500)
-            for p in qs:
-                p["queue_obj"] = queues_by_id.get(p["queue_id"])
-            all_posts.extend(qs)
-        inbox_posts = await posts_repo.list_inbox(limit=500)
-        for p in inbox_posts:
-            p["queue_obj"] = None
-            all_posts.append(p)
-
-    # Ограничиваем итог выдачи
-    all_posts = all_posts[:200]
+    posts = await posts_repo.list_all(status=status, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+    for p in posts:
+        p["queue_obj"] = queues_by_id.get(p["queue_id"]) if p["queue_id"] else None
+        p["preview"] = _preview_entry(p)
 
     ctx = {
         "request": request,
         "active_page": "posts",
-        "posts": all_posts,
+        "posts": posts,
         "statuses": POST_STATUSES,
         "current_status": status,
+        "total": total,
+        "page": page,
+        "pages": pages,
+        "page_size": PAGE_SIZE,
     }
     return templates.TemplateResponse(request, "pages/posts.html", ctx)
 

@@ -286,15 +286,40 @@
   }
 
   // Возвращает список медиа для отправки. Пустой captured (18+ заглушка)
-  // → пробуем разблокировать контент и пересобрать медиа.
+  // → пробуем разблокировать контент и пересобрать медиа; если не помогло —
+  // тянем страницу поста с куками пользователя (fallbackResolve) и извлекаем
+  // прямые URL (18+/NSFW и blob-видео на пикабу). Найденное через fallback
+  // помечается viaFallback=true → уходит mode B: браузер сам скачает файл
+  // (cookies) и зальёт на сервер — бот не может скачать 18+ анонимно.
   async function resolveMediaWithUnlock(articleEl) {
     let media = collectMediaInArticle(articleEl, config);
     if (media.length) return media;
+    const permalink = getArticlePermalink(articleEl, config);
     if (tryUnlockAdult(articleEl)) {
       // Пауза на перерисовку/ленивую загрузку картинок после раскрытия.
       await new Promise((r) => setTimeout(r, 700));
       media = collectMediaInArticle(articleEl, config);
       if (media.length) return media;
+    }
+    if (typeof config.fallbackResolve === "function" && permalink && /^https?:/.test(permalink)) {
+      try {
+        tgqShowToast("Получаю медиа через страницу поста (с вашими cookies)…", "info", 2500);
+        const resolved = await config.fallbackResolve(permalink);
+        const list = (resolved.mediaUrls || (resolved.fileUrl ? [resolved.fileUrl] : [])).map(
+          (u) => ({ url: u, kind: mediaKind(null, u), viaFallback: true })
+        );
+        if (list.length) {
+          tgqShowToast(`Найдено медиа на странице поста: ${list.length}`, "ok", 2500);
+          return list;
+        }
+      } catch (e) {
+        tgqShowToast(
+          e && e.message ? e.message : "Не удалось получить медиа со страницы поста",
+          "err",
+          8000
+        );
+        return [];
+      }
     }
     if (isAdultStubArticle(articleEl)) {
       tgqShowToast(
@@ -351,6 +376,8 @@
     let lastError = null;
     for (const m of mediaList) {
       const isBlob = !m.url && m.kind === "video";
+      // viaFallback (18+/NSFW пикабу, resolved из страницы поста) → mode B:
+      // браузер скачает файл с куками и зальёт на сервер сам.
       const payload = {
         type: "ENQUEUE",
         pageUrl: permalink || location.href,
@@ -359,7 +386,7 @@
         tags: extractTags(config),
         title: document.title,
         site: location.hostname.replace(/^www\./, ""),
-        mode: isBlob ? "A" : config.mode,
+        mode: m.viaFallback ? "B" : isBlob ? "A" : config.mode,
         mediaGroupId: useMgid,
         queueId: queueId || null,
       };
@@ -520,6 +547,7 @@
 
     const isBlobVideo = !media.url && media.kind === "video";
     // blob: видео → mediaUrl=null + mode=A (бэкенд использует yt-dlp на permalink).
+    // viaFallback (18+/NSFW пикабу) → mode=B: браузер скачает и зальёт сам.
     // pageUrl = permalink (НЕ location.href!) — иначе бот качает HTML ленты x.com/home.
     const payload = {
       type: "ENQUEUE",
@@ -529,7 +557,7 @@
       tags: extractTags(config),
       title: document.title,
       site: location.hostname.replace(/^www\./, ""),
-      mode: isBlobVideo ? "A" : config.mode,
+      mode: media.viaFallback ? "B" : isBlobVideo ? "A" : config.mode,
       queueId: queueId || null,
     };
 
@@ -772,7 +800,7 @@
           tags: extractTags(config),
           title: document.title,
           site: location.hostname.replace(/^www\./, ""),
-          mode: isBlob ? "A" : config.mode,
+          mode: m.viaFallback ? "B" : isBlob ? "A" : config.mode,
           // media_group_id — одинаковый для всех выбранных медиа этого поста.
           // Бэкенд сохранит его; если у очереди group_albums=True, scheduler
           // отправит все посты с этим ID одним сообщением (send_media_group).

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -365,6 +366,25 @@ class Worker:
                 raise _PermanentTaskError(str(e)) from e
             except DownloadError as e:
                 raise _RetryableTaskError(str(e)) from e
+
+        # Конвертация видео в mp4 (webm/mkv/... с gelbooru и др. — Telegram
+        # плохо играет webm; пользователь просил mp4). Файл заменяется на месте
+        # (post_<id>.mp4), при неудаче остаётся исходник. Только для file_type=video:
+        # gif (animation) не трогаем.
+        if result["file_type"] == "video":
+            try:
+                from app.services.media.transcode import convert_video_to_mp4
+
+                converted = await convert_video_to_mp4(result["file_path"])
+                if converted:
+                    result = {
+                        **result,
+                        "file_path": converted,
+                        "mime_type": "video/mp4",
+                        "file_size": os.path.getsize(converted),
+                    }
+            except Exception as e:  # noqa: BLE001 — конвертация не должна валить задачу
+                log.warning("Worker: конвертация видео поста #%s не удалась (оставляю исходник): %s", post_id, e)
 
         # Сохраняем метаданные файла + переводим в pending (готов к отправке)
         await posts_repo.set_file_info(

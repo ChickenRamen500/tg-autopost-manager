@@ -398,28 +398,82 @@ async def find_posts_by_media_group_id(media_group_id: str) -> list[dict[str, An
     return [_row_to_post(r) for r in rows]
 
 
-async def list_sent(limit: int = 200, queue_id: int | None = None) -> list[dict[str, Any]]:
+async def list_sent(
+    limit: int = 200, queue_id: int | None = None, offset: int = 0,
+) -> list[dict[str, Any]]:
     """Список отправленных постов (status='sent') — для страницы «Архив/Sent».
 
     Если queue_id задан — фильтрует по очереди; иначе все sent посты.
     Сортировка: sent_at DESC (сначала самые свежие отправленные).
+    offset/limit — пагинация страницы «Архив».
     """
     db = get_db()
     if queue_id is not None:
         cur = await db.execute(
             "SELECT * FROM posts WHERE status = 'sent' AND queue_id = ? "
-            "ORDER BY sent_at DESC, created_at DESC LIMIT ?",
-            (queue_id, limit),
+            "ORDER BY sent_at DESC, created_at DESC LIMIT ? OFFSET ?",
+            (queue_id, limit, offset),
         )
     else:
         cur = await db.execute(
             "SELECT * FROM posts WHERE status = 'sent' "
-            "ORDER BY sent_at DESC, created_at DESC LIMIT ?",
-            (limit,),
+            "ORDER BY sent_at DESC, created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         )
     rows = await cur.fetchall()
     await cur.close()
     return [_row_to_post(r) for r in rows]
+
+
+async def count_sent(queue_id: int | None = None) -> int:
+    """Количество sent постов (для пагинации страницы «Архив»)."""
+    db = get_db()
+    if queue_id is not None:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM posts WHERE status = 'sent' AND queue_id = ?",
+            (queue_id,),
+        )
+    else:
+        cur = await db.execute("SELECT COUNT(*) FROM posts WHERE status = 'sent'")
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row[0]) if row else 0
+
+
+async def list_all(
+    status: str | None = None, limit: int = 200, offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Все посты (любая очередь, включая Входящие) с пагинацией — страница «Посты».
+
+    Заменяет прежний обход list_queue_posts по всем очередям + inbox:
+    один SQL с ORDER BY id DESC (свежие сверху) и LIMIT/OFFSET.
+    """
+    db = get_db()
+    if status:
+        cur = await db.execute(
+            "SELECT * FROM posts WHERE status = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (status, limit, offset),
+        )
+    else:
+        cur = await db.execute(
+            "SELECT * FROM posts ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+    rows = await cur.fetchall()
+    await cur.close()
+    return [_row_to_post(r) for r in rows]
+
+
+async def count_all(status: str | None = None) -> int:
+    """Количество постов (опционально по статусу) — для пагинации «Постов»."""
+    db = get_db()
+    if status:
+        cur = await db.execute("SELECT COUNT(*) FROM posts WHERE status = ?", (status,))
+    else:
+        cur = await db.execute("SELECT COUNT(*) FROM posts")
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row[0]) if row else 0
 
 
 async def update_status(post_id: int, status: str, error: str | None = None) -> bool:

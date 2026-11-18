@@ -127,6 +127,11 @@ const SITE_CONFIGS = {
     buttonPosition: "append",
     // На ленте — ссылка на пост; на странице поста — canonical.
     permalinkSelector: "a.story__title-link, a[href*='/story/'], link[rel='canonical']",
+    // 18+/NSFW и blob-видео: DOM-заглушки не содержат медиа → тянем страницу
+    // поста с куками пользователя (fetch) и извлекаем прямые URL. Найденное
+    // отправляется mode B: браузер скачает файл сам и зальёт на сервер —
+    // бот не может скачать 18+ контент анонимно (см. resolvePikabuOriginal).
+    fallbackResolve: resolvePikabuOriginal,
   },
   "x.com": {
     mode: "B", // браузерное скачивание (cookies пользователя)
@@ -598,6 +603,100 @@ async function resolveGelbooruOriginal(permalink) {
   return result;
 }
 
+// --- Pikabu: оригиналы поста через HTML-страницу поста (в т.ч. 18+/NSFW) ----
+// У 18+ постов DOM содержит только заглушки (анонимам пикабу вырезает медиа),
+// но fetch страницы поста С КУКАМИ залогиненного пользователя возвращает
+// полный HTML (пользователь такие посты видит — «они у меня по прямым ссылкам
+// открываются»). Достаём из HTML все прямые ссылки на медиа:
+//   1. DOM-селекторы (data-large-image — оригинал картинки, video source, a[href*='post_img']);
+//   2. data-* атрибуты плееров (mp4 в data-source/data-video);
+//   3. regex-фолбэк по inline JSON/атрибутам (устойчив к смене вёрстки).
+// Качество апгрейдим до оригинала: post_img/preview|small|medium → /post_img/big/.
+// Возвращаем { fileUrl, mediaUrls, tags }; отправка идёт mode B (background.js
+// сам скачает файл с куками браузера и зальёт на бэкенд через quick_add_upload).
+async function resolvePikabuOriginal(permalink) {
+  if (!permalink || !/^https?:/i.test(permalink)) {
+    throw new Error("pikabu: не найдена ссылка на пост");
+  }
+  const resp = await fetch(permalink, { credentials: "include" });
+  if (!resp.ok) throw new Error(`pikabu: HTTP ${resp.status} на странице поста`);
+  const html = await resp.text();
+  const doc = new DOMParser().parseFromString(html, "text/html");
+
+  const urls = [];
+  const push = (u) => {
+    if (!u) return;
+    try {
+      const abs = new URL(String(u).replace(/\\\//g, "/"), location.origin).href;
+      const host = new URL(abs).hostname.replace(/^www\./, "");
+      if (!/(^|\.)pikabu\.ru$/i.test(host)) return;
+      if (/\/(ava|avatar)|emoji|favicon|logo|\.svg(\?|#|$)|\/post_img\/(preview|small)\//i.test(abs)) return;
+      urls.push(abs);
+    } catch (e) {
+      /* не URL — пропускаем */
+    }
+  };
+
+  // 1) DOM: картинки (оригинал в data-large-image), видео, ссылки на медиа.
+  doc
+    .querySelectorAll(
+      "img[data-large-image], [data-large-image], " +
+        ".story__block_type_media img[src], .player img[src], " +
+        "img[src*='post_img'], img[data-src*='post_img'], " +
+        "video source[src], video[src], " +
+        "a[href*='post_img'], source[src*='.mp4'], source[src*='.webm']"
+    )
+    .forEach((el) => {
+      push(
+        el.getAttribute("data-large-image") ||
+          el.getAttribute("src") ||
+          el.getAttribute("data-src") ||
+          el.getAttribute("href")
+      );
+    });
+
+  // 2) data-* атрибуты плееров (mp4/webm прячутся в data-source и т.п.).
+  doc
+    .querySelectorAll("[data-source], [data-video], [data-mp4], [data-video-url]")
+    .forEach((el) => {
+      push(
+        el.getAttribute("data-source") ||
+          el.getAttribute("data-video") ||
+          el.getAttribute("data-mp4") ||
+          el.getAttribute("data-video-url")
+      );
+    });
+
+  // 3) Regex-фолбэк по сырому HTML (inline JSON, экранированные URL).
+  const re =
+    /https?:\/\/[a-z0-9.-]*pikabu\.ru[^"'\\\s<>)]*?\.(?:jpe?g|png|webp|gif|mp4|webm|mov)(?:\?[^"'\\\s<>)]*)?/gi;
+  (html.match(re) || []).forEach((u) => push(u));
+
+  // Апгрейд качества + дедуп (preview/small/medium → big — у big уникальные пути).
+  const media = [];
+  const seen = new Set();
+  for (const u of urls) {
+    const big = u.replace(/\/post_img\/(preview|small|medium)\//, "/post_img/big/");
+    if (!seen.has(big) && /\.(jpe?g|png|webp|gif|mp4|webm|mov)(\?|$)/i.test(big)) {
+      seen.add(big);
+      media.push(big);
+    }
+  }
+
+  if (!media.length) {
+    throw new Error(
+      "pikabu: медиа на странице поста не найдены — для 18+ нужен вход на pikabu.ru в этом браузере"
+    );
+  }
+
+  const tags = Array.from(doc.querySelectorAll("a[href*='/tag/'], .story_tags a"))
+    .map((a) => (a.textContent || "").trim().toLowerCase())
+    .filter(Boolean)
+    .slice(0, 60);
+
+  return { fileUrl: media[0], mediaUrls: media, tags };
+}
+
 // --- Извлечение permalink'а конкретного поста из article ---
 // Важно для x.com/twitter/pikabu: на ленте location.href = ".../home" или ".../feed",
 // но каждый пост имеет свой permalink (https://x.com/{user}/status/{id}).
@@ -663,4 +762,5 @@ if (typeof globalThis !== "undefined") {
   globalThis.mediaKind = mediaKind;
   globalThis.getArticlePermalink = getArticlePermalink;
   globalThis.resolveGelbooruOriginal = resolveGelbooruOriginal;
+  globalThis.resolvePikabuOriginal = resolvePikabuOriginal;
 }

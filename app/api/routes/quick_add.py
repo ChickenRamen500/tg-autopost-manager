@@ -282,9 +282,21 @@ async def quick_add_upload(
     file_path = settings.media_dir / stored_name
     file_path.write_bytes(data)
 
+    # webm/mkv/... от расширения → конвертируем в mp4 (Telegram плохо играет webm).
+    # До create_post, чтобы file_path/file_size сразу указывали на mp4.
+    guessed_type = _guess_file_type(f"file{ext}")
+    if guessed_type == "video":
+        try:
+            from app.services.media.transcode import convert_video_to_mp4
+
+            converted = await convert_video_to_mp4(file_path)
+            if converted:
+                file_path = Path(converted)
+        except Exception as e:  # noqa: BLE001 — конвертация не критична
+            log.warning("quick_add_upload: конвертация видео не удалась (оставляю исходник): %s", e)
+
     from app.services.dedup.phash import check_visual_duplicate, compute_and_store_phash
 
-    guessed_type = _guess_file_type(f"file{ext}")
     post_id = await posts_repo.create_post(
         source_type=source_type,
         file_type=guessed_type,
@@ -293,8 +305,8 @@ async def quick_add_upload(
         source_url=url or None,
         file_path=str(file_path),
         file_unique_id=file_unique_id,
-        file_size=len(data),
-        mime_type=file.content_type,
+        file_size=file_path.stat().st_size if file_path.exists() else len(data),
+        mime_type="video/mp4" if (guessed_type == "video" and file_path.suffix == ".mp4" and ext != ".mp4") else file.content_type,
         original_caption=title or None,
         tags=tag_list,
         status="pending",

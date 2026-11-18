@@ -64,3 +64,31 @@
     {% endif %}
 {% endif %}
 {%- endmacro %}
+
+{# Миниатюра-hover: data-preview на строке таблицы (для tr с preview-зонами) #}
+{% macro row_preview_attr(preview) -%}
+{% if preview %}data-preview='[{{ preview | tojson }}]'{% endif %}
+{%- endmacro %}
+
+{# Пагинация страниц «Посты»/«Архив»: prev/next + первая/последняя #}
+{% macro pagination_nav(page, pages, base_url, extra_qs) -%}
+{% if pages > 1 %}
+<nav aria-label="Постраничная навигация" class="mt-3 d-flex justify-content-center">
+    <ul class="pagination pagination-sm mb-0 flex-wrap">
+        <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+            <a class="page-link" href="{{ base_url }}?{{ extra_qs }}page=1" aria-label="Первая страница">&laquo;</a>
+        </li>
+        <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+            <a class="page-link" href="{{ base_url }}?{{ extra_qs }}page={{ page - 1 }}">&lsaquo; Назад</a>
+        </li>
+        <li class="page-item disabled"><span class="page-link">стр. {{ page }} из {{ pages }}</span></li>
+        <li class="page-item {% if page >= pages %}disabled{% endif %}">
+            <a class="page-link" href="{{ base_url }}?{{ extra_qs }}page={{ page + 1 }}">Вперёд &rsaquo;</a>
+        </li>
+        <li class="page-item {% if page >= pages %}disabled{% endif %}">
+            <a class="page-link" href="{{ base_url }}?{{ extra_qs }}page={{ pages }}" aria-label="Последняя страница">&raquo;</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{%- endmacro %}

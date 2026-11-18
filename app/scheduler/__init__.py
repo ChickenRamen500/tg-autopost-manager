@@ -39,6 +39,17 @@ _scheduler: AsyncIOScheduler | None = None
 # Троттлинг: время последней отправки по каждому queue_id (ТЗ §2.5.2 п.3)
 _last_send: dict[int, float] = {}
 
+# Telegram не принимает send_photo больше 10 МБ:
+# «Bad Request: file of size ... is too big for a photo; the maximum size is 10485760 bytes».
+# Такие фото пережимаются в JPEG (ffmpeg) или уходят как document (fallback).
+_TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _is_photo_too_big_error(e: Exception) -> bool:
+    """True если Telegram отклонил фото из-за размера (> 10 МБ)."""
+    s = str(e)
+    return "too big for a photo" in s or "PHOTO_INVALID_DIMENSIONS" in s
+
 # --- Диагностика «молчаливых» пропусков тиков (баг «очередь не отправляет») ---
 # Раньше все ранние return в send_post_from_queue были немыми: при зависшей
 # очереди в логе не было НИЧЕГО (только apscheduler «executed successfully») —
@@ -253,12 +264,13 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
             log.info("Пост #%s отправлен по file_id (type=%s)", post["id"], file_type)
             return
         except Exception as e:
-            # PHOTO_INVALID_DIMENSIONS: фото слишком маленькое (<320px) или
-            # неправильное соотношение сторон. Fallback: отправить как document.
-            if "PHOTO_INVALID_DIMENSIONS" in str(e) and file_type == "photo":
+            # PHOTO_INVALID_DIMENSIONS / too big for a photo: фото слишком
+            # маленькое (<320px), неправильное соотношение сторон или > 10 МБ.
+            # Fallback: отправить как document.
+            if file_type == "photo" and _is_photo_too_big_error(e):
                 log.warning(
-                    "Пост #%s: PHOTO_INVALID_DIMENSIONS — fallback на send_document",
-                    post["id"],
+                    "Пост #%s: %s — fallback на send_document (file_id)",
+                    post["id"], type(e).__name__,
                 )
                 await bot.send_document(chat_id=chat_id, document=tg_file_id, caption=caption)
                 log.info("Пост #%s отправлен как document (fallback)", post["id"])
@@ -309,26 +321,52 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
     # P2-11: FSInputFile (streaming, не грузит файл в RAM) вместо BufferedInputFile (OOM на 2GB)
     from aiogram.types import FSInputFile
 
-    doc = FSInputFile(file_path, filename=os.path.basename(file_path))
+    # Telegram не принимает photo > 10 МБ. Если файл больше лимита — сначала
+    # пробуем пережать в JPEG (ffmpeg); не получилось → уйдёт как document
+    # (fallback в except ниже и подмена file_type здесь).
+    send_file_type = file_type
+    send_path = file_path
+    if file_type == "photo" and os.path.getsize(file_path) > _TELEGRAM_PHOTO_MAX_BYTES:
+        try:
+            from app.services.media.transcode import compress_photo_for_telegram
+
+            compressed = await compress_photo_for_telegram(file_path)
+        except Exception as e:  # noqa: BLE001 — пережатие не должно ронять отправку
+            log.warning("Пост #%s: пережатие фото не удалось: %s", post["id"], e)
+            compressed = None
+        if compressed:
+            send_path = compressed
+            log.info(
+                "Пост #%s: фото > 10 МБ пережато в %s (%d байт) — отправляю как photo",
+                post["id"], send_path, os.path.getsize(send_path),
+            )
+        else:
+            log.info(
+                "Пост #%s: фото %d байт > лимита Telegram 10 МБ, пережать не удалось — отправлю как document",
+                post["id"], os.path.getsize(file_path),
+            )
+            send_file_type = "document"
+
+    doc = FSInputFile(send_path, filename=os.path.basename(send_path))
     try:
-        if file_type == "photo":
+        if send_file_type == "photo":
             result = await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
-        elif file_type == "video":
+        elif send_file_type == "video":
             result = await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
-        elif file_type == "gif":
+        elif send_file_type == "gif":
             result = await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
-        elif file_type == "audio":
+        elif send_file_type == "audio":
             result = await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
-        elif file_type == "voice":
+        elif send_file_type == "voice":
             result = await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
         else:
             result = await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
     except Exception as e:
-        # PHOTO_INVALID_DIMENSIONS: fallback на document
-        if "PHOTO_INVALID_DIMENSIONS" in str(e) and file_type == "photo":
+        # PHOTO_INVALID_DIMENSIONS / too big for a photo: fallback на document
+        if file_type == "photo" and _is_photo_too_big_error(e):
             log.warning(
-                "Пост #%s: PHOTO_INVALID_DIMENSIONS — fallback на send_document",
-                post["id"],
+                "Пост #%s: %s — fallback на send_document",
+                post["id"], type(e).__name__,
             )
             doc2 = FSInputFile(file_path, filename=os.path.basename(file_path))
             result = await bot.send_document(chat_id=chat_id, document=doc2, caption=caption)
@@ -398,8 +436,25 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
                     f"Файл удалён или контейнер пересоздан. "
                     f"Удалите пост или переотправьте через расширение."
                 )
-            media_obj = FSInputFile(file_path)
-            log.info("Пост #%s альбома: отправка локального файла %s", p["id"], file_path)
+            send_path = file_path
+            # Фото > 10 МБ Telegram не принимает даже в альбомах: пережимаем
+            # в JPEG; не получилось — отправляем элемент как document.
+            if ft == "photo" and os.path.getsize(file_path) > _TELEGRAM_PHOTO_MAX_BYTES:
+                try:
+                    from app.services.media.transcode import compress_photo_for_telegram
+
+                    compressed = await compress_photo_for_telegram(file_path)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Пост #%s альбома: пережатие фото не удалось: %s", p["id"], e)
+                    compressed = None
+                if compressed:
+                    send_path = compressed
+                    log.info("Пост #%s альбома: фото > 10 МБ пережато в %s", p["id"], send_path)
+                else:
+                    log.info("Пост #%s альбома: фото > 10 МБ — элемент уйдёт как document", p["id"])
+                    ft = "document"
+            media_obj = FSInputFile(send_path)
+            log.info("Пост #%s альбома: отправка локального файла %s", p["id"], send_path)
         else:
             log.warning("Пост #%s альбома без tg_file_id и file_path — пропускаем", p["id"])
             raise RuntimeError(f"Пост #{p['id']}: альбом требует tg_file_id или file_path для всех файлов")
@@ -417,7 +472,21 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
         await _send_one_post(posts[0], channel, queue)
         return
 
-    result = await bot.send_media_group(chat_id=chat_id, media=media)
+    try:
+        result = await bot.send_media_group(chat_id=chat_id, media=media)
+    except Exception as e:
+        # Страховка: даже после пережатия Telegram может отклонить альбом
+        # («too big for a photo»). Отправляем каждый пост отдельно —
+        # _send_one_post сам решает: photo / пережатое photo / document.
+        if "too big for a photo" in str(e):
+            log.warning(
+                "Альбом (media_group_id=%s) отклонён целиком (%s) — отправляю посты по одному",
+                posts[0].get("media_group_id"), type(e).__name__,
+            )
+            for p in posts:
+                await _send_one_post(p, channel, queue)
+            return
+        raise
     # Захват file_id для каждого поста альбома (message[i] ↔ media[i] ↔ posts[i])
     if isinstance(result, (list, tuple)):
         for i, msg in enumerate(result):

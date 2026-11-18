@@ -217,13 +217,19 @@
 
     /**
      * Hover-миниатюры для строк с data-preview='[{"url":"...","video":false},...]'.
-     * Используется во «Входящих» (router сам формирует data-preview per group).
+     * Используется во «Входящих», «Постах», «Архиве» и на дашборде
+     * (router сам формирует data-preview per строку).
+     *
+     * Зона показа ограничена ячейками <td class="tgq-preview-zone">
+     * (колонки # / Тип / Источник) — пользователь просил, чтобы миниатюра
+     * не выскакивала над кнопками «В очередь» и выпадающим списком очередей.
      * Плавающая панель возле курсора; видео — muted autoplay loop.
      */
     function setupRowPreview() {
         var panel = null;
         var showTimer = null;
         var currentRow = null;
+        var currentZone = null;
 
         function ensurePanel() {
             if (panel) return panel;
@@ -241,6 +247,7 @@
                 showTimer = null;
             }
             currentRow = null;
+            currentZone = null;
             if (panel) {
                 panel.style.display = 'none';
                 panel.innerHTML = '';
@@ -297,11 +304,15 @@
         }
 
         document.addEventListener('mouseover', function (ev) {
-            var row = ev.target && ev.target.closest ? ev.target.closest('tr[data-preview]') : null;
+            // Только zone-ячейки (# / Тип / Источник) — не вся строка.
+            var zone = ev.target && ev.target.closest ? ev.target.closest('td.tgq-preview-zone') : null;
+            if (!zone) return;
+            var row = zone.closest('tr[data-preview]');
             if (!row) return;
-            if (row === currentRow) return;
+            if (row === currentRow && zone === currentZone) return;
             hidePanel();
             currentRow = row;
+            currentZone = zone;
             var items;
             try {
                 items = JSON.parse(row.getAttribute('data-preview') || '[]');
@@ -316,12 +327,18 @@
         });
 
         document.addEventListener('mouseout', function (ev) {
-            var row = ev.target && ev.target.closest ? ev.target.closest('tr[data-preview]') : null;
-            if (!row) return;
+            var zone = ev.target && ev.target.closest ? ev.target.closest('td.tgq-preview-zone') : null;
+            if (!zone || zone !== currentZone) return;
             var to = ev.relatedTarget;
-            if (to && row.contains(to)) return; // переход внутри строки
+            // Переход внутри той же zone-ячейки или в соседнюю zone-ячейку
+            // той же строки — панель оставляем (mouseover перепозиционирует).
+            if (to && to.closest && to.closest('td.tgq-preview-zone')) return;
             hidePanel();
         });
+
+        // Открылся dropdown/модал — миниатюру прячем (не перекрывает меню).
+        document.addEventListener('show.bs.dropdown', hidePanel);
+        document.addEventListener('show.bs.modal', hidePanel);
 
         // Уходим со страницы/меняем вкладку — прячем панель.
         document.addEventListener('visibilitychange', function () {

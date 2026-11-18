@@ -262,7 +262,7 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.4.0-phase4", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.4.55-phase4", lifespan=lifespan)
 
 # CORS для Chrome-расширения (Task 4): расширение делает fetch к bot_url с разных
 # хостов (x.com, gelbooru, ...) — без CORS-заголовков браузер блокирует запрос.
