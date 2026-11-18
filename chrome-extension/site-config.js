@@ -45,8 +45,9 @@ const SITE_CONFIGS = {
     preferUrlPattern: "/images/",
     // Страница поиска (index.php?page=post&s=list): чекбоксы + кнопки на
     // thumbnail-preview, тулбар с кнопкой отправки и выбором очереди — НАД
-    // thumbnail-container. Оригинальный URL каждого поста резолвится через
-    // dapi JSON API (file_url) — максимальное качество и верное расширение.
+    // thumbnail-container. Оригинальный URL каждого поста резолвится из HTML
+    // страницы поста (dapi требует api_key с 2023 → HTTP 401) — полное
+    // разрешение и верное расширение.
     resolveOriginal: resolveGelbooruOriginal,
     listPage: {
       // URL поиска: содержит page=post и s=list (или gallery); страница поста — s=view.
@@ -116,6 +117,11 @@ const SITE_CONFIGS = {
     excludeUrlPattern: "(\\/ava\\/|\\/avatar|\\/emoji|favicon|logo|\\.svg(\\?|#|$))",
     needsReferer: false,
     spa: true,
+    // 18+ посты: у анонимов пикабу вырезает медиа из HTML (в DOM только
+    // заглушки .story__nsfw-stub). unlockAdult включает: кнопку и на заглушках,
+    // программный клик «Показать контент 18+» (у залогиненных) и внятный
+    // toast, если без входа медиа не получить.
+    unlockAdult: true,
     tagsSelector: "a[href*='/tag/'], .story_tags a",
     buttonAnchorSelector: ".story__footer, .post__footer, .actions, .story-tools",
     buttonPosition: "append",
@@ -513,27 +519,83 @@ function extractPixivUrls(articleEl, config) {
   return collected.length ? collected : null;
 }
 
-// --- Gelbooru: оригинал поста через dapi JSON API --------------------------
-// На странице поиска у миниатюры есть только URL превью (thumbnails/...jpg),
-// а оригинал может быть .png/.gif/.webp — угадать расширение нельзя.
-// dapi отдаёт точный file_url оригинала (полное разрешение) + теги:
-//   /index.php?page=dapi&s=post&q=index&json=1&id=<post_id>
-// Контент-скрипт запрашивает его same-origin — без CORS-проблем.
+// --- Gelbooru: оригинал поста через HTML-страницу поста ---------------------
+// ВНИМАНИЕ: dapi (page=dapi&s=post&q=index&json=1&id=...) с 2023 требует
+// api_key+user_id — анонимные запросы получают HTTP 401. Поэтому резолвим
+// оригинал из HTML страницы поста (публична, same-origin, cookies идут сами):
+//   • a[href*='/images/']        — ссылка «Original image» (всегда оригинал);
+//   • video/source[src]          — mp4/webm поста;
+//   • img#image[src]             — показываемая картинка (может быть sample);
+//   • meta[property='og:image']  — фолбэк.
+// Приоритет отдаём /images/ — это хранилище оригиналов с полным разрешением
+// и верным расширением (.png/.gif/.webp нельзя угадать из превью).
+// Кэш резолвов в рамках жизни страницы (id → {fileUrl, tags}).
+const gelbooruResolveCache = new Map();
+
 async function resolveGelbooruOriginal(permalink) {
   const m = String(permalink || "").match(/[?&]id=(\d+)/);
   if (!m) throw new Error("gelbooru: не найден id поста в ссылке");
-  const url = `${location.origin}/index.php?page=dapi&s=post&q=index&json=1&id=${m[1]}`;
-  const resp = await fetch(url, { credentials: "include" });
-  if (!resp.ok) throw new Error(`gelbooru dapi: HTTP ${resp.status}`);
-  const data = await resp.json();
-  const arr = data && data.post;
-  const item = Array.isArray(arr) ? arr[0] : arr;
-  if (!item || !item.file_url) throw new Error("gelbooru dapi: пост без file_url");
-  const tags = String(item.tags || "")
-    .split(/\s+/)
+  const pid = m[1];
+  if (gelbooruResolveCache.has(pid)) return gelbooruResolveCache.get(pid);
+
+  const pageUrl = `${location.origin}/index.php?page=post&s=view&id=${pid}`;
+  const resp = await fetch(pageUrl, { credentials: "include" });
+  if (!resp.ok) throw new Error(`gelbooru: HTTP ${resp.status} на странице поста`);
+  const doc = new DOMParser().parseFromString(await resp.text(), "text/html");
+
+  const candidates = [];
+  // 1) Прямая ссылка на оригинал (под изображением на странице поста).
+  doc.querySelectorAll("a[href*='/images/']").forEach((a) => {
+    const h = a.getAttribute("href");
+    if (h) candidates.push(h);
+  });
+  // 2) Видео (mp4/webm).
+  doc.querySelectorAll("video source[src], video[src]").forEach((v) => {
+    const s = v.getAttribute("src");
+    if (s) candidates.push(s);
+  });
+  // 3) Показываемая картинка (img#image; у больших изображений это sample).
+  const img = doc.querySelector("img#image");
+  if (img && img.getAttribute("src")) candidates.push(img.getAttribute("src"));
+  // 4) og:image / twitter:image — последний фолбэк.
+  const og = doc.querySelector("meta[property='og:image'], meta[name='twitter:image']");
+  if (og && og.getAttribute("content")) candidates.push(og.getAttribute("content"));
+
+  const abs = (u) => {
+    try { return new URL(u, location.origin).href; } catch { return null; }
+  };
+  const isOrig = (u) => /^https?:/i.test(u) && /\/images\//i.test(u);
+  const isMedia = (u) =>
+    /^https?:/i.test(u) &&
+    /(gelbooru\.com|img\d+\.gelbooru\.com)/i.test(new URL(u).hostname) &&
+    !/\/(thumbnails?|samples?)\//i.test(u);
+
+  let fileUrl = null;
+  for (const c of candidates) {
+    const u = abs(c);
+    if (u && isOrig(u)) { fileUrl = u; break; }
+  }
+  if (!fileUrl) {
+    for (const c of candidates) {
+      const u = abs(c);
+      if (u && isMedia(u)) { fileUrl = u; break; }
+    }
+  }
+  if (!fileUrl) throw new Error("gelbooru: не удалось извлечь оригинал со страницы поста");
+
+  // Теги поста (для маршрутизации на бэкенде).
+  const tags = Array.from(
+    doc.querySelectorAll(
+      "#tag-list li a[href*='tags='], .tag-list-section a[href*='tags='], a.tag[href*='tags=']"
+    )
+  )
+    .map((a) => (a.textContent || "").trim().toLowerCase())
     .filter(Boolean)
     .slice(0, 60);
-  return { fileUrl: item.file_url, tags };
+
+  const result = { fileUrl, tags };
+  gelbooruResolveCache.set(pid, result);
+  return result;
 }
 
 // --- Извлечение permalink'а конкретного поста из article ---

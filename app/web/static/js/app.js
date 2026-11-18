@@ -144,36 +144,74 @@
      * overflow-x:auto у table-responsive превращает overflow-y в auto →
      * выпадающее меню очередей обрезается границей контейнера (в «Входящих»,
      * когда строк мало и меню не помещается по высоте).
-     * Решение: на show.bs.dropdown переносим .dropdown-menu в <body>
-     * (Popper позиционирует его по-прежнему у кнопки), на hidden — возвращаем.
+     *
+     * Решение (v2): НЕ переносим DOM (первая версия с переносом в <body>
+     * оказалась хрупкой), а переключаем Popper на strategy:'fixed' —
+     * position:fixed не обрезается overflow-родителями. Плюс boundary:'viewport'
+     * у preventOverflow/flip (меню всегда в пределах окна) и собственный
+     * модификатор maxSize — меню выше окна получает внутренний скролл.
      * Делегированная обработка — работает на всех страницах.
      */
     function setupDropdownClippingFix() {
-        var movedMenus = new Map(); // toggle → menu
+        if (!window.bootstrap || !window.bootstrap.Dropdown) return;
 
         document.addEventListener('show.bs.dropdown', function (ev) {
-            var toggle = ev.target;
-            if (!(toggle instanceof Element)) return;
-            var dropdown = toggle.closest('.dropdown');
-            if (!dropdown || !toggle.closest('.table-responsive')) return;
-            var menu = dropdown.querySelector('.dropdown-menu');
-            if (!menu) return;
-            movedMenus.set(toggle, menu);
-            document.body.appendChild(menu);
-        });
+            var toggle = ev.target instanceof Element
+                ? (ev.target.matches('[data-bs-toggle="dropdown"]') ? ev.target : ev.target.closest('[data-bs-toggle="dropdown"]'))
+                : null;
+            if (!toggle) return;
+            // Только внутри скроллируемых таблиц-контейнеров (проблемная зона),
+            // остальные dropdown'ы не трогаем.
+            if (!toggle.closest('.table-responsive, .tgq-scroll-container')) return;
 
-        document.addEventListener('hidden.bs.dropdown', function (ev) {
-            var toggle = ev.target;
-            if (!(toggle instanceof Element)) return;
-            var menu = movedMenus.get(toggle);
-            if (!menu) return;
-            movedMenus.delete(toggle);
-            var dropdown = toggle.closest('.dropdown');
-            if (dropdown) {
-                dropdown.appendChild(menu);
-            } else {
-                menu.remove();
-            }
+            var inst = window.bootstrap.Dropdown.getInstance(toggle) ||
+                       window.bootstrap.Dropdown.getOrCreateInstance(toggle);
+            if (!inst || !inst._config) return;
+            // Перенос меню в <body> из старой версии — нейтрализуем, если уже применён.
+            delete inst._config.popperConfig;
+            inst._config.popperConfig = function (def) {
+                var cfg = Object.assign({}, def || {});
+                cfg.strategy = 'fixed';
+                cfg.modifiers = (cfg.modifiers || []).filter(function (m) {
+                    return !m || ['preventOverflow', 'flip', 'maxSize', 'applyMaxSize'].indexOf(m.name) === -1;
+                });
+                cfg.modifiers.push({ name: 'preventOverflow', options: { boundary: 'viewport', altBoundary: true } });
+                cfg.modifiers.push({
+                    name: 'flip',
+                    options: {
+                        boundary: 'viewport',
+                        altBoundary: true,
+                        fallbackPlacements: ['top-end', 'top-start', 'bottom-end', 'bottom-start']
+                    }
+                });
+                // Меню выше окна → внутренний скролл. ВАЖНО: в @popperjs/core v2
+                // НЕТ модификатора maxSize (это из floating-ui), поэтому считаем
+                // доступную высоту сами: после flip (phase beforeWrite) берём
+                // placement и прямоугольник кнопки в координатах окна.
+                cfg.modifiers.push({
+                    name: 'applyMaxSize',
+                    enabled: true,
+                    phase: 'beforeWrite',
+                    fn: function (arg) {
+                        var st = arg.state;
+                        try {
+                            var ref = st.elements && st.elements.reference;
+                            if (!ref) return;
+                            var r = ref.getBoundingClientRect();
+                            var isTop = String(st.placement || '').indexOf('top') === 0;
+                            var margin = 10;
+                            var avail = isTop
+                                ? r.top - margin
+                                : window.innerHeight - r.bottom - margin;
+                            // Минимум 140px, чтобы даже в стеснённых условиях меню было юзабельным.
+                            avail = Math.max(140, avail);
+                            st.styles.popper.maxHeight = Math.floor(avail) + 'px';
+                            st.styles.popper.overflowY = 'auto';
+                        } catch (e) { /* не критично */ }
+                    }
+                });
+                return cfg;
+            };
         });
     }
 

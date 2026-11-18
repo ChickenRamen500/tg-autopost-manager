@@ -243,9 +243,83 @@
     articles.forEach((a, i) => {
       if (a.querySelector(".tgq-article-btn")) return; // уже есть кнопка
       const media = collectMediaInArticle(a, config);
-      if (media.length > 0) result.push({ article: a, media, index: i });
+      if (media.length > 0) {
+        result.push({ article: a, media, index: i });
+        return;
+      }
+      // Пикабу 18+ (сайты с unlockAdult): у заглушки медиа в DOM нет — анонимам
+      // пикабу вырезает их из HTML. Кнопку всё равно добавляем: клик попытается
+      // разблокировать пост (залогиненные) и объяснит, что нужен вход.
+      if (config.unlockAdult && isAdultStubArticle(a)) {
+        result.push({ article: a, media: [], index: i });
+      }
     });
     return result;
+  }
+
+  // --- 18+ заглушки (Pikabu): разблокировка и понятная диагностика ---
+  // Анонимам пикабу НЕ отдаёт 18+ медиа вообще (в HTML только заглушки
+  // .story__nsfw-stub со ссылками на вход). У залогиненных контент появляется
+  // после клика «Показать контент 18+» — пробуем кликнуть программно и
+  // пересобрать медиа. Если разблокировать нельзя — объясняем пользователю.
+  function isAdultStubArticle(articleEl) {
+    return !!(
+      articleEl &&
+      articleEl.querySelector(
+        ".story__nsfw-stub, .story__adult-overlay, [data-action='adult-confirm']"
+      )
+    );
+  }
+
+  function tryUnlockAdult(articleEl) {
+    if (!articleEl) return false;
+    const btn = articleEl.querySelector(
+      "button[data-action='adult-confirm'], .story__adult-confirm-btn, .story__adult-overlay button:not(.tgq-btn)"
+    );
+    if (!btn) return false;
+    try {
+      btn.click();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Возвращает список медиа для отправки. Пустой captured (18+ заглушка)
+  // → пробуем разблокировать контент и пересобрать медиа.
+  async function resolveMediaWithUnlock(articleEl) {
+    let media = collectMediaInArticle(articleEl, config);
+    if (media.length) return media;
+    if (tryUnlockAdult(articleEl)) {
+      // Пауза на перерисовку/ленивую загрузку картинок после раскрытия.
+      await new Promise((r) => setTimeout(r, 700));
+      media = collectMediaInArticle(articleEl, config);
+      if (media.length) return media;
+    }
+    if (isAdultStubArticle(articleEl)) {
+      tgqShowToast(
+        "18+ пост без авторизации: Пикабу не отдаёт медиа. Войдите на pikabu.ru в этом браузере и повторите.",
+        "err",
+        9000
+      );
+      return [];
+    }
+    return media;
+  }
+
+  // Обёртка: кратко показываем «проверяем», восстанавливаем кнопку после ошибки.
+  async function resolveMediaForSend(articleEl, captured, btn) {
+    if (captured && captured.length) return captured;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "… Проверка";
+    }
+    const media = await resolveMediaWithUnlock(articleEl);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "→ В очередь";
+    }
+    return media;
   }
 
   // --- media_group_id из permalink (уникален для поста) ---
@@ -266,7 +340,7 @@
   // --- Отправка ВСЕГО поста в выбранную очередь (long-press popup) ---
   // single → одно ENQUEUE; multi → альбом (единый media_group_id, все медиа).
   async function sendToQueueWithId(mediaList, permalink, queueId, sourceBtn) {
-    if (!mediaList.length) return;
+    if (!mediaList || !mediaList.length) return;
     if (sourceBtn) {
       sourceBtn.disabled = true;
       sourceBtn.textContent = "… Отправка";
@@ -348,7 +422,7 @@
         if (btn._tgqHoldTriggered && btn._tgqHoldTriggered()) return; // long-press уже открыл попап
         sendSingle(mediaList[0], btn, articleEl, permalink);
       });
-    } else {
+    } else if (mediaList.length > 1) {
       // Multi-media → open selection picker with checkboxes.
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
@@ -356,11 +430,25 @@
         if (btn._tgqHoldTriggered && btn._tgqHoldTriggered()) return;
         openSelectionPicker(mediaList, articleEl, btn, permalink);
       });
+    } else {
+      // Пустой медиа-лист бывает только у 18+ заглушек (unlockAdult):
+      // при клике пробуем разблокировать пост и отправить как обычно.
+      btn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (btn._tgqHoldTriggered && btn._tgqHoldTriggered()) return;
+        if (btn.disabled) return;
+        const media = await resolveMediaForSend(articleEl, mediaList, btn);
+        if (!media.length) return;
+        if (media.length === 1) sendSingle(media[0], btn, articleEl, permalink);
+        else openSelectionPicker(media, articleEl, btn, permalink);
+      });
     }
 
     // Удержание 2 сек → попап выбора очереди (все сайты, один механизм).
-    attachLongPress(btn, (queueId) => {
-      sendToQueueWithId(mediaList, permalink, queueId, btn);
+    attachLongPress(btn, async (queueId) => {
+      const media = await resolveMediaForSend(articleEl, mediaList, btn);
+      sendToQueueWithId(media, permalink, queueId, btn);
     });
 
     // Асинхронная проверка дедупликации — обновить метку кнопки.
@@ -768,7 +856,7 @@
   // Чекбоксы на .thumbnail-preview, кнопка быстрой отправки на каждой
   // миниатюре, тулбар с выбором очереди — НАД #thumbnail-container.
   // Выбрано 2+ постов → отправляются одним альбомом (единый media_group_id).
-  // Оригинальный URL каждого поста резолвится через dapi (resolveOriginal).
+  // Оригинальный URL каждого поста резолвится из HTML страницы поста (resolveOriginal).
 
   function getListItems(lp) {
     const container = document.querySelector(lp.containerSelector);

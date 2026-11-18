@@ -20,7 +20,8 @@
   }
 
   // Toast-уведомление в правом нижнем углу страницы (без inline-стилей — CSS-классы, CSP-safe).
-  function showToast(message, type) {
+  // durationMs — опциональная длительность (для длинных подсказок, например про 18+).
+  function showToast(message, type, durationMs) {
     try {
       if (!document.body) return;
       let host = document.getElementById("tgq-toast-host");
@@ -33,10 +34,12 @@
       div.className = "tgq-toast" + (type ? " tgq-" + type : "");
       div.innerHTML = sanitizeHtml(message); // safe: только b/i/br после экранирования
       host.appendChild(div);
+      const ttl =
+        typeof durationMs === "number" && durationMs >= 1000 ? durationMs : 3500;
       setTimeout(() => {
         div.classList.add("tgq-hide");
         setTimeout(() => div.remove(), 400);
-      }, 3500);
+      }, ttl);
     } catch (e) {
       /* toast не критичен */
     }
