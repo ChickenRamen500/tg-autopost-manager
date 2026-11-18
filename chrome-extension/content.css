@@ -253,3 +253,170 @@
   background: #7a8691;
   cursor: default;
 }
+
+/* --- Попап выбора очереди (long-press 2 сек на кнопке отправки) --- */
+.tgq-queue-popup {
+  all: initial;
+  position: fixed;
+  z-index: 2147483647;
+  min-width: 260px;
+  max-width: 340px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: #1d2430;
+  border: 1px solid #2AABEE;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  font: 500 13px/1.3 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #cfd6de;
+  box-sizing: border-box;
+}
+
+.tgq-queue-popup .tgq-queue-popup-head {
+  padding: 8px 12px;
+  font: 600 13px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #fff;
+  border-bottom: 1px solid #2d3748;
+  flex-shrink: 0;
+}
+
+.tgq-queue-popup .tgq-queue-popup-list {
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.tgq-queue-popup .tgq-queue-popup-loading {
+  padding: 12px;
+  color: #8b95a1;
+  font: 400 12px/1.4 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+.tgq-queue-popup .tgq-queue-popup-item {
+  all: initial;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  margin: 2px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font: 500 13px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #e8edf3;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tgq-queue-popup .tgq-queue-popup-item:hover { background: #2d3a4d; }
+.tgq-queue-popup .tgq-queue-popup-item.tgq-queue-popup-default { color: #7fc9f5; }
+.tgq-queue-popup .tgq-queue-popup-item.tgq-queue-popup-inactive { opacity: .55; }
+
+/* --- Страница списка (Gelbooru search) --- */
+
+/* Тулбар НАД thumbnail-container */
+.tgq-list-toolbar {
+  all: initial;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin: 0 auto 10px;
+  max-width: 1240px;
+  box-sizing: border-box;
+  background: #1d2430;
+  border: 1px solid #2AABEE;
+  border-radius: 10px;
+  font: 500 13px/1.3 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #cfd6de;
+}
+
+.tgq-list-toolbar .tgq-list-count {
+  font: 600 13px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #fff;
+}
+
+.tgq-list-toolbar .tgq-list-hint {
+  font: 400 11px/1.3 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #8b95a1;
+}
+
+.tgq-list-toolbar .tgq-list-queue-select {
+  box-sizing: border-box;
+  max-width: 260px;
+  padding: 6px 8px;
+  background: #0d1117;
+  color: #e8edf3;
+  border: 1px solid #3a4556;
+  border-radius: 6px;
+  font: 500 12px/1.2 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+.tgq-list-toolbar .tgq-list-send-selected {
+  margin: 0;
+}
+
+.tgq-list-toolbar .tgq-list-send-selected[disabled] {
+  background: #7a8691;
+  cursor: default;
+  opacity: .85;
+}
+
+/* Миниатюра: контейнер для чекбокса и кнопки */
+.thumbnail-preview.tgq-list-item,
+.tgq-list-item {
+  position: relative;
+}
+
+/* Чекбокс на миниатюре (левый верхний угол) */
+.tgq-list-checkbox {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  cursor: pointer;
+  z-index: 2147483000;
+  accent-color: #2AABEE;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .8));
+}
+
+/* Подсветка выбранной миниатюры */
+.thumbnail-preview.tgq-list-item-selected,
+.tgq-list-item-selected {
+  outline: 3px solid #2AABEE !important;
+  outline-offset: 1px;
+}
+
+/* Отправленная / ошибочная миниатюра */
+.thumbnail-preview.tgq-list-item-done,
+.tgq-list-item-done { outline: 3px solid #4caf50 !important; outline-offset: 1px; }
+.thumbnail-preview.tgq-list-item-error,
+.tgq-list-item-error { outline: 3px solid #e53935 !important; outline-offset: 1px; }
+
+/* Кнопка быстрой отправки на миниатюре — видна при наведении */
+.tgq-btn.tgq-list-send {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  margin: 0;
+  padding: 0 10px;
+  height: 26px;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity .15s ease;
+  pointer-events: none;
+}
+
+.thumbnail-preview:hover .tgq-list-send,
+.tgq-list-item:hover .tgq-list-send,
+.tgq-btn.tgq-list-send:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Чекбокс тоже подсвечиваем при наведении на миниатюру */
+.tgq-list-checkbox { opacity: .92; }

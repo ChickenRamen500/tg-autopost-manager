@@ -13,6 +13,10 @@ POST-actions (возвращают redirect на referer):
   /web/posts/{id}/assign/{queue_id}      — назначить пост в очередь
   /web/posts/{id}/delete                 — удалить пост
   /web/posts/{id}/status                 — изменить статус (form: status)
+  /web/inbox/bulk-assign                 — массово назначить выбранные посты/группы
+                                           (form: targets[] = "post:<id>"|"<group>",
+                                            queue_id; 0 → Входящие)
+  /web/inbox/bulk-delete                 — массово удалить выбранные (form: targets[])
   /web/queues/create                     — создать очередь (Task 8)
   /web/queues/{id}/edit                   — обновить очередь (Task 8)
   /web/queues/{id}/toggle                — вкл/выкл очередь
@@ -37,8 +41,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -194,6 +200,33 @@ async def page_queue_detail(
     return templates.TemplateResponse(request, "pages/queue_detail.html", ctx)
 
 
+# --- Превью для «Входящих» (hover-миниатюры) --------------------------------
+
+_VIDEO_FILE_TYPES = {"video", "animation", "gif"}
+_VIDEO_URL_RE = re.compile(r"\.(mp4|webm|mkv|mov|m3u8)(\?|#|$)", re.IGNORECASE)
+
+
+def _preview_entry(post: dict[str, Any]) -> dict[str, Any] | None:
+    """Данные для hover-превью поста во «Входящих».
+
+    Приоритет: file_path (файл уже на диске — отдаём через serve-эндпоинт,
+    он умеет fallback для старых путей) → source_url (ещё не скачанные посты
+    с прямой ссылкой на медиа). Если source_url это HTML-страница (твит без
+    прямой ссылки), превью не будет — img/video не сможет загрузиться.
+    """
+    file_path = post.get("file_path")
+    file_type = (post.get("file_type") or "photo").lower()
+    if file_path:
+        return {
+            "url": "/web/local_files/serve?path=" + quote(str(file_path), safe=""),
+            "video": file_type in _VIDEO_FILE_TYPES,
+        }
+    src = (post.get("source_url") or "").strip()
+    if src.startswith("http"):
+        return {"url": src, "video": bool(_VIDEO_URL_RE.search(src))}
+    return None
+
+
 @router.get("/inbox")
 async def page_inbox(request: Request, _user: str = Depends(verify_web_user)) -> Any:
     """Входящие посты (queue_id IS NULL) + выбор очереди для назначения.
@@ -201,9 +234,19 @@ async def page_inbox(request: Request, _user: str = Depends(verify_web_user)) ->
     Посты с одинаковым media_group_id группируются в одну строку с указанием
     количества картинок (например «4 фото»). При назначении такой группы
     в очередь — назначаются ВСЕ посты группы одновременно.
+    Для каждой строки формируется data-preview (до 4 медиа) — hover-миниатюра.
     """
     groups = await posts_repo.list_inbox_grouped(limit=200)
     queues = await queues_repo.list_queues(active_only=False)
+    for g in groups:
+        previews: list[dict[str, Any]] = []
+        for p in g["posts"]:
+            entry = _preview_entry(p)
+            if entry:
+                previews.append(entry)
+            if len(previews) >= 4:
+                break
+        g["previews"] = previews
     ctx = {
         "request": request,
         "active_page": "inbox",
@@ -1169,6 +1212,105 @@ async def action_delete_group(
         await posts_repo.delete_post(p["id"])
         count += 1
     log.info("web: удалена группа %s (%d постов) (user=%s)", media_group_id, count, _user)
+    return _redirect_back(request)
+
+
+# --- Массовые действия во «Входящих» -----------------------------------------
+
+
+def _parse_bulk_targets(targets: list[str]) -> tuple[list[int], list[str]]:
+    """Разбирает значения чекбоксов: 'post:<id>' → id, иначе → media_group_id.
+
+    Возвращает (post_ids, group_ids). Некорректные значения молча пропускаются.
+    """
+    post_ids: list[int] = []
+    group_ids: list[str] = []
+    for raw in targets:
+        value = (raw or "").strip()
+        if not value:
+            continue
+        if value.startswith("post:"):
+            try:
+                post_ids.append(int(value[5:]))
+            except ValueError:
+                continue
+        elif value.startswith("group:"):
+            mgid = value[6:]
+            if mgid:
+                group_ids.append(mgid)
+        else:
+            # Фоллбек: числовое значение — одиночный пост (совместимость)
+            try:
+                post_ids.append(int(value))
+            except ValueError:
+                continue
+    return post_ids, group_ids
+
+
+async def _expand_bulk_target_posts(post_ids: list[int], group_ids: list[str]) -> list[dict[str, Any]]:
+    """Все посты, затронутые выбором: одиночные + развёрнутые альбомы (без дублей)."""
+    result: dict[int, dict[str, Any]] = {}
+    for pid in post_ids:
+        p = await posts_repo.get_post(pid)
+        if p is not None:
+            result[p["id"]] = p
+    for mgid in group_ids:
+        for p in await posts_repo.find_posts_by_media_group_id(mgid):
+            result[p["id"]] = p
+    return list(result.values())
+
+
+@router.post("/web/inbox/bulk-assign")
+async def action_bulk_assign(
+    request: Request,
+    targets: list[str] = Form(...),
+    queue_id: int = Form(0),
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    """Массовое назначение выбранных чекбоксами строк «Входящих» в очередь.
+
+    targets — список значений чекбоксов: 'post:<id>' или 'group:<media_group_id>'
+    (группа разворачивается во все посты альбома). queue_id=0 → Входящие
+    (снять с очереди). Очередь с указанным id должна существовать.
+    """
+    if queue_id != 0:
+        q = await queues_repo.get_queue(queue_id)
+        if q is None:
+            raise HTTPException(status_code=404, detail=f"Очередь #{queue_id} не найдена")
+    target = None if queue_id == 0 else queue_id
+
+    post_ids, group_ids = _parse_bulk_targets(targets)
+    affected = await _expand_bulk_target_posts(post_ids, group_ids)
+    if not affected:
+        raise HTTPException(status_code=400, detail="Не выбрано ни одного существующего поста")
+
+    for p in affected:
+        await posts_repo.assign_queue(p["id"], target)
+    log.info(
+        "web: bulk-assign — %d постов (post_ids=%s, groups=%s) → очередь %s (user=%s)",
+        len(affected), post_ids, group_ids, target or "Входящие", _user,
+    )
+    return _redirect_back(request)
+
+
+@router.post("/web/inbox/bulk-delete")
+async def action_bulk_delete(
+    request: Request,
+    targets: list[str] = Form(...),
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    """Массовое удаление выбранных чекбоксами строк «Входящих» (включая альбомы)."""
+    post_ids, group_ids = _parse_bulk_targets(targets)
+    affected = await _expand_bulk_target_posts(post_ids, group_ids)
+    if not affected:
+        raise HTTPException(status_code=400, detail="Не выбрано ни одного существующего поста")
+
+    for p in affected:
+        await posts_repo.delete_post(p["id"])
+    log.info(
+        "web: bulk-delete — %d постов (post_ids=%s, groups=%s) (user=%s)",
+        len(affected), post_ids, group_ids, _user,
+    )
     return _redirect_back(request)
 
 

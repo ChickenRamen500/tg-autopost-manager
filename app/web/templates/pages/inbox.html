@@ -12,15 +12,54 @@
 <p class="text-muted small">
     Посты без очереди (queue_id = NULL). Посты с одинаковым media_group_id
     объединены в альбом — при назначении в очередь отправляются все картинки альбома.
+    Наведите курсор на строку, чтобы увидеть миниатюру медиа.
 </p>
 
 {% if groups %}
+{# Панель массовых действий — появляется когда выбран хотя бы один чекбокс #}
+<div id="bulk-bar" class="card mb-3 border-primary d-none">
+    <div class="card-body py-2 d-flex flex-wrap gap-2 align-items-center">
+        <span class="badge bg-primary" id="bulk-count">0</span>
+        <span class="small text-muted">выбрано</span>
+        <div class="ms-auto d-flex flex-wrap gap-2 align-items-center">
+            <form id="bulk-assign-form" method="post" action="/web/inbox/bulk-assign"
+                  class="d-flex flex-wrap gap-2 align-items-center m-0">
+                <div id="bulk-assign-targets" class="d-none"></div>
+                <label class="small text-muted mb-0" for="bulk-queue">Очередь:</label>
+                <select id="bulk-queue" name="queue_id" class="form-select form-select-sm" style="min-width: 230px"
+                        aria-label="Очередь для выбранных постов">
+                    <option value="0">→ Входящие (снять с очереди)</option>
+                    {% for q in queues %}
+                    <option value="{{ q.id }}">{{ q.name }} (#{{ q.id }}){% if not q.is_active %} — выкл.{% endif %}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="btn btn-sm btn-primary">
+                    <i class="bi bi-send"></i> Отправить в очередь
+                </button>
+            </form>
+            <form id="bulk-delete-form" method="post" action="/web/inbox/bulk-delete" class="m-0">
+                <div id="bulk-delete-targets" class="d-none"></div>
+                <button type="submit" class="btn btn-sm btn-outline-danger">
+                    <i class="bi bi-trash"></i> Удалить
+                </button>
+            </form>
+            <button type="button" id="bulk-clear" class="btn btn-sm btn-outline-secondary">
+                Снять выделение
+            </button>
+        </div>
+    </div>
+</div>
+
 <div class="card">
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-hover mb-0 align-middle">
                 <thead class="table-light">
                     <tr>
+                        <th class="text-center" style="width: 36px;">
+                            <input type="checkbox" id="bulk-select-all" class="form-check-input"
+                                   aria-label="Выделить все посты" title="Выделить все">
+                        </th>
                         <th>#</th>
                         <th>Тип</th>
                         <th>Источник</th>
@@ -32,7 +71,15 @@
                 <tbody>
                     {% for g in groups %}
                     {% set p = g.first %}
-                    <tr id="post-{{ p.id }}" style="scroll-margin-top: 1rem;">
+                    <tr id="post-{{ p.id }}" style="scroll-margin-top: 1rem;"
+                        {% if g.previews %}data-preview='{{ g.previews | tojson }}'{% endif %}>
+                        <td class="text-center">
+                            <input type="checkbox" class="form-check-input bulk-check"
+                                   {% if g.media_group_id %}value="group:{{ g.media_group_id }}"
+                                   aria-label="Выбрать альбом ({{ g.count }} постов)"
+                                   title="Альбом: {{ g.count }} медиа"{% else %}value="post:{{ p.id }}"
+                                   aria-label="Выбрать пост {{ p.id }}"{% endif %}>
+                        </td>
                         <td>
                             {{ p.id }}
                             {% if g.count > 1 %}
@@ -119,4 +166,99 @@
     </div>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function () {
+    "use strict";
+
+    // --- Массовые действия (bulk bar) ---
+    var bar = document.getElementById("bulk-bar");
+    var bulkCount = document.getElementById("bulk-count");
+    var selectAll = document.getElementById("bulk-select-all");
+
+    function checkedBoxes() {
+        return Array.prototype.slice.call(document.querySelectorAll("input.bulk-check:checked"));
+    }
+
+    function allBoxes() {
+        return Array.prototype.slice.call(document.querySelectorAll("input.bulk-check"));
+    }
+
+    function refreshBulkBar() {
+        var n = checkedBoxes().length;
+        if (bar) bar.classList.toggle("d-none", n === 0);
+        if (bulkCount) bulkCount.textContent = String(n);
+        if (selectAll) {
+            selectAll.checked = n > 0 && n === allBoxes().length;
+            selectAll.indeterminate = n > 0 && n < allBoxes().length;
+        }
+    }
+
+    document.addEventListener("change", function (ev) {
+        var t = ev.target;
+        if (t && t.classList && t.classList.contains("bulk-check")) refreshBulkBar();
+    });
+
+    if (selectAll) {
+        selectAll.addEventListener("change", function () {
+            var on = selectAll.checked;
+            allBoxes().forEach(function (cb) { cb.checked = on; });
+            refreshBulkBar();
+        });
+    }
+
+    var clearBtn = document.getElementById("bulk-clear");
+    if (clearBtn) {
+        clearBtn.addEventListener("click", function () {
+            allBoxes().forEach(function (cb) { cb.checked = false; });
+            refreshBulkBar();
+        });
+    }
+
+    // Заполняет hidden-инпуты targets[] значениями выбранных чекбоксов.
+    function fillTargets(containerId) {
+        var host = document.getElementById(containerId);
+        if (!host) return 0;
+        host.innerHTML = "";
+        var sel = checkedBoxes();
+        sel.forEach(function (cb) {
+            var input = document.createElement("input");
+            input.type = "hidden";
+            input.name = "targets";
+            input.value = cb.value;
+            host.appendChild(input);
+        });
+        return sel.length;
+    }
+
+    var assignForm = document.getElementById("bulk-assign-form");
+    if (assignForm) {
+        assignForm.addEventListener("submit", function (ev) {
+            if (!fillTargets("bulk-assign-targets")) {
+                ev.preventDefault();
+                window.alert("Сначала отметьте посты чекбоксами.");
+            }
+        });
+    }
+
+    var deleteForm = document.getElementById("bulk-delete-form");
+    if (deleteForm) {
+        deleteForm.addEventListener("submit", function (ev) {
+            var n = fillTargets("bulk-delete-targets");
+            if (!n) {
+                ev.preventDefault();
+                window.alert("Сначала отметьте посты чекбоксами.");
+                return;
+            }
+            if (!window.confirm("Удалить выбранные посты (" + n + ")? Действие необратимо.")) {
+                ev.preventDefault();
+            }
+        });
+    }
+
+    refreshBulkBar();
+})();
+</script>
 {% endblock %}

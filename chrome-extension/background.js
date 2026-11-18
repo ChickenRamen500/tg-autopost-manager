@@ -34,7 +34,9 @@ async function postQuickAdd(settings, payload) {
     title: payload.title || "",
     tags: payload.tags || [],
     site: payload.site || "",
-    queue_id: settings.defaultQueueId || null,
+    // queueId задан → отправляем в выбранную очередь (long-press popup / тулбар);
+    // иначе — настройка defaultQueueId или маршрутизация по правилам.
+    queue_id: payload.queueId || settings.defaultQueueId || null,
     secret_token: settings.secretToken,
     // media_group_id — для объединения нескольких медиа одного поста в альбом.
     // Scheduler отправит все посты с одинаковым media_group_id одним сообщением
@@ -78,7 +80,9 @@ async function postQuickAddUpload(settings, payload) {
   fd.append("url", payload.pageUrl || "");
   fd.append("title", payload.title || "");
   fd.append("tags", JSON.stringify(payload.tags || []));
-  if (settings.defaultQueueId) fd.append("queue_id", String(settings.defaultQueueId));
+  // queueId (long-press popup) приоритетнее дефолтной настройки.
+  const effectiveQueueId = payload.queueId || settings.defaultQueueId;
+  if (effectiveQueueId) fd.append("queue_id", String(effectiveQueueId));
   fd.append("secret_token", settings.secretToken);
   // media_group_id — для объединения нескольких медиа одного поста в альбом.
   if (payload.mediaGroupId) fd.append("media_group_id", payload.mediaGroupId);

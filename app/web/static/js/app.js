@@ -139,11 +139,166 @@
         }
     }
 
+    /**
+     * Фикс «обрезанного» dropdown внутри .table-responsive.
+     * overflow-x:auto у table-responsive превращает overflow-y в auto →
+     * выпадающее меню очередей обрезается границей контейнера (в «Входящих»,
+     * когда строк мало и меню не помещается по высоте).
+     * Решение: на show.bs.dropdown переносим .dropdown-menu в <body>
+     * (Popper позиционирует его по-прежнему у кнопки), на hidden — возвращаем.
+     * Делегированная обработка — работает на всех страницах.
+     */
+    function setupDropdownClippingFix() {
+        var movedMenus = new Map(); // toggle → menu
+
+        document.addEventListener('show.bs.dropdown', function (ev) {
+            var toggle = ev.target;
+            if (!(toggle instanceof Element)) return;
+            var dropdown = toggle.closest('.dropdown');
+            if (!dropdown || !toggle.closest('.table-responsive')) return;
+            var menu = dropdown.querySelector('.dropdown-menu');
+            if (!menu) return;
+            movedMenus.set(toggle, menu);
+            document.body.appendChild(menu);
+        });
+
+        document.addEventListener('hidden.bs.dropdown', function (ev) {
+            var toggle = ev.target;
+            if (!(toggle instanceof Element)) return;
+            var menu = movedMenus.get(toggle);
+            if (!menu) return;
+            movedMenus.delete(toggle);
+            var dropdown = toggle.closest('.dropdown');
+            if (dropdown) {
+                dropdown.appendChild(menu);
+            } else {
+                menu.remove();
+            }
+        });
+    }
+
+    /**
+     * Hover-миниатюры для строк с data-preview='[{"url":"...","video":false},...]'.
+     * Используется во «Входящих» (router сам формирует data-preview per group).
+     * Плавающая панель возле курсора; видео — muted autoplay loop.
+     */
+    function setupRowPreview() {
+        var panel = null;
+        var showTimer = null;
+        var currentRow = null;
+
+        function ensurePanel() {
+            if (panel) return panel;
+            panel = document.createElement('div');
+            panel.className = 'tgq-row-preview';
+            panel.style.display = 'none';
+            panel.setAttribute('aria-hidden', 'true');
+            document.body.appendChild(panel);
+            return panel;
+        }
+
+        function hidePanel() {
+            if (showTimer) {
+                clearTimeout(showTimer);
+                showTimer = null;
+            }
+            currentRow = null;
+            if (panel) {
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+            }
+        }
+
+        function renderPanel(items, ev) {
+            var p = ensurePanel();
+            p.innerHTML = '';
+            var shown = items.slice(0, 4);
+            shown.forEach(function (it) {
+                var box = document.createElement('div');
+                box.className = 'tgq-row-preview-item';
+                if (it.video) {
+                    var v = document.createElement('video');
+                    v.src = it.url;
+                    v.muted = true;
+                    v.loop = true;
+                    v.playsInline = true;
+                    v.autoplay = true;
+                    v.preload = 'metadata';
+                    v.setAttribute('muted', ''); // для iOS
+                    box.appendChild(v);
+                } else {
+                    var img = document.createElement('img');
+                    img.src = it.url;
+                    img.alt = '';
+                    img.loading = 'lazy';
+                    img.addEventListener('error', function () {
+                        box.classList.add('tgq-preview-error');
+                        img.remove();
+                        var ph = document.createElement('div');
+                        ph.className = 'tgq-preview-ph';
+                        ph.textContent = '⚠';
+                        box.appendChild(ph);
+                    });
+                    box.appendChild(img);
+                }
+                p.appendChild(box);
+            });
+            if (!p.childNodes.length) return;
+
+            p.style.display = 'flex';
+            // Позиционируем у курсора, не выходя за края окна.
+            var pad = 14;
+            var w = p.offsetWidth || 360;
+            var h = p.offsetHeight || 200;
+            var x = (ev.clientX || 0) + pad;
+            var y = (ev.clientY || 0) + pad;
+            if (x + w > window.innerWidth - 8) x = Math.max(8, ev.clientX - w - pad);
+            if (y + h > window.innerHeight - 8) y = Math.max(8, ev.clientY - h - pad);
+            p.style.left = x + 'px';
+            p.style.top = y + 'px';
+        }
+
+        document.addEventListener('mouseover', function (ev) {
+            var row = ev.target && ev.target.closest ? ev.target.closest('tr[data-preview]') : null;
+            if (!row) return;
+            if (row === currentRow) return;
+            hidePanel();
+            currentRow = row;
+            var items;
+            try {
+                items = JSON.parse(row.getAttribute('data-preview') || '[]');
+            } catch (e) {
+                return;
+            }
+            if (!items || !items.length) return;
+            showTimer = setTimeout(function () {
+                showTimer = null;
+                if (currentRow === row) renderPanel(items, ev);
+            }, 180);
+        });
+
+        document.addEventListener('mouseout', function (ev) {
+            var row = ev.target && ev.target.closest ? ev.target.closest('tr[data-preview]') : null;
+            if (!row) return;
+            var to = ev.relatedTarget;
+            if (to && row.contains(to)) return; // переход внутри строки
+            hidePanel();
+        });
+
+        // Уходим со страницы/меняем вкладку — прячем панель.
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) hidePanel();
+        });
+        window.addEventListener('scroll', hidePanel, true);
+    }
+
     // Init
     document.addEventListener('DOMContentLoaded', function () {
         setupConfirmForms();
         setupWorkerAutorefresh();
         showUrlToast();
+        setupDropdownClippingFix();
+        setupRowPreview();
     });
 
     // Экспорт для использования из консоли

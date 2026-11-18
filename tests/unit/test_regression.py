@@ -744,3 +744,132 @@ def test_render_queue_settings_no_undefined_names(tmp_path):
         await _render_queue_settings(mock_call, state)
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Bulk actions во «Входящих» (web) + hover-превью — регрессия 2026-11
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_targets_parsing():
+    """_parse_bulk_targets разбирает 'post:<id>' и 'group:<mgid>', мусор пропускает."""
+    from app.web.router import _parse_bulk_targets
+
+    post_ids, group_ids = _parse_bulk_targets(
+        ["post:12", "group:tgq:xcom:123", "  ", "junk", "34", "post:abc", "group:"]
+    )
+    assert post_ids == [12, 34], post_ids
+    assert group_ids == ["tgq:xcom:123"], group_ids
+
+    # Пустой список
+    assert _parse_bulk_targets([]) == ([], [])
+
+
+def test_bulk_assign_and_delete_end_to_end(tmp_path):
+    """bulk-assign/bulk-delete: группа разворачивается, посты назначаются/удаляются."""
+    from conftest import run_with_db
+
+    async def body():
+        from app.repositories import channels as channels_repo
+        from app.repositories import posts as posts_repo
+        from app.repositories import queues as queues_repo
+        from app.web.router import _expand_bulk_target_posts, _parse_bulk_targets
+
+        ch_id = await channels_repo.create_channel(-1000000000201, "BulkCh")
+        qid = await queues_repo.create_queue(ch_id, "BulkQ")
+
+        # Одиночный пост + альбом из 2 постов
+        p_single = await posts_repo.create_post(
+            source_type="xcom", file_type="photo", source_url="https://x.com/a/1"
+        )
+        mgid = "tgq:gelbooru:bulk:test"
+        p_g1 = await posts_repo.create_post(
+            source_type="gelbooru", file_type="photo",
+            source_url="https://img3.gelbooru.com/images/a/a1.png", media_group_id=mgid,
+        )
+        p_g2 = await posts_repo.create_post(
+            source_type="gelbooru", file_type="photo",
+            source_url="https://img3.gelbooru.com/images/a/a2.png", media_group_id=mgid,
+        )
+
+        post_ids, group_ids = _parse_bulk_targets([f"post:{p_single}", f"group:{mgid}"])
+        affected = await _expand_bulk_target_posts(post_ids, group_ids)
+        assert sorted(p["id"] for p in affected) == sorted([p_single, p_g1, p_g2])
+
+        # bulk-assign: все трое → очередь
+        for p in affected:
+            await posts_repo.assign_queue(p["id"], qid)
+        inbox = await posts_repo.list_inbox()
+        assert all(p["id"] not in {p_single, p_g1, p_g2} for p in inbox)
+
+        # Повторная экспансия после назначения — посты по-прежнему находятся по группе
+        affected2 = await _expand_bulk_target_posts([], [mgid])
+        assert sorted(p["id"] for p in affected2) == sorted([p_g1, p_g2])
+
+        # bulk-delete: удаляем все
+        for p in affected:
+            await posts_repo.delete_post(p["id"])
+        for pid in (p_single, p_g1, p_g2):
+            assert await posts_repo.get_post(pid) is None
+
+    run_with_db(tmp_path, body)
+
+
+def test_preview_entry_prefers_file_path():
+    """_preview_entry: file_path → serve-URL с quote; source_url → прямая ссылка; видео-типы."""
+    from urllib.parse import quote
+
+    from app.web.router import _preview_entry
+
+    e = _preview_entry({"file_path": "/app/media/фото x.jpg", "file_type": "photo"})
+    assert e == {
+        "url": "/web/local_files/serve?path=" + quote("/app/media/фото x.jpg", safe=""),
+        "video": False,
+    }
+
+    # video/animation/gif → video=true
+    for ft in ("video", "animation", "gif"):
+        assert _preview_entry({"file_path": "/app/media/x.mp4", "file_type": ft})["video"] is True
+
+    # Без file_path: прямая ссылка с видео-расширением
+    e2 = _preview_entry({"file_path": None, "source_url": "https://cs.pikabu.ru/video/a.mp4", "file_type": "video"})
+    assert e2 == {"url": "https://cs.pikabu.ru/video/a.mp4", "video": True}
+
+    # Без file_path: прямая картинка
+    e3 = _preview_entry({"file_path": None, "source_url": "https://i.pximg.net/img/a.jpg", "file_type": "photo"})
+    assert e3["video"] is False
+
+    # HTML-страница (твит) без прямой ссылки — превью нет
+    assert _preview_entry({"file_path": None, "source_url": None}) is None
+
+
+def test_inbox_page_includes_bulk_ui(tmp_path):
+    """GET /inbox рендерит чекбоксы, bulk-bar и data-preview."""
+    from conftest import run_with_db
+
+    async def body():
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.repositories import posts as posts_repo
+        from app.web.router import router
+
+        app = FastAPI()
+        app.include_router(router)
+        await posts_repo.create_post(
+            source_type="xcom", file_type="photo",
+            source_url="https://pbs.twimg.com/media/z.jpg?name=orig",
+        )
+
+        with TestClient(app) as client:
+            resp = client.get("/inbox")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "bulk-select-all" in html
+            assert "bulk-assign-form" in html
+            assert "/web/inbox/bulk-assign" in html
+            assert "/web/inbox/bulk-delete" in html
+            assert "data-preview=" in html
+            assert "value=\"post:" in html
+
+    run_with_db(tmp_path, body)

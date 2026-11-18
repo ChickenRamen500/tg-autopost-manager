@@ -19,6 +19,8 @@
   "use strict";
 
   const PICKER_ID = "tgq-picker";
+  const QUEUE_POPUP_ID = "tgq-queue-popup";
+  const LONG_PRESS_MS = 2000; // удержание кнопки — попап выбора очереди
 
   const config = getConfigForHostname(location.hostname);
   if (!config) return;
@@ -51,6 +53,183 @@
     }
   }
 
+  // --- Очереди бота (для попапа long-press и тулбара list-страниц) ---
+  let queuesCache = { at: 0, queues: [] };
+  const QUEUES_TTL = 60000; // 60 сек
+
+  function fetchQueues() {
+    return new Promise((resolve) => {
+      if (queuesCache.queues.length && Date.now() - queuesCache.at < QUEUES_TTL) {
+        resolve(queuesCache.queues);
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage({ type: "GET_QUEUES" }, (resp) => {
+          const qs = resp && resp.ok ? resp.queues || [] : [];
+          if (qs.length) queuesCache = { at: Date.now(), queues: qs };
+          resolve(qs);
+        });
+      } catch (e) {
+        resolve([]);
+      }
+    });
+  }
+
+  // --- Попап выбора очереди (открывается удержанием кнопки 2 сек) ---
+  let queuePopupEl = null;
+
+  function closeQueuePopup() {
+    if (queuePopupEl) {
+      queuePopupEl.remove();
+      queuePopupEl = null;
+    }
+  }
+
+  // anchorBtn — кнопка, возле которой показать попап;
+  // onSelect(queueIdOrNull) — колбэк выбора строки (null = маршрутизация по умолчанию).
+  async function openQueuePopup(anchorBtn, onSelect) {
+    closeQueuePopup();
+    if (!document.body) return;
+
+    const popup = document.createElement("div");
+    popup.id = QUEUE_POPUP_ID;
+    popup.className = "tgq-queue-popup";
+
+    const head = document.createElement("div");
+    head.className = "tgq-queue-popup-head";
+    head.textContent = "Отправить в очередь…";
+    popup.appendChild(head);
+
+    const list = document.createElement("div");
+    list.className = "tgq-queue-popup-list";
+    const loading = document.createElement("div");
+    loading.className = "tgq-queue-popup-loading";
+    loading.textContent = "Загрузка очередей…";
+    list.appendChild(loading);
+    popup.appendChild(list);
+
+    document.body.appendChild(popup);
+    queuePopupEl = popup;
+
+    // Позиция у кнопки (фикс. координаты, не вылезаем за окно).
+    const r = anchorBtn.getBoundingClientRect();
+    const pw = Math.max(260, popup.offsetWidth || 280);
+    let x = Math.min(r.left, window.innerWidth - pw - 8);
+    let y = r.bottom + 6;
+    popup.style.left = Math.max(8, x) + "px";
+    popup.style.top = Math.max(8, y) + "px";
+    // Если снизу мало места — раскрываем вверх.
+    requestAnimationFrame(() => {
+      const ph = popup.offsetHeight || 300;
+      if (r.bottom + 6 + ph > window.innerHeight - 8) {
+        y = Math.max(8, r.top - ph - 6);
+        popup.style.top = y + "px";
+      }
+      const w = popup.offsetWidth || pw;
+      if (r.left + w > window.innerWidth - 8) {
+        x = window.innerWidth - w - 8;
+        popup.style.left = Math.max(8, x) + "px";
+      }
+    });
+
+    // Закрытие: ESC, клик вне попапа, скролл страницы.
+    const onKey = (ev) => {
+      if (ev.key === "Escape") closeQueuePopup();
+    };
+    const onDocClick = (ev) => {
+      if (!popup.contains(ev.target) && ev.target !== anchorBtn && !anchorBtn.contains(ev.target)) {
+        closeQueuePopup();
+      }
+    };
+    const onScroll = () => closeQueuePopup();
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDocClick, true);
+    window.addEventListener("scroll", onScroll, true);
+    const cleanup = () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDocClick, true);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+
+    const qs = await fetchQueues();
+    if (queuePopupEl !== popup) {
+      cleanup();
+      return; // попап уже закрыли
+    }
+    list.innerHTML = "";
+    if (!qs.length) {
+      const empty = document.createElement("div");
+      empty.className = "tgq-queue-popup-loading";
+      empty.textContent = "Очереди не получены — проверьте настройки бота";
+      list.appendChild(empty);
+      return;
+    }
+
+    const mkItem = (label, queueId, isDefault, isActive) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "tgq-queue-popup-item" + (isDefault ? " tgq-queue-popup-default" : "");
+      item.textContent = label;
+      if (isActive === false) item.classList.add("tgq-queue-popup-inactive");
+      item.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        cleanup();
+        closeQueuePopup();
+        try {
+          onSelect(queueId);
+        } catch (e) {
+          /* колбэк падать не должен закрывать попап */
+        }
+      });
+      list.appendChild(item);
+    };
+
+    mkItem("⚡ По умолчанию (маршрутизация)", null, true);
+    for (const q of qs) {
+      mkItem(`${q.name} (#${q.id}${q.pending ? `, ${q.pending} в ожидании` : ""})${q.is_active ? "" : " — выкл."}`, q.id, false, q.is_active);
+    }
+  }
+
+  // --- Привязка long-press (удержание 2 сек → попап очередей) к кнопке ---
+  function attachLongPress(btn, onSelect) {
+    let holdTimer = null;
+    let holdTriggered = false;
+    const startHold = () => {
+      holdTriggered = false;
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        holdTriggered = true;
+        try {
+          if (navigator.vibrate) navigator.vibrate(30);
+        } catch (e) { /* не критично */ }
+        openQueuePopup(btn, onSelect);
+      }, LONG_PRESS_MS);
+    };
+    const cancelHold = () => {
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    };
+    btn.addEventListener("pointerdown", startHold);
+    btn.addEventListener("pointerup", () => {
+      cancelHold();
+      // После сработавшего long-press браузер всё равно сделает click —
+      // подавляем его, чтобы попап не закрылся отправкой «по умолчанию».
+      setTimeout(() => { holdTriggered = false; }, 50);
+    });
+    btn.addEventListener("pointerleave", cancelHold);
+    btn.addEventListener("pointercancel", cancelHold);
+    btn.addEventListener("contextmenu", (ev) => {
+      if (holdTriggered || holdTimer) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    });
+    btn._tgqHoldTriggered = () => holdTriggered;
+  }
+
   // --- Найти все article'ы на странице, в которых ещё нет кнопки и есть медиа ---
   function findArticlesNeedingButtons() {
     const sel = config.articleSelector || "article";
@@ -69,6 +248,84 @@
     return result;
   }
 
+  // --- media_group_id из permalink (уникален для поста) ---
+  // Пример: https://x.com/user/status/123 → "tgq:xcom:123".
+  // Бэкенд сохранит это значение в posts.media_group_id для всех медиа.
+  function makeMediaGroupId(permalink) {
+    if (!permalink) return "tgq:" + Date.now().toString(36);
+    try {
+      const u = new URL(permalink);
+      const m = u.pathname.match(/(\d+)(?:\/|$|\?)/g);
+      const idPart = m && m.length ? m[m.length - 1].replace(/[\/\?]/g, "") : u.pathname.slice(-20);
+      return `tgq:${u.hostname.replace(/^www\./, "")}:${idPart}`;
+    } catch {
+      return "tgq:" + Date.now().toString(36);
+    }
+  }
+
+  // --- Отправка ВСЕГО поста в выбранную очередь (long-press popup) ---
+  // single → одно ENQUEUE; multi → альбом (единый media_group_id, все медиа).
+  async function sendToQueueWithId(mediaList, permalink, queueId, sourceBtn) {
+    if (!mediaList.length) return;
+    if (sourceBtn) {
+      sourceBtn.disabled = true;
+      sourceBtn.textContent = "… Отправка";
+    }
+    const useMgid = mediaList.length > 1 ? makeMediaGroupId(permalink) : null;
+    let sent = 0;
+    let failed = 0;
+    let lastError = null;
+    for (const m of mediaList) {
+      const isBlob = !m.url && m.kind === "video";
+      const payload = {
+        type: "ENQUEUE",
+        pageUrl: permalink || location.href,
+        mediaUrl: m.url,
+        referer: config.needsReferer ? location.origin + "/" : null,
+        tags: extractTags(config),
+        title: document.title,
+        site: location.hostname.replace(/^www\./, ""),
+        mode: isBlob ? "A" : config.mode,
+        mediaGroupId: useMgid,
+        queueId: queueId || null,
+      };
+      try {
+        const resp = await chrome.runtime.sendMessage(payload);
+        if (resp && resp.ok) {
+          sent++;
+          await markSent(m.url, permalink, resp.post_id);
+        } else {
+          failed++;
+          lastError = resp && resp.error;
+        }
+      } catch (e) {
+        failed++;
+        lastError = e && e.message;
+      }
+    }
+    if (sourceBtn) {
+      if (sent > 0 && failed === 0) {
+        sourceBtn.textContent = `✓ В очереди${mediaList.length > 1 ? ` (${sent})` : ""}`;
+        sourceBtn.classList.add("tgq-done");
+        sourceBtn.disabled = true;
+      } else if (sent > 0) {
+        sourceBtn.textContent = `✓ ${sent}/${mediaList.length}`;
+        sourceBtn.classList.add("tgq-done");
+        sourceBtn.disabled = false;
+      } else {
+        sourceBtn.textContent = "✗ Ошибка";
+        sourceBtn.classList.add("tgq-error");
+        sourceBtn.disabled = false;
+      }
+    }
+    if (sent > 0) {
+      const albumLabel = mediaList.length > 1 ? " как альбом" : "";
+      tgqShowToast(`Отправлено${albumLabel} ${sent} медиа в очередь` + (failed ? `, ошибок: ${failed}` : ""), failed ? "err" : "ok");
+    } else {
+      tgqShowToast(lastError || "Ошибка отправки", "err");
+    }
+  }
+
   // --- Создание кнопки для одного article ---
   function makeArticleButton(articleEl, mediaList) {
     const permalink = getArticlePermalink(articleEl, config);
@@ -78,7 +335,7 @@
     btn.type = "button";
     btn.textContent =
       mediaList.length > 1 ? `→ В очередь (${mediaList.length})` : "→ В очередь";
-    btn.title = "Отправить в очередь TG Media Queue Bot";
+    btn.title = "Отправить в очередь TG Media Queue Bot\nУдерживайте 2 сек — выбрать очередь";
 
     // Сохраняем permalink на кнопке — используется в sendSingle и пикере.
     btn.dataset.permalink = permalink;
@@ -88,6 +345,7 @@
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
+        if (btn._tgqHoldTriggered && btn._tgqHoldTriggered()) return; // long-press уже открыл попап
         sendSingle(mediaList[0], btn, articleEl, permalink);
       });
     } else {
@@ -95,9 +353,15 @@
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
+        if (btn._tgqHoldTriggered && btn._tgqHoldTriggered()) return;
         openSelectionPicker(mediaList, articleEl, btn, permalink);
       });
     }
+
+    // Удержание 2 сек → попап выбора очереди (все сайты, один механизм).
+    attachLongPress(btn, (queueId) => {
+      sendToQueueWithId(mediaList, permalink, queueId, btn);
+    });
 
     // Асинхронная проверка дедупликации — обновить метку кнопки.
     // Для каждого медиа используем permalink как fallback ключа (для blob-видео).
@@ -161,7 +425,7 @@
   }
 
   // --- Отправка одного медиа ---
-  async function sendSingle(media, btn, articleEl, permalink) {
+  async function sendSingle(media, btn, articleEl, permalink, queueId) {
     if (btn.disabled) return;
     btn.disabled = true;
     btn.textContent = "… Отправка";
@@ -178,6 +442,7 @@
       title: document.title,
       site: location.hostname.replace(/^www\./, ""),
       mode: isBlobVideo ? "A" : config.mode,
+      queueId: queueId || null,
     };
 
     try {
@@ -218,19 +483,10 @@
     if (!document.body) return;
 
     // media_group_id генерируется из permalink (уникален для поста) + суффикс tgq.
-    // Пример: https://x.com/user/status/123 → "tgq:xcom:123"
     // Бэкенд сохранит это значение в posts.media_group_id для всех выбранных медиа.
     let mediaGroupId = null;
     if (permalink && mediaList.length > 1) {
-      try {
-        const u = new URL(permalink);
-        // Извлекаем последний числовой сегмент пути (id твита/поста).
-        const m = u.pathname.match(/(\d+)(?:\/|$|\?)/g);
-        const idPart = m && m.length ? m[m.length - 1].replace(/[\/\?]/g, "") : u.pathname.slice(-20);
-        mediaGroupId = `tgq:${u.hostname.replace(/^www\./, "")}:${idPart}`;
-      } catch {
-        mediaGroupId = "tgq:" + Date.now().toString(36);
-      }
+      mediaGroupId = makeMediaGroupId(permalink);
     }
 
     const overlay = document.createElement("div");
@@ -508,6 +764,338 @@
     return s.length > n ? s.slice(0, n) + "…" : s;
   }
 
+  // --- Страница списка (Gelbooru search: page=post&s=list) ------------------
+  // Чекбоксы на .thumbnail-preview, кнопка быстрой отправки на каждой
+  // миниатюре, тулбар с выбором очереди — НАД #thumbnail-container.
+  // Выбрано 2+ постов → отправляются одним альбомом (единый media_group_id).
+  // Оригинальный URL каждого поста резолвится через dapi (resolveOriginal).
+
+  function getListItems(lp) {
+    const container = document.querySelector(lp.containerSelector);
+    if (!container) return { container: null, items: [] };
+    const items = Array.prototype.slice.call(container.querySelectorAll(lp.itemSelector));
+    return { container, items };
+  }
+
+  function getItemPermalink(itemEl, lp) {
+    let href = null;
+    try {
+      const link = itemEl.querySelector(lp.linkSelector);
+      href = link && link.getAttribute("href");
+    } catch (e) {
+      href = null;
+    }
+    if (!href) {
+      const anyA = itemEl.querySelector("a[href*='page=post']");
+      href = anyA && anyA.getAttribute("href");
+    }
+    if (!href) return null;
+    try {
+      return new URL(href, location.origin).href;
+    } catch {
+      return null;
+    }
+  }
+
+  // Быстрая отправка одной миниатюры: резолвим оригинал (dapi) → ENQUEUE mode A.
+  async function sendListItem(permalink, itemEl, btn, queueId) {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "…";
+    }
+    const markItemDone = (ok) => {
+      if (itemEl) itemEl.classList.add(ok ? "tgq-list-item-done" : "tgq-list-item-error");
+    };
+    try {
+      if (!permalink) throw new Error("не найдена ссылка на пост");
+      if (typeof config.resolveOriginal !== "function") {
+        throw new Error("resolveOriginal не настроен для сайта");
+      }
+      const resolved = await config.resolveOriginal(permalink);
+      const tags = extractTags(config).concat(resolved.tags || []);
+      // Дедуп тегов
+      const seenTags = new Set();
+      const mergedTags = tags.filter((t) => {
+        const k = t.toLowerCase();
+        if (seenTags.has(k)) return false;
+        seenTags.add(k);
+        return true;
+      }).slice(0, 60);
+
+      const payload = {
+        type: "ENQUEUE",
+        pageUrl: permalink,
+        mediaUrl: resolved.fileUrl,
+        referer: config.needsReferer ? location.origin + "/" : null,
+        tags: mergedTags,
+        title: document.title,
+        site: location.hostname.replace(/^www\./, ""),
+        mode: config.mode,
+        queueId: queueId || null,
+      };
+      const resp = await chrome.runtime.sendMessage(payload);
+      if (resp && resp.ok) {
+        if (btn) {
+          btn.textContent = "✓";
+          btn.classList.add("tgq-done");
+        }
+        tgqShowToast(
+          resp.duplicate ? `Дубликат #${resp.post_id}` : `Пост #${resp.post_id} в очереди`,
+          "ok"
+        );
+        await markSent(resolved.fileUrl, permalink, resp.post_id);
+        markItemDone(true);
+        const cb = itemEl && itemEl.querySelector(".tgq-list-checkbox");
+        if (cb) {
+          cb.checked = false;
+          cb.disabled = true;
+          updateListToolbar();
+        }
+      } else {
+        if (btn) {
+          btn.textContent = "✗";
+          btn.classList.add("tgq-error");
+          btn.disabled = false;
+        }
+        tgqShowToast(resp?.error || "Ошибка отправки", "err");
+        markItemDone(false);
+      }
+    } catch (e) {
+      if (btn) {
+        btn.textContent = "✗";
+        btn.classList.add("tgq-error");
+        btn.disabled = false;
+      }
+      tgqShowToast(e && e.message ? e.message : "Ошибка отправки", "err");
+      markItemDone(false);
+    }
+  }
+
+  function injectListItemUi(itemEl, lp) {
+    if (!itemEl || itemEl.querySelector(".tgq-list-send")) return false;
+    itemEl.classList.add("tgq-list-item");
+    const permalink = getItemPermalink(itemEl, lp);
+
+    // Чекбокс (левый верхний угол миниатюры).
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "tgq-list-checkbox";
+    cb.title = "Выбрать для массовой отправки";
+    cb.setAttribute("aria-label", "Выбрать пост для отправки");
+    cb.addEventListener("click", (ev) => ev.stopPropagation());
+    cb.addEventListener("change", () => {
+      itemEl.classList.toggle("tgq-list-item-selected", cb.checked);
+      updateListToolbar();
+    });
+    itemEl.appendChild(cb);
+
+    // Кнопка быстрой отправки (появляется при наведении, правый нижний угол).
+    const sendBtn = document.createElement("button");
+    sendBtn.type = "button";
+    sendBtn.className = "tgq-btn tgq-list-send";
+    sendBtn.textContent = "→ В очередь";
+    sendBtn.title = "Отправить оригинал в очередь\nУдерживайте 2 сек — выбрать очередь";
+    sendBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (sendBtn._tgqHoldTriggered && sendBtn._tgqHoldTriggered()) return;
+      sendListItem(permalink, itemEl, sendBtn, null);
+    });
+    attachLongPress(sendBtn, (queueId) => {
+      sendListItem(permalink, itemEl, sendBtn, queueId);
+    });
+    itemEl.appendChild(sendBtn);
+    return true;
+  }
+
+  // Тулбар над thumbnail-container: счётчик выбранных + выбор очереди + кнопка.
+  function ensureListToolbar(container, lp) {
+    let toolbar = document.getElementById("tgq-list-toolbar");
+    const isNew = !toolbar;
+    if (isNew) {
+      toolbar = document.createElement("div");
+      toolbar.id = "tgq-list-toolbar";
+      toolbar.className = "tgq-list-toolbar";
+      toolbar.setAttribute("role", "toolbar");
+      toolbar.setAttribute("aria-label", "Отправка выбранных постов в очередь");
+
+      const count = document.createElement("span");
+      count.className = "tgq-list-count";
+      count.id = "tgq-list-count";
+      count.textContent = "Выбрано: 0";
+      toolbar.appendChild(count);
+
+      const hint = document.createElement("span");
+      hint.className = "tgq-list-hint";
+      hint.textContent = "2+ выбранных отправятся одним альбомом";
+      toolbar.appendChild(hint);
+
+      const select = document.createElement("select");
+      select.id = "tgq-list-queue-select";
+      select.className = "tgq-list-queue-select";
+      select.setAttribute("aria-label", "Очередь для отправки");
+      const def = document.createElement("option");
+      def.value = "";
+      def.textContent = "⚡ Очередь: по умолчанию";
+      select.appendChild(def);
+      toolbar.appendChild(select);
+
+      fetchQueues().then((qs) => {
+        for (const q of qs) {
+          const opt = document.createElement("option");
+          opt.value = String(q.id);
+          opt.textContent = `${q.name} (#${q.id})${q.is_active ? "" : " — выкл."}`;
+          select.appendChild(opt);
+        }
+      });
+
+      const sendBtn = document.createElement("button");
+      sendBtn.type = "button";
+      sendBtn.id = "tgq-list-send-selected";
+      sendBtn.className = "tgq-btn tgq-list-send-selected";
+      sendBtn.textContent = "→ Отправить выбранные";
+      sendBtn.title = "Отправить отмеченные чекбоксами посты (2+ — одним альбомом)";
+      sendBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        sendSelectedFromList(container, lp);
+      });
+      toolbar.appendChild(sendBtn);
+
+      if (lp.toolbarPosition === "before" && container.parentNode) {
+        container.parentNode.insertBefore(toolbar, container);
+      } else {
+        container.insertBefore(toolbar, container.firstChild);
+      }
+    }
+    updateListToolbar();
+    return true;
+  }
+
+  function updateListToolbar() {
+    const count = document.getElementById("tgq-list-count");
+    if (!count) return;
+    const n = document.querySelectorAll(".tgq-list-checkbox:checked").length;
+    count.textContent = `Выбрано: ${n}`;
+    const sendBtn = document.getElementById("tgq-list-send-selected");
+    if (sendBtn) sendBtn.disabled = n === 0;
+  }
+
+  // Массовая отправка выбранных чекбоксами миниатюр.
+  // 1 пост → одиночный; 2+ → один альбом (единый media_group_id).
+  async function sendSelectedFromList(container, lp) {
+    const queueSelect = document.getElementById("tgq-list-queue-select");
+    const queueId = queueSelect && queueSelect.value ? parseInt(queueSelect.value, 10) : null;
+    const sendBtn = document.getElementById("tgq-list-send-selected");
+
+    const selected = [];
+    const containerItems = container.querySelectorAll(lp.itemSelector);
+    containerItems.forEach((itemEl) => {
+      const cb = itemEl.querySelector(".tgq-list-checkbox");
+      if (cb && cb.checked) {
+        selected.push({ itemEl, permalink: getItemPermalink(itemEl, lp) });
+      }
+    });
+    if (!selected.length) {
+      tgqShowToast("Сначала отметьте посты чекбоксами", "err");
+      return;
+    }
+
+    if (sendBtn) {
+      sendBtn.disabled = true;
+    }
+    const useMgid =
+      selected.length > 1
+        ? `tgq:${location.hostname.replace(/^www\./, "")}:bulk:${Date.now().toString(36)}`
+        : null;
+
+    let sent = 0;
+    let failed = 0;
+    for (let i = 0; i < selected.length; i++) {
+      const { itemEl, permalink } = selected[i];
+      if (sendBtn) sendBtn.textContent = `Отправка ${i + 1}/${selected.length}…`;
+      const cb = itemEl.querySelector(".tgq-list-checkbox");
+      try {
+        const resolved = await config.resolveOriginal(permalink);
+        const tags = extractTags(config).concat(resolved.tags || []);
+        const seenTags = new Set();
+        const mergedTags = tags.filter((t) => {
+          const k = t.toLowerCase();
+          if (seenTags.has(k)) return false;
+          seenTags.add(k);
+          return true;
+        }).slice(0, 60);
+        const payload = {
+          type: "ENQUEUE",
+          pageUrl: permalink,
+          mediaUrl: resolved.fileUrl,
+          referer: config.needsReferer ? location.origin + "/" : null,
+          tags: mergedTags,
+          title: document.title,
+          site: location.hostname.replace(/^www\./, ""),
+          mode: config.mode,
+          mediaGroupId: useMgid,
+          queueId,
+        };
+        const resp = await chrome.runtime.sendMessage(payload);
+        if (resp && resp.ok) {
+          sent++;
+          await markSent(resolved.fileUrl, permalink, resp.post_id);
+          itemEl.classList.add("tgq-list-item-done");
+          if (cb) {
+            cb.checked = false;
+            cb.disabled = true;
+          }
+        } else {
+          failed++;
+          itemEl.classList.add("tgq-list-item-error");
+        }
+      } catch (e) {
+        failed++;
+        itemEl.classList.add("tgq-list-item-error");
+        console.warn("[tgq] list send error:", e);
+      }
+    }
+    if (sendBtn) {
+      sendBtn.textContent = "→ Отправить выбранные";
+      sendBtn.disabled = false;
+    }
+    updateListToolbar();
+    if (sent > 0) {
+      const albumLabel = selected.length > 1 ? " как альбом" : "";
+      tgqShowToast(
+        `Отправлено${albumLabel} ${sent} постов` + (failed ? `, ошибок: ${failed}` : ""),
+        failed ? "err" : "ok"
+      );
+    } else {
+      tgqShowToast("Не удалось отправить ни одного поста", "err");
+    }
+  }
+
+  function setupListPage() {
+    const lp = config.listPage;
+    if (!lp) return false;
+    // Только на страницах поиска (s=list/s=gallery); на странице поста (s=view)
+    // работает обычный per-article механизм.
+    if (lp.matchUrl && !lp.matchUrl.test(location.search)) return false;
+    const { container, items } = getListItems(lp);
+    if (!container || !items.length) return false;
+    let injected = 0;
+    for (const itemEl of items) {
+      try {
+        if (injectListItemUi(itemEl, lp)) injected++;
+      } catch (e) {
+        /* skip broken item */
+      }
+    }
+    try {
+      ensureListToolbar(container, lp);
+    } catch (e) {
+      /* toolbar не критичен */
+    }
+    return injected > 0;
+  }
+
   // --- Инъекция (debounced, guard от реентерабельности) ---
   let injecting = false;
   function scheduleInject() {
@@ -523,6 +1111,14 @@
   }
 
   async function injectButtons() {
+    // Страницы списков (Gelbooru search) — свой UI, отдельный от article-кнопок.
+    if (config.listPage) {
+      try {
+        setupListPage();
+      } catch (e) {
+        /* ignore */
+      }
+    }
     const list = findArticlesNeedingButtons();
     for (const { article, media } of list) {
       try {

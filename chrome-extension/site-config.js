@@ -29,6 +29,9 @@ const SITE_CONFIGS = {
     articleSelector: "#image-container, #post-view, #container",
     // Прямая ссылка на оригинал: <a href="https://img3.gelbooru.com/images/...">
     // или <img id="image" src="...">.
+    // singleMedia: на странице поста отправляем ВСЕГДА «оригинал» (только один
+    // медиа на пост) — preferUrlPattern выбирает ссылку на /images/ (оригинал),
+    // а не img#image (может быть sample у больших изображений).
     mediaSelector: "a[href*='img3.gelbooru.com/images/'], a[href*='/images/'], img#image",
     mediaAttrPriority: ["href", "src"],
     mediaHosts: ["gelbooru.com", "img3.gelbooru.com"],
@@ -38,6 +41,21 @@ const SITE_CONFIGS = {
     buttonPosition: "after",
     // Permalink: на странице поста — это canonical или location.href.
     permalinkSelector: "link[rel='canonical']",
+    singleMedia: true,
+    preferUrlPattern: "/images/",
+    // Страница поиска (index.php?page=post&s=list): чекбоксы + кнопки на
+    // thumbnail-preview, тулбар с кнопкой отправки и выбором очереди — НАД
+    // thumbnail-container. Оригинальный URL каждого поста резолвится через
+    // dapi JSON API (file_url) — максимальное качество и верное расширение.
+    resolveOriginal: resolveGelbooruOriginal,
+    listPage: {
+      // URL поиска: содержит page=post и s=list (или gallery); страница поста — s=view.
+      matchUrl: /(\?|&)(s=list|s=gallery)/,
+      containerSelector: "#thumbnail-container, .thumbnail-container",
+      itemSelector: ".thumbnail-preview",
+      linkSelector: "a[href*='page=post&s=view']",
+      toolbarPosition: "before", // тулбар НАД контейнером
+    },
   },
   "danbooru.donmai.us": {
     mode: "A",
@@ -74,9 +92,28 @@ const SITE_CONFIGS = {
     mode: "A",
     // На ленте — несколько постов (article.story). На странице поста — один.
     articleSelector: "article.story, .story, .post",
-    mediaSelector: ".story_image img, .story-image__image img, img.story__image, video source, video",
+    // Фото: блоки .story__block_type_media / .player (современная вёрстка),
+    // плюс легаси-селекторы. ВАЖНО: раньше в списке были только легаси-классы
+    // (.story_image и т.п.) — на современном пикабу они не совпадают, и кнопка
+    // появлялась только у видео (video/video source). Теперь фото ищутся
+    // универсально (img внутри media-блока или с хостом картинок пикабу).
+    mediaSelector: [
+      ".story__block_type_media img",
+      ".story__block .player img",
+      ".player img",
+      "img[data-large-image]",
+      "img[src*='cs.pikabu.ru/post_img']",
+      "img[src*='s.pikabu.ru/post_img']",
+      ".story_image img",
+      ".story-image__image img",
+      "img.story__image",
+      "video source",
+      "video",
+    ].join(", "),
     mediaAttrPriority: ["src", "data-src"],
-    mediaHosts: ["pikabu.ru", "cs.pikabu.ru", "cs1.pikabu.ru", "cs2.pikabu.ru"],
+    mediaHosts: ["pikabu.ru", "cs.pikabu.ru", "cs1.pikabu.ru", "cs2.pikabu.ru", "s.pikabu.ru"],
+    // Отсекаем аватары/иконки/эмодзи — они тоже лежат на хостах пикабу.
+    excludeUrlPattern: "(\\/ava\\/|\\/avatar|\\/emoji|favicon|logo|\\.svg(\\?|#|$))",
     needsReferer: false,
     spa: true,
     tagsSelector: "a[href*='/tag/'], .story_tags a",
@@ -182,9 +219,25 @@ function _absMediaUrl(u, config) {
   try {
     let url = new URL(u, location.href).href;
     url = _upgradeTwitterQuality(url);
+    url = _upgradePikabuQuality(url);
     return url;
   } catch (e) {
     return null;
+  }
+}
+
+// Апгрейд качества изображений Pikabu до максимального размера.
+// cs.pikabu.ru/post_img/medium|small|preview/... → /post_img/big/ (оригинал).
+// «big» — самый крупный размер, который пикабу отдаёт по прямой ссылке.
+function _upgradePikabuQuality(url) {
+  try {
+    if (!/(\.|^|\.)pikabu\.ru$/i.test(new URL(url).hostname.replace(/^www\./, "")) && !/pikabu\.ru/.test(url)) {
+      return url;
+    }
+    if (!/\/post_img\//.test(url)) return url;
+    return url.replace(/\/post_img\/(preview|small|medium)\//, "/post_img/big/");
+  } catch {
+    return url;
   }
 }
 
@@ -244,6 +297,15 @@ function mediaKind(el, url) {
 function collectMediaInArticle(articleEl, config) {
   if (!articleEl || !config) return [];
 
+  let excludeRe = null;
+  if (config.excludeUrlPattern) {
+    try {
+      excludeRe = new RegExp(config.excludeUrlPattern, "i");
+    } catch {
+      excludeRe = null;
+    }
+  }
+
   const items = [];
   const seen = new Set();
   const push = (url, el, kind, poster) => {
@@ -251,6 +313,8 @@ function collectMediaInArticle(articleEl, config) {
       let abs;
       try { abs = new URL(url, location.href).href; } catch { return; }
       if (!/^https?:/.test(abs)) return;
+      // Мусорные URL (аватары, иконки, эмодзи) — отсекаем по excludeUrlPattern.
+      if (excludeRe && excludeRe.test(abs)) return;
       if (seen.has(abs)) return;
       seen.add(abs);
       items.push({ url: abs, el, kind, poster: poster || null });
@@ -269,7 +333,7 @@ function collectMediaInArticle(articleEl, config) {
       const urls = config.extractMediaUrls(articleEl, config);
       if (urls && urls.length) {
         for (const u of urls) push(u, null, "img");
-        return items;
+        return _applySingleMedia(items, config);
       }
     } catch (e) {
       /* fall back to selectors */
@@ -318,7 +382,26 @@ function collectMediaInArticle(articleEl, config) {
       });
     }
   }
-  return items;
+  return _applySingleMedia(items, config);
+}
+
+// singleMedia: у поста может быть несколько кандидатов (оригинальная ссылка +
+// inline <img>, часто это один и тот же контент). Оставляем РОВНО один —
+// приоритет URL'у, совпадающему с preferUrlPattern (например /images/ у
+// gelbooru — оригинальное хранилище), иначе первый кандидат.
+function _applySingleMedia(items, config) {
+  if (!config || !config.singleMedia || items.length <= 1) return items;
+  let best = items[0];
+  if (config.preferUrlPattern) {
+    try {
+      const re = new RegExp(config.preferUrlPattern, "i");
+      const match = items.find((i) => i.url && re.test(i.url));
+      if (match) best = match;
+    } catch {
+      /* invalid pattern — keep first */
+    }
+  }
+  return [best];
 }
 
 // --- Теги поста (для маршрутизации на бэкенде по правилам ТЗ §2.2) ---
@@ -430,6 +513,29 @@ function extractPixivUrls(articleEl, config) {
   return collected.length ? collected : null;
 }
 
+// --- Gelbooru: оригинал поста через dapi JSON API --------------------------
+// На странице поиска у миниатюры есть только URL превью (thumbnails/...jpg),
+// а оригинал может быть .png/.gif/.webp — угадать расширение нельзя.
+// dapi отдаёт точный file_url оригинала (полное разрешение) + теги:
+//   /index.php?page=dapi&s=post&q=index&json=1&id=<post_id>
+// Контент-скрипт запрашивает его same-origin — без CORS-проблем.
+async function resolveGelbooruOriginal(permalink) {
+  const m = String(permalink || "").match(/[?&]id=(\d+)/);
+  if (!m) throw new Error("gelbooru: не найден id поста в ссылке");
+  const url = `${location.origin}/index.php?page=dapi&s=post&q=index&json=1&id=${m[1]}`;
+  const resp = await fetch(url, { credentials: "include" });
+  if (!resp.ok) throw new Error(`gelbooru dapi: HTTP ${resp.status}`);
+  const data = await resp.json();
+  const arr = data && data.post;
+  const item = Array.isArray(arr) ? arr[0] : arr;
+  if (!item || !item.file_url) throw new Error("gelbooru dapi: пост без file_url");
+  const tags = String(item.tags || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 60);
+  return { fileUrl: item.file_url, tags };
+}
+
 // --- Извлечение permalink'а конкретного поста из article ---
 // Важно для x.com/twitter/pikabu: на ленте location.href = ".../home" или ".../feed",
 // но каждый пост имеет свой permalink (https://x.com/{user}/status/{id}).
@@ -494,4 +600,5 @@ if (typeof globalThis !== "undefined") {
   globalThis.extractPixivUrls = extractPixivUrls;
   globalThis.mediaKind = mediaKind;
   globalThis.getArticlePermalink = getArticlePermalink;
+  globalThis.resolveGelbooruOriginal = resolveGelbooruOriginal;
 }
