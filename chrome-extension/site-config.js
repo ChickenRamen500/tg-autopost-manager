@@ -610,18 +610,38 @@ async function resolveGelbooruOriginal(permalink) {
 // открываются»). Достаём из HTML все прямые ссылки на медиа:
 //   1. DOM-селекторы (data-large-image — оригинал картинки, video source, a[href*='post_img']);
 //   2. data-* атрибуты плееров (mp4 в data-source/data-video);
-//   3. regex-фолбэк по inline JSON/атрибутам (устойчив к смене вёрстки).
+//   3. regex-фолбэк по сырому HTML И по «разэкранированной» копии (в inline
+//      JSON пикабу URL записаны как https:\/\/cs.pikabu.ru\/... — старый regex
+//      с исключением бэкслешей из класса символов их никогда не находил);
+//   4. AJAX-фолбэк get_story (action=get_story&story_id=...) с куками —
+//      глубокий обход JSON: собираем все строки-URL медиа на хостах pikabu,
+//      не полагаясь на структуру ответа (она не документирована).
 // Качество апгрейдим до оригинала: post_img/preview|small|medium → /post_img/big/.
 // Возвращаем { fileUrl, mediaUrls, tags }; отправка идёт mode B (background.js
 // сам скачает файл с куками браузера и зальёт на бэкенд через quick_add_upload).
 async function resolvePikabuOriginal(permalink) {
   if (!permalink || !/^https?:/i.test(permalink)) {
-    throw new Error("pikabu: не найдена ссылка на пост");
+    throw new Error("pikabu: не найдена ссылка на пост — откройте сам пост и попробуйте снова");
   }
-  const resp = await fetch(permalink, { credentials: "include" });
-  if (!resp.ok) throw new Error(`pikabu: HTTP ${resp.status} на странице поста`);
+
+  let resp;
+  try {
+    resp = await fetch(permalink, { credentials: "include" });
+  } catch (e) {
+    throw new Error("pikabu: не удалось загрузить страницу поста (сеть): " + e.message);
+  }
+  if (!resp.ok) {
+    throw new Error(`pikabu: HTTP ${resp.status} на странице поста`);
+  }
   const html = await resp.text();
   const doc = new DOMParser().parseFromString(html, "text/html");
+
+  // Диагностика 18+: если в отфетченном HTML есть заглушка — пикабу вырезал
+  // медиа (нет входа / не включён показ 18+ в настройках профиля / не
+  // подтверждён возраст). По ней даём точное сообщение вместо общего «не найдено».
+  const adultStubInHtml = !!doc.querySelector(
+    ".story__nsfw-stub, .story__adult-overlay, [data-action='adult-confirm']"
+  );
 
   const urls = [];
   const push = (u) => {
@@ -667,25 +687,77 @@ async function resolvePikabuOriginal(permalink) {
       );
     });
 
-  // 3) Regex-фолбэк по сырому HTML (inline JSON, экранированные URL).
+  // 3) Regex-фолбэк: по сырому HTML (обычные URL) и по разэкранированной копии
+  //    (экранированные URL в inline JSON: https:\/\/... и \u002F).
   const re =
-    /https?:\/\/[a-z0-9.-]*pikabu\.ru[^"'\\\s<>)]*?\.(?:jpe?g|png|webp|gif|mp4|webm|mov)(?:\?[^"'\\\s<>)]*)?/gi;
+    /https?:\/\/[a-z0-9.-]*pikabu\.ru[^\s"'<>)]*?\.(?:jpe?g|png|webp|gif|mp4|webm|mov)(?:\?[^\s"'<>)]*)?/gi;
   (html.match(re) || []).forEach((u) => push(u));
+  const plain = html
+    .replace(/\\u002[fF]/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/\\"/g, '"');
+  (plain.match(re) || []).forEach((u) => push(u));
 
   // Апгрейд качества + дедуп (preview/small/medium → big — у big уникальные пути).
-  const media = [];
-  const seen = new Set();
-  for (const u of urls) {
-    const big = u.replace(/\/post_img\/(preview|small|medium)\//, "/post_img/big/");
-    if (!seen.has(big) && /\.(jpe?g|png|webp|gif|mp4|webm|mov)(\?|$)/i.test(big)) {
-      seen.add(big);
-      media.push(big);
+  const collectMedia = () => {
+    const media = [];
+    const seen = new Set();
+    for (const u of urls) {
+      const big = u.replace(/\/post_img\/(preview|small|medium)\//, "/post_img/big/");
+      if (!seen.has(big) && /\.(jpe?g|png|webp|gif|mp4|webm|mov)(\?|$)/i.test(big)) {
+        seen.add(big);
+        media.push(big);
+      }
+    }
+    return media;
+  };
+
+  let media = collectMedia();
+
+  // 4) AJAX-фолбэк get_story: только если HTML не дал медиа. Глубокий обход
+  //    JSON — собираем ВСЕ строки, похожие на http(s)-URL (медиа-фильтр и
+  //    хост-фильтр внутри push); структура ответа не документирована.
+  if (!media.length) {
+    const m = permalink.match(/\/story\/[^?#]*?_(\d+)(?:[/?#]|$)/i);
+    if (m) {
+      try {
+        const r = await fetch(
+          `https://pikabu.ru/ajax/page.php?action=get_story&story_id=${m[1]}`,
+          { credentials: "include" }
+        );
+        if (r.ok) {
+          const data = await r.json();
+          const stack = [data];
+          while (stack.length) {
+            const cur = stack.pop();
+            if (typeof cur === "string") {
+              if (/^https?:/i.test(cur)) push(cur);
+            } else if (Array.isArray(cur)) {
+              stack.push(...cur);
+            } else if (cur && typeof cur === "object") {
+              stack.push(...Object.values(cur));
+            }
+          }
+          media = collectMedia();
+        }
+      } catch (e) {
+        /* AJAX недоступен — не критично, ниже даст понятную ошибку */
+      }
     }
   }
 
   if (!media.length) {
+    if (adultStubInHtml) {
+      throw new Error(
+        "pikabu 18+: страница поста вернулась с заглушкой — медиа вырезаны. " +
+          "Проверьте: 1) вы залогинены на pikabu.ru именно в этом браузере; " +
+          "2) в настройках профиля Pikabu включён показ контента 18+ и подтверждён возраст; " +
+          "3) расширение обновлено (chrome://extensions → кнопка ↻). " +
+          "Затем обновите страницу и нажмите кнопку снова."
+      );
+    }
     throw new Error(
-      "pikabu: медиа на странице поста не найдены — для 18+ нужен вход на pikabu.ru в этом браузере"
+      "pikabu: медиа на странице поста не найдены (возможно, видео вставлено с внешнего хоста или изменилась вёрстка)"
     );
   }
 

@@ -25,6 +25,14 @@
   const config = getConfigForHostname(location.hostname);
   if (!config) return;
 
+  // Маркер версии в консоли — чтобы видеть, что расширение обновлено
+  // (18+ пикабу и новые фичи не работают, пока расширение не перезагружено).
+  try {
+    console.log("[tgq] content script v1.1.0 (pikabu 18+: unlock + fallback + mode B)");
+  } catch (e) {
+    /* ignore */
+  }
+
   // --- Дедупликация (storage) ---
   // Ключ: origin + (mediaUrl или permalink).
   // Важно для blob-видео (Twitter/Pikabu): mediaUrl=null, но permalink уникален
@@ -272,10 +280,12 @@
   }
 
   function tryUnlockAdult(articleEl) {
-    if (!articleEl) return false;
-    const btn = articleEl.querySelector(
-      "button[data-action='adult-confirm'], .story__adult-confirm-btn, .story__adult-overlay button:not(.tgq-btn)"
-    );
+    const sel =
+      "button[data-action='adult-confirm'], .story__adult-confirm-btn, .story__adult-overlay button:not(.tgq-btn)";
+    // Сначала внутри article, затем по всему документу (пикабу иногда показывает
+    // confirm-диалог как глобальную модалку, а не внутри поста).
+    const btn =
+      (articleEl && articleEl.querySelector(sel)) || document.querySelector(sel);
     if (!btn) return false;
     try {
       btn.click();
@@ -296,8 +306,12 @@
     if (media.length) return media;
     const permalink = getArticlePermalink(articleEl, config);
     if (tryUnlockAdult(articleEl)) {
-      // Пауза на перерисовку/ленивую загрузку картинок после раскрытия.
+      // Пауза на перерисовку/ленивую загрузку картинок после раскрытия:
+      // две попытки с разной задержкой (медиа могут приехать позже).
       await new Promise((r) => setTimeout(r, 700));
+      media = collectMediaInArticle(articleEl, config);
+      if (media.length) return media;
+      await new Promise((r) => setTimeout(r, 1500));
       media = collectMediaInArticle(articleEl, config);
       if (media.length) return media;
     }
