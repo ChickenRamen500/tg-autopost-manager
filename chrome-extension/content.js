@@ -28,9 +28,27 @@
   // Маркер версии в консоли — чтобы видеть, что расширение обновлено
   // (18+ пикабу и новые фичи не работают, пока расширение не перезагружено).
   try {
-    console.log("[tgq] content script v1.1.0 (pikabu 18+: unlock + fallback + mode B)");
+    console.log("[tgq] content script v1.1.1 (pikabu 18+: unlock + fallback + mode B)");
   } catch (e) {
     /* ignore */
+  }
+
+  // Единая точка диагностики: всё, что связано с отправкой, дублируется в
+  // консоль страницы (F12 → Console → фильтр "tgq"). Тосты исчезают,
+  // консоль — остаётся: по ней можно точно понять, где оборвался 18+-путь.
+  function tgqLog(...args) {
+    try {
+      console.log("[tgq]", ...args);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  function tgqWarn(...args) {
+    try {
+      console.warn("[tgq]", ...args);
+    } catch (e) {
+      /* ignore */
+    }
   }
 
   // --- Дедупликация (storage) ---
@@ -271,11 +289,16 @@
   // после клика «Показать контент 18+» — пробуем кликнуть программно и
   // пересобрать медиа. Если разблокировать нельзя — объясняем пользователю.
   function isAdultStubArticle(articleEl) {
+    if (!articleEl) return false;
+    // Основные маркеры пикабу + широкий фолбэк по имени класса: пикабу
+    // периодически меняет вёрстку заглушки (story__nsfw-stub и т.п.), и
+    // если селектор отстал — кнопка вообще не появляется у 18+ поста.
+    // unlockAdult-посты — только пикабу, ложные срабатывания маловероятны.
     return !!(
-      articleEl &&
       articleEl.querySelector(
-        ".story__nsfw-stub, .story__adult-overlay, [data-action='adult-confirm']"
-      )
+        ".story__nsfw-stub, .story__adult-overlay, [data-action='adult-confirm'], [class*='nsfw'], [class*='adult']"
+      ) ||
+      articleEl.querySelector("[class*='stub'], [class*='warning']")
     );
   }
 
@@ -303,30 +326,44 @@
   // (cookies) и зальёт на сервер — бот не может скачать 18+ анонимно.
   async function resolveMediaWithUnlock(articleEl) {
     let media = collectMediaInArticle(articleEl, config);
-    if (media.length) return media;
     const permalink = getArticlePermalink(articleEl, config);
+    tgqLog("resolveMedia: старт — медиа в DOM:", media.length, "permalink:", permalink);
+    if (media.length) return media;
     if (tryUnlockAdult(articleEl)) {
+      tgqLog("resolveMedia: unlock-клик выполнен (кнопка 18+ найдена)");
       // Пауза на перерисовку/ленивую загрузку картинок после раскрытия:
       // две попытки с разной задержкой (медиа могут приехать позже).
       await new Promise((r) => setTimeout(r, 700));
       media = collectMediaInArticle(articleEl, config);
-      if (media.length) return media;
+      if (media.length) {
+        tgqLog("resolveMedia: после unlock (700мс) медиа:", media.length);
+        return media;
+      }
       await new Promise((r) => setTimeout(r, 1500));
       media = collectMediaInArticle(articleEl, config);
-      if (media.length) return media;
+      if (media.length) {
+        tgqLog("resolveMedia: после unlock (1500мс) медиа:", media.length);
+        return media;
+      }
+      tgqWarn("resolveMedia: unlock-клик не дал медиа в DOM");
+    } else {
+      tgqLog("resolveMedia: unlock-клик невозможен — кнопка 18+ не найдена");
     }
     if (typeof config.fallbackResolve === "function" && permalink && /^https?:/.test(permalink)) {
       try {
         tgqShowToast("Получаю медиа через страницу поста (с вашими cookies)…", "info", 2500);
+        tgqLog("resolveMedia: fallbackResolve →", permalink);
         const resolved = await config.fallbackResolve(permalink);
         const list = (resolved.mediaUrls || (resolved.fileUrl ? [resolved.fileUrl] : [])).map(
           (u) => ({ url: u, kind: mediaKind(null, u), viaFallback: true })
         );
+        tgqLog("resolveMedia: fallback нашёл медиа:", list.length);
         if (list.length) {
           tgqShowToast(`Найдено медиа на странице поста: ${list.length}`, "ok", 2500);
           return list;
         }
       } catch (e) {
+        tgqWarn("resolveMedia: fallbackResolve ошибка:", e && e.message ? e.message : e);
         tgqShowToast(
           e && e.message ? e.message : "Не удалось получить медиа со страницы поста",
           "err",
@@ -336,6 +373,7 @@
       }
     }
     if (isAdultStubArticle(articleEl)) {
+      tgqWarn("resolveMedia: 18+-заглушка, медиа не получены");
       tgqShowToast(
         "18+ пост без авторизации: Пикабу не отдаёт медиа. Войдите на pikabu.ru в этом браузере и повторите.",
         "err",
@@ -406,6 +444,12 @@
       };
       try {
         const resp = await chrome.runtime.sendMessage(payload);
+        tgqLog(
+          "sendToQueueWithId: mode=" + payload.mode,
+          "mediaUrl=" + (payload.mediaUrl || "(null)"),
+          "ответ:",
+          resp
+        );
         if (resp && resp.ok) {
           sent++;
           await markSent(m.url, permalink, resp.post_id);
@@ -574,9 +618,15 @@
       mode: media.viaFallback ? "B" : isBlobVideo ? "A" : config.mode,
       queueId: queueId || null,
     };
+    tgqLog(
+      "sendSingle: mode=" + payload.mode,
+      "mediaUrl=" + (payload.mediaUrl || "(null — yt-dlp)"),
+      "pageUrl=" + payload.pageUrl
+    );
 
     try {
       const resp = await chrome.runtime.sendMessage(payload);
+      tgqLog("sendSingle: ответ бота:", resp);
       if (resp && resp.ok) {
         btn.textContent = resp.duplicate ? "✓ Уже было" : "✓ В очереди";
         btn.classList.add("tgq-done");
@@ -822,16 +872,22 @@
         };
         try {
           const resp = await chrome.runtime.sendMessage(payload);
+          tgqLog(
+            "sendSelected: mode=" + payload.mode,
+            "mediaUrl=" + (payload.mediaUrl || "(null)"),
+            "ответ:",
+            resp
+          );
           if (resp && resp.ok) {
             sent++;
             await markSent(m.url, permalink, resp.post_id);
           } else {
             failed++;
-            console.warn("[tgq] enqueue failed:", resp?.error);
+            tgqWarn("sendSelected: enqueue failed:", resp?.error);
           }
         } catch (e) {
           failed++;
-          console.warn("[tgq] enqueue error:", e);
+          tgqWarn("sendSelected: enqueue error:", e);
         }
       }
       overlay.remove();

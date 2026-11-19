@@ -635,6 +635,9 @@ async function resolvePikabuOriginal(permalink) {
   }
   const html = await resp.text();
   const doc = new DOMParser().parseFromString(html, "text/html");
+  console.log(
+    `[tgq] pikabu: страница загружена (${html.length} байт), HTTP ${resp.status}`
+  );
 
   // Диагностика 18+: если в отфетченном HTML есть заглушка — пикабу вырезал
   // медиа (нет входа / не включён показ 18+ в настройках профиля / не
@@ -642,6 +645,7 @@ async function resolvePikabuOriginal(permalink) {
   const adultStubInHtml = !!doc.querySelector(
     ".story__nsfw-stub, .story__adult-overlay, [data-action='adult-confirm']"
   );
+  console.log("[tgq] pikabu: заглушка 18+ в HTML:", adultStubInHtml);
 
   const urls = [];
   const push = (u) => {
@@ -713,6 +717,10 @@ async function resolvePikabuOriginal(permalink) {
   };
 
   let media = collectMedia();
+  console.log(
+    `[tgq] pikabu: после DOM+regex найдено медиа: ${media.length}` +
+      (media.length ? ` (первое: ${media[0]})` : "")
+  );
 
   // 4) AJAX-фолбэк get_story: только если HTML не дал медиа. Глубокий обход
   //    JSON — собираем ВСЕ строки, похожие на http(s)-URL (медиа-фильтр и
@@ -739,6 +747,10 @@ async function resolvePikabuOriginal(permalink) {
             }
           }
           media = collectMedia();
+          console.log(
+            `[tgq] pikabu: AJAX get_story вернул медиа: ${media.length}` +
+              (media.length ? ` (первое: ${media[0]})` : "")
+          );
         }
       } catch (e) {
         /* AJAX недоступен — не критично, ниже даст понятную ошибку */

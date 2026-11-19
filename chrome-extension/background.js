@@ -62,14 +62,18 @@ async function postQuickAddUpload(settings, payload) {
   }
   let mediaResp;
   try {
+    console.log("[tgq][bg] mode B: скачиваю медиа браузером:", payload.mediaUrl);
     mediaResp = await fetch(payload.mediaUrl, { credentials: "include" });
   } catch (e) {
+    console.warn("[tgq][bg] mode B: сетевая ошибка скачивания:", e && e.message);
     return { ok: false, error: "Не удалось скачать медиа в браузере: " + e.message };
   }
   if (!mediaResp.ok) {
+    console.warn("[tgq][bg] mode B: HTTP", mediaResp.status, "при скачивании");
     return { ok: false, error: `Скачивание медиа: HTTP ${mediaResp.status}` };
   }
   const blob = await mediaResp.blob();
+  console.log("[tgq][bg] mode B: скачано", blob.size, "байт, type:", blob.type);
   const MAX_MB = 200;
   if (blob.size > MAX_MB * 1024 * 1024) {
     return { ok: false, error: `Файл >${MAX_MB} МБ — киньте ссылку поста боту в ЛС (yt-dlp)` };
@@ -92,7 +96,10 @@ async function postQuickAddUpload(settings, payload) {
     headers: { ...authHeaders(settings) }, // Content-Type ставит fetch (multipart boundary)
     body: fd,
   });
-  return normalizeResponse(resp);
+  console.log("[tgq][bg] mode B: upload →", resp.status, "ожидание JSON…");
+  const out = await normalizeResponse(resp);
+  console.log("[tgq][bg] mode B: результат:", out);
+  return out;
 }
 
 async function normalizeResponse(resp) {
