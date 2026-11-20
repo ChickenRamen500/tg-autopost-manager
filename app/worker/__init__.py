@@ -386,6 +386,27 @@ class Worker:
             except Exception as e:  # noqa: BLE001 — конвертация не должна валить задачу
                 log.warning("Worker: конвертация видео поста #%s не удалась (оставляю исходник): %s", post_id, e)
 
+        # Проверка на NSFW-заглушку пикабу (v0.4.61): CDN пикабу отдаёт 18+
+        # картинки только с cookies браузера — анонимное скачивание сервером
+        # получает белую GIF-заглушку «NSFW» в размерах реальной картинки.
+        # Раньше она молча уходила в очередь и публиковалась в канал. Теперь
+        # пост помечается failed с понятным сообщением (и подсказкой про
+        # расширение: картинки pikabu качаются браузером, mode B).
+        if source_type == "pikabu" and result["file_type"] in ("photo", "gif"):
+            from app.services.media.nsfw_stub import is_pikabu_nsfw_stub
+
+            if is_pikabu_nsfw_stub(result["file_path"]):
+                try:
+                    os.remove(result["file_path"])
+                except OSError:
+                    pass
+                raise _PermanentTaskError(
+                    "Пикабу отдал заглушку NSFW (18+) вместо картинки: CDN отдаёт "
+                    "18+ медиа только с cookies браузера, а сервер качает анонимно. "
+                    "Обновите расширение до v1.2+ (картинки pikabu качаются браузером "
+                    "автоматически) и добавьте пост с залогиненным pikabu.ru."
+                )
+
         # Сохраняем метаданные файла + переводим в pending (готов к отправке)
         await posts_repo.set_file_info(
             post_id,

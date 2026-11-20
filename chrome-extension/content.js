@@ -28,7 +28,7 @@
   // Маркер версии в консоли — чтобы видеть, что расширение обновлено
   // (18+ пикабу и новые фичи не работают, пока расширение не перезагружено).
   try {
-    console.log("[tgq] content script v1.1.1 (pikabu 18+: unlock + fallback + mode B)");
+    console.log("[tgq] content script v1.2.0 (pikabu: картинки браузером — CDN отдаёт img только с cookies)");
   } catch (e) {
     /* ignore */
   }
@@ -49,6 +49,23 @@
     } catch (e) {
       /* ignore */
     }
+  }
+
+  // Выбор режима отправки для одного медиа (v1.2, v0.4.61).
+  //  • viaFallback (18+/NSFW пикабу, resolved из страницы поста) → B всегда.
+  //  • blob-видео → A (сервер качает через yt-dlp).
+  //  • uploadImagesViaBrowser (пикабу): CDN отдаёт img/gif только с cookies
+  //    браузера — анонимное скачивание сервером получает заглушку NSFW.
+  //    Поэтому картинки/гифки пикабу качает браузер и заливает сам (mode B,
+  //    quick_add_upload). Видео пикабу CDN не защищает → остаётся mode A.
+  function pickSendMode(media, cfg, isBlob) {
+    if (media && media.viaFallback) return "B";
+    if (isBlob) return "A";
+    if (cfg && cfg.uploadImagesViaBrowser) {
+      const k = media && media.kind;
+      if (k === "img" || k === "gif") return "B";
+    }
+    return (cfg && cfg.mode) || "A";
   }
 
   // --- Дедупликация (storage) ---
@@ -438,7 +455,7 @@
         tags: extractTags(config),
         title: document.title,
         site: location.hostname.replace(/^www\./, ""),
-        mode: m.viaFallback ? "B" : isBlob ? "A" : config.mode,
+        mode: pickSendMode(m, config, isBlob),
         mediaGroupId: useMgid,
         queueId: queueId || null,
       };
@@ -605,7 +622,8 @@
 
     const isBlobVideo = !media.url && media.kind === "video";
     // blob: видео → mediaUrl=null + mode=A (бэкенд использует yt-dlp на permalink).
-    // viaFallback (18+/NSFW пикабу) → mode=B: браузер скачает и зальёт сам.
+    // img/gif пикабу → mode=B (CDN отдаёт картинки только с cookies браузера;
+    // сервер качал бы заглушку NSFW — см. pickSendMode).
     // pageUrl = permalink (НЕ location.href!) — иначе бот качает HTML ленты x.com/home.
     const payload = {
       type: "ENQUEUE",
@@ -615,7 +633,7 @@
       tags: extractTags(config),
       title: document.title,
       site: location.hostname.replace(/^www\./, ""),
-      mode: media.viaFallback ? "B" : isBlobVideo ? "A" : config.mode,
+      mode: pickSendMode(media, config, isBlobVideo),
       queueId: queueId || null,
     };
     tgqLog(
@@ -864,7 +882,7 @@
           tags: extractTags(config),
           title: document.title,
           site: location.hostname.replace(/^www\./, ""),
-          mode: m.viaFallback ? "B" : isBlob ? "A" : config.mode,
+          mode: pickSendMode(m, config, isBlob),
           // media_group_id — одинаковый для всех выбранных медиа этого поста.
           // Бэкенд сохранит его; если у очереди group_albums=True, scheduler
           // отправит все посты с этим ID одним сообщением (send_media_group).

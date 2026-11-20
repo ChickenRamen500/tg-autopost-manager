@@ -285,6 +285,23 @@ async def quick_add_upload(
     # webm/mkv/... от расширения → конвертируем в mp4 (Telegram плохо играет webm).
     # До create_post, чтобы file_path/file_size сразу указывали на mp4.
     guessed_type = _guess_file_type(f"file{ext}")
+
+    # Проверка на NSFW-заглушку пикабу (v0.4.61): если браузер тоже скачал
+    # заглушку — пользователь не залогинен на pikabu.ru или у него выключен
+    # показ 18+. Отдаём понятную ошибку вместо «успешного» поста-заглушки.
+    if source_type == "pikabu" and guessed_type in ("photo", "gif"):
+        from app.services.media.nsfw_stub import is_pikabu_nsfw_stub
+
+        if is_pikabu_nsfw_stub(file_path):
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Пикабу отдал заглушку NSFW (18+) вместо картинки даже браузеру: "
+                    "войдите на pikabu.ru в этом браузере и включите показ 18+ "
+                    "в настройках профиля, затем добавьте пост заново"
+                ),
+            )
     if guessed_type == "video":
         try:
             from app.services.media.transcode import convert_video_to_mp4
