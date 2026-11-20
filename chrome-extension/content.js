@@ -28,7 +28,9 @@
   // Маркер версии в консоли — чтобы видеть, что расширение обновлено
   // (18+ пикабу и новые фичи не работают, пока расширение не перезагружено).
   try {
-    console.log("[tgq] content script v1.2.0 (pikabu: картинки браузером — CDN отдаёт img только с cookies)");
+    console.log(
+      "[tgq] content script v1.3.0 (pikabu 18+: cache-bust + GIF-анализ + лайтбокс + кандидаты)"
+    );
   } catch (e) {
     /* ignore */
   }
@@ -51,21 +53,358 @@
     }
   }
 
-  // Выбор режима отправки для одного медиа (v1.2, v0.4.61).
-  //  • viaFallback (18+/NSFW пикабу, resolved из страницы поста) → B всегда.
-  //  • blob-видео → A (сервер качает через yt-dlp).
-  //  • uploadImagesViaBrowser (пикабу): CDN отдаёт img/gif только с cookies
-  //    браузера — анонимное скачивание сервером получает заглушку NSFW.
-  //    Поэтому картинки/гифки пикабу качает браузер и заливает сам (mode B,
-  //    quick_add_upload). Видео пикабу CDN не защищает → остаётся mode A.
-  function pickSendMode(media, cfg, isBlob) {
-    if (media && media.viaFallback) return "B";
-    if (isBlob) return "A";
-    if (cfg && cfg.uploadImagesViaBrowser) {
-      const k = media && media.kind;
-      if (k === "img" || k === "gif") return "B";
+  // ==========================================================================
+  // --- Пикабу 18+ / mode B: обход заглушки CDN (v1.3.0) ---------------------
+  // ==========================================================================
+  // Найденная причина «заглушек» (v0.4.61): CDN пикабу (DDoS-Guard) кэширует
+  // ОТВЕТ ОРИГИНА на 7 дней (cache-control: max-age=604800) БЕЗ учёта cookies
+  // (vary только Origin, Access-Control-*). Если хоть один аноним (бот,
+  // краулер, предыдущая попытка скачивания) получил заглушку 18+ — она
+  // кэшируется на edge-узле, и её получают ВСЕ, включая залогиненного
+  // пользователя с включённым 18+. Поэтому браузер в новой вкладке получает
+  // заглушку, а после ЛКМ (лайтбокс) — нормальную картинку (из кэша браузера).
+  //
+  // Решение:
+  //   1) cache-bust: уникальный ?tgqcb=… к URL → edge-кэш промахивается (MISS)
+  //      → запрос уходит на оригин → оригин видит cookies пользователя (18+)
+  //      → отдаёт настоящий файл.
+  //   2) Клиентский анализ GIF (парсер кадров): настоящий арт — много-кадровый,
+  //      заглушка — одиночный белый кадр. Кандидаты сортируются «анимированные
+  //      первыми», поэтому первым уходит настоящая картинка.
+  //   3) Перебор кандидатов: если сервер всё же ответил «заглушка», пробуем
+  //      следующие URL из DOM/производительности страницы.
+  //   4) Автоматический «ЛКМ-сценарий»: если анимации не нашли — программно
+  //      открываем лайтбокс (как пользователь ЛКМ), забираем его URL.
+  //
+  // Скачивание (mode B) остаётся в фоновом скрипте расширения — здесь только
+  // подготовка URL-кандидатов и разбор ответов сервера.
+
+  const MAX_CANDIDATE_PROBES = 6; // сколько URL анализировать (скачивая байты)
+  const MAX_ENQUEUE_ATTEMPTS = 3; // сколько кандидатов отправлять серверу
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function isPikabuSite() {
+    return /(^|\.)pikabu\.ru$/i.test(location.hostname);
+  }
+
+  // Ответ сервера «это заглушка 18+» (текстовое сообщение текущего бэкенда
+  // и/или машина-читаемый error_code после обновления сервера).
+  function isStubError(resp) {
+    if (!resp || resp.ok) return false;
+    if (resp.error_code === "nsfw_stub") return true;
+    const msg = String(resp.error || "");
+    return /[зЗ]аглушк|nsfw|18\+/i.test(msg);
+  }
+
+  // Уникальный query-параметр: ломает ключ кэша CDN (DDoS-Guard кэширует по
+  // URL без учёта query → MISS → идём на оригина).
+  function addCacheBust(url) {
+    try {
+      const u = new URL(url);
+      u.searchParams.set(
+        "tgqcb",
+        Date.now().toString(36) + Math.floor(Math.random() * 1000000).toString(36)
+      );
+      return u.href;
+    } catch (e) {
+      return url;
     }
-    return (cfg && cfg.mode) || "A";
+  }
+
+  function isPikabuMediaUrl(u) {
+    return /^https?:\/\/cs\d+\.pikabu\.ru\/s\/.+\.(gif|jpg|jpeg|png|webp|mp4|webm)(\?|#|$)/i.test(
+      u || ""
+    );
+  }
+
+  // Анонимная проба (без cookies) из контекста страницы: CORS у CDN пикабу
+  // разрешён только БЕЗ credentials (access-control-allow-credentials не
+  // отдаётся), поэтому «включённые» cookies здесь приложить нельзя — но нам
+  // и не нужно: проба нужна лишь чтобы ОТЛИЧИТЬ заглушку (одиночный кадр)
+  // от настоящего арта (много кадров) и отсортировать кандидатов.
+  // Скачивание для отправки делает фоновый скрипт с host_permissions — там
+  // cookies пользователя уходят в любом случае.
+  // cache: "no-store" — НИКОГДА не пишем скачанное в HTTP-кэш браузера,
+  // чтобы не «отравить» его заглушкой для последующих запросов.
+  async function primeFetchBytes(url) {
+    try {
+      const resp = await fetch(url, {
+        credentials: "omit",
+        cache: "no-store",
+        redirect: "follow",
+      });
+      if (!resp.ok) return null;
+      const buf = await resp.arrayBuffer();
+      if (!buf || buf.byteLength < 100) return null;
+      return new Uint8Array(buf);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Мини-парсер GIF: считаем кадры (Image Descriptors). Проверен на заглушке
+  // пикабу (1 кадр) и реальных артах (40–54 кадра).
+  function gifFrameCount(bytes) {
+    if (!bytes || bytes.length < 13) return -1;
+    if (bytes[0] !== 0x47 || bytes[1] !== 0x49 || bytes[2] !== 0x46) return -1; // "GIF"
+    // Header "GIFxxx" = байты 0..5. Logical Screen Descriptor = байты 6..12
+    // (width2 байты6-7, height2 байты8-9, packed байт10, bg 11, aspect 12).
+    const gPacked = bytes[10];
+    let p = 13;
+    if (gPacked & 0x80) {
+      p += 3 * (1 << ((gPacked & 0x07) + 1)); // global color table
+    }
+    let frames = 0;
+    let guard = 0;
+    while (p < bytes.length && guard < 200000) {
+      guard++;
+      const b = bytes[p];
+      if (b === 0x3b) break; // trailer
+      if (b === 0x21) {
+        // extension block: 0x21 label sub-blocks...
+        let q = p + 2;
+        while (q < bytes.length) {
+          const len = bytes[q];
+          if (len === 0) {
+            q++;
+            break;
+          }
+          q += 1 + len;
+        }
+        p = q;
+        continue;
+      }
+      if (b === 0x2c) {
+        // image descriptor: 0x2C left2 top2 w2 h2 packed (packed на p+9)
+        frames++;
+        let q = p + 10;
+        const lPacked = bytes[p + 9];
+        if (lPacked & 0x80) {
+          q += 3 * (1 << ((lPacked & 0x07) + 1)); // local color table
+        }
+        q += 1; // LZW min code size byte
+        while (q < bytes.length) {
+          const len = bytes[q];
+          if (len === 0) {
+            q++;
+            break;
+          }
+          q += 1 + len;
+        }
+        p = q;
+        continue;
+      }
+      // неизвестный байт блока — дальше надёжно распарсить нельзя
+      return frames > 0 ? frames : -2;
+    }
+    return frames;
+  }
+
+  // Все медиа-URL пикабу из article и из загрузок страницы (performance API):
+  // тут оказывается и тот URL, который страница реально показала.
+  function collectPikabuCandidateUrls(articleEl, excludeUrl) {
+    const found = [];
+    const push = (u) => {
+      if (!u || typeof u !== "string") return;
+      if (!isPikabuMediaUrl(u)) return;
+      if (excludeUrl && u === excludeUrl) return;
+      if (found.indexOf(u) === -1) found.push(u);
+    };
+    if (articleEl) {
+      let els = [];
+      try {
+        els = articleEl.querySelectorAll("img, video, source, a[href]");
+      } catch (e) {
+        els = [];
+      }
+      for (const el of els) {
+        push(el.getAttribute("src"));
+        push(el.getAttribute("data-src"));
+        push(el.getAttribute("data-large-image"));
+        push(el.getAttribute("data-source"));
+        push(el.getAttribute("data-poster"));
+        if (el.tagName === "A") push(el.getAttribute("href"));
+      }
+    }
+    try {
+      const entries = performance.getEntriesByType("resource") || [];
+      for (const e of entries) push(e.name);
+    } catch (e) {
+      /* performance API недоступен — не критично */
+    }
+    return found;
+  }
+
+  // Автоматический «ЛКМ-сценарий» пользователя: программно открываем
+  // просмотр оригинала (лайтбокс), забираем его URL(ы), закрываем.
+  async function simulateLightbox(articleEl) {
+    const before = new Set();
+    try {
+      for (const e of performance.getEntriesByType("resource") || []) before.add(e.name);
+    } catch (e) {
+      /* ignore */
+    }
+    let target = null;
+    try {
+      target =
+        (articleEl &&
+          articleEl.querySelector(
+            ".story__image img, .story__image, .player, img[src*='pikabu.ru'], video"
+          )) ||
+        null;
+    } catch (e) {
+      target = null;
+    }
+    if (!target) return [];
+    try {
+      target.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
+      );
+    } catch (e) {
+      return [];
+    }
+    await sleep(1600);
+    const urls = [];
+    const push = (u) => {
+      // Лайтбокс может отдать и «неканоничный» URL (pikabu.ru/... вместо
+      // csN.pikabu.ru/s/...) — принимаем любой медиа-URL на доменах пикабу.
+      if (
+        u &&
+        /^https:\/\/[a-z0-9.-]*pikabu\.ru\/.+\.(gif|jpg|jpeg|png|webp|mp4|webm)(\?|#|$)/i.test(u) &&
+        urls.indexOf(u) === -1
+      ) {
+        urls.push(u);
+      }
+    };
+    try {
+      // Новые запросы, появившиеся после клика — лайтбокс грузит оригинал.
+      for (const e of performance.getEntriesByType("resource") || []) {
+        if (!before.has(e.name)) push(e.name);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    // Крупные картинки вне article — вероятный img лайтбокса.
+    let imgs = [];
+    try {
+      imgs = document.querySelectorAll("img");
+    } catch (e) {
+      imgs = [];
+    }
+    for (const im of imgs) {
+      if (articleEl && articleEl.contains(im)) continue;
+      const src = im.currentSrc || im.src;
+      if (!src) continue;
+      if (im.naturalWidth >= 400 || isPikabuMediaUrl(src)) push(src);
+    }
+    // Закрываем лайтбокс: Esc + возможные кнопки-кресты.
+    try {
+      const opts = { key: "Escape", code: "Escape", bubbles: true, cancelable: true };
+      const owner = document.activeElement || document.body;
+      owner.dispatchEvent(new KeyboardEvent("keydown", opts));
+      document.dispatchEvent(new KeyboardEvent("keydown", opts));
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      const closeBtn = document.querySelector(
+        "[class*='lightbox'] [class*='close'], [class*='viewer'] [class*='close'], [class*='modal'] [class*='close']"
+      );
+      if (closeBtn) closeBtn.click();
+    } catch (e) {
+      /* ignore */
+    }
+    await sleep(250);
+    return urls;
+  }
+
+  // Собирает упорядоченный список URL-кандидатов для mode B (пикабу).
+  // GIF-кандидаты пробуются и сортируются: анимированные (настоящий арт)
+  // получают высший приоритет, одиночный белый кадр (заглушка) — низший.
+  async function resolvePikabuModeBCandidates(media, articleEl) {
+    const mainUrl = media.url;
+    if (!mainUrl || !/^https?:/i.test(mainUrl)) return [mainUrl].filter(Boolean);
+    const isGif = /\.gif(\?|#|$)/i.test(mainUrl) || media.kind === "gif";
+    const others = collectPikabuCandidateUrls(articleEl, mainUrl);
+    tgqLog("pikabu-modeB: кандидатов из DOM/performance:", others.length);
+
+    const ranked = [{ url: mainUrl, score: 0 }];
+    if (isGif) {
+      const probeList = [mainUrl].concat(others).slice(0, MAX_CANDIDATE_PROBES);
+      for (const u of probeList) {
+        const bytes = await primeFetchBytes(addCacheBust(u));
+        if (!bytes) continue;
+        const frames = gifFrameCount(bytes);
+        // Заглушка = одиночный кадр → score 0 (ниже кандидатов лайтбокса).
+        const score = frames > 1 ? 1000 + Math.min(frames, 999) : 0;
+        tgqLog(
+          "pikabu-modeB: проба",
+          (u.split("/").pop() || "").slice(0, 44),
+          "кадров=" + frames,
+          "score=" + score
+        );
+        const existing = ranked.find((r) => r.url === u);
+        if (existing) existing.score = score;
+        else ranked.push({ url: u, score });
+        if (frames > 1 && u === mainUrl) break; // основной URL уже настоящий
+      }
+      // Анимации не нашли — воспроизводим ручной «ЛКМ» пользователя.
+      if (!ranked.some((r) => r.score > 1)) {
+        tgqLog("pikabu-modeB: анимации не найдено — открываю лайтбокс (ЛКМ-сценарий)");
+        try {
+          const lbUrls = await simulateLightbox(articleEl);
+          tgqLog("pikabu-modeB: лайтбокс дал URL:", lbUrls.length);
+          for (const u of lbUrls) {
+            if (!ranked.some((r) => r.url === u)) ranked.push({ url: u, score: 500 });
+          }
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    } else {
+      for (const u of others.slice(0, 4)) ranked.push({ url: u, score: 0 });
+    }
+    ranked.sort((a, b) => b.score - a.score);
+    return ranked.map((r) => r.url);
+  }
+
+  // Отправка одного медиа в mode B (пикабу) с перебором кандидатов.
+  // base — payload БЕЗ mediaUrl (добавится для каждой попытки).
+  async function enqueueModeBWithCandidates(base, media, articleEl) {
+    let candidates = [media.url];
+    try {
+      candidates = await resolvePikabuModeBCandidates(media, articleEl);
+    } catch (e) {
+      tgqWarn("pikabu-modeB: не удалось собрать кандидатов:", e);
+    }
+    try {
+      tgqLog(
+        "pikabu-modeB: порядок отправки:",
+        candidates.map((u) => (u || "").split("/").pop().slice(0, 36)).join(" | ")
+      );
+    } catch (e) {
+      /* ignore */
+    }
+    let resp = null;
+    let attempts = 0;
+    for (const url of candidates) {
+      if (!url || attempts >= MAX_ENQUEUE_ATTEMPTS) break;
+      attempts++;
+      const payload = Object.assign({}, base, { mediaUrl: addCacheBust(url) });
+      tgqLog("pikabu-modeB: ENQUEUE #" + attempts, "mediaUrl=" + payload.mediaUrl);
+      try {
+        resp = await chrome.runtime.sendMessage(payload);
+      } catch (e) {
+        resp = { ok: false, error: e && e.message ? e.message : "нет связи с фоновым скриптом" };
+      }
+      tgqLog("pikabu-modeB: ответ бота:", resp);
+      if (resp && resp.ok) break;
+      if (!isStubError(resp)) break; // другая ошибка — перебор не поможет
+    }
+    return resp;
   }
 
   // --- Дедупликация (storage) ---
@@ -433,7 +772,8 @@
 
   // --- Отправка ВСЕГО поста в выбранную очередь (long-press popup) ---
   // single → одно ENQUEUE; multi → альбом (единый media_group_id, все медиа).
-  async function sendToQueueWithId(mediaList, permalink, queueId, sourceBtn) {
+  // articleEl передаётся для пикабу mode B (сбор URL-кандидатов из DOM поста).
+  async function sendToQueueWithId(mediaList, permalink, queueId, sourceBtn, articleEl) {
     if (!mediaList || !mediaList.length) return;
     if (sourceBtn) {
       sourceBtn.disabled = true;
@@ -445,28 +785,34 @@
     let lastError = null;
     for (const m of mediaList) {
       const isBlob = !m.url && m.kind === "video";
-      // viaFallback (18+/NSFW пикабу, resolved из страницы поста) → mode B:
-      // браузер скачает файл с куками и зальёт на сервер сам.
-      const payload = {
+      const mode = m.viaFallback ? "B" : isBlob ? "A" : config.mode;
+      // base payload без mediaUrl — его проставит отправка (кандидаты пикабу).
+      const base = {
         type: "ENQUEUE",
         pageUrl: permalink || location.href,
-        mediaUrl: m.url,
+        mediaUrl: null,
         referer: config.needsReferer ? location.origin + "/" : null,
         tags: extractTags(config),
         title: document.title,
         site: location.hostname.replace(/^www\./, ""),
-        mode: pickSendMode(m, config, isBlob),
+        mode,
         mediaGroupId: useMgid,
         queueId: queueId || null,
       };
       try {
-        const resp = await chrome.runtime.sendMessage(payload);
-        tgqLog(
-          "sendToQueueWithId: mode=" + payload.mode,
-          "mediaUrl=" + (payload.mediaUrl || "(null)"),
-          "ответ:",
-          resp
-        );
+        let resp;
+        if (mode === "B" && m.url && isPikabuSite()) {
+          resp = await enqueueModeBWithCandidates(base, m, articleEl || null);
+        } else {
+          base.mediaUrl = m.url;
+          tgqLog(
+            "sendToQueueWithId: mode=" + base.mode,
+            "mediaUrl=" + (base.mediaUrl || "(null)"),
+            "pageUrl=" + base.pageUrl
+          );
+          resp = await chrome.runtime.sendMessage(base);
+          tgqLog("sendToQueueWithId: ответ бота:", resp);
+        }
         if (resp && resp.ok) {
           sent++;
           await markSent(m.url, permalink, resp.post_id);
@@ -550,7 +896,7 @@
     // Удержание 2 сек → попап выбора очереди (все сайты, один механизм).
     attachLongPress(btn, async (queueId) => {
       const media = await resolveMediaForSend(articleEl, mediaList, btn);
-      sendToQueueWithId(media, permalink, queueId, btn);
+      sendToQueueWithId(media, permalink, queueId, btn, articleEl);
     });
 
     // Асинхронная проверка дедупликации — обновить метку кнопки.
@@ -621,30 +967,38 @@
     btn.textContent = "… Отправка";
 
     const isBlobVideo = !media.url && media.kind === "video";
+    const mode = media.viaFallback ? "B" : isBlobVideo ? "A" : config.mode;
     // blob: видео → mediaUrl=null + mode=A (бэкенд использует yt-dlp на permalink).
-    // img/gif пикабу → mode=B (CDN отдаёт картинки только с cookies браузера;
-    // сервер качал бы заглушку NSFW — см. pickSendMode).
+    // viaFallback (18+/NSFW пикабу) → mode=B: браузер скачает и зальёт сам.
     // pageUrl = permalink (НЕ location.href!) — иначе бот качает HTML ленты x.com/home.
-    const payload = {
+    const base = {
       type: "ENQUEUE",
       pageUrl: permalink || location.href,
-      mediaUrl: media.url,
+      mediaUrl: null,
       referer: config.needsReferer ? location.origin + "/" : null,
       tags: extractTags(config),
       title: document.title,
       site: location.hostname.replace(/^www\./, ""),
-      mode: pickSendMode(media, config, isBlobVideo),
+      mode,
       queueId: queueId || null,
     };
     tgqLog(
-      "sendSingle: mode=" + payload.mode,
-      "mediaUrl=" + (payload.mediaUrl || "(null — yt-dlp)"),
-      "pageUrl=" + payload.pageUrl
+      "sendSingle: mode=" + mode,
+      "mediaUrl=" + (media.url || "(null — yt-dlp)"),
+      "pageUrl=" + base.pageUrl
     );
 
     try {
-      const resp = await chrome.runtime.sendMessage(payload);
-      tgqLog("sendSingle: ответ бота:", resp);
+      let resp;
+      if (mode === "B" && media.url && isPikabuSite()) {
+        // Пикабу mode B: cache-bust + анализ GIF-кандидатов + перебор при «заглушке».
+        resp = await enqueueModeBWithCandidates(base, media, articleEl || null);
+      } else {
+        base.mediaUrl = media.url;
+        tgqLog("sendSingle: ENQUEUE mediaUrl=" + (base.mediaUrl || "(null)"));
+        resp = await chrome.runtime.sendMessage(base);
+        tgqLog("sendSingle: ответ бота:", resp);
+      }
       if (resp && resp.ok) {
         btn.textContent = resp.duplicate ? "✓ Уже было" : "✓ В очереди";
         btn.classList.add("tgq-done");
@@ -659,7 +1013,15 @@
         btn.textContent = "✗ Ошибка";
         btn.classList.add("tgq-error");
         btn.disabled = false; // разрешить повтор
-        tgqShowToast(resp?.error || "Ошибка отправки", "err");
+        if (isStubError(resp)) {
+          tgqShowToast(
+            "Пикабу отдаёт заглушку 18+ даже браузером. Проверьте: вы залогинены на pikabu.ru и включён показ 18+ в настройках профиля. Затем откройте пост заново и повторите.",
+            "err",
+            12000
+          );
+        } else {
+          tgqShowToast(resp?.error || "Ошибка отправки", "err");
+        }
       }
     } catch (e) {
       btn.textContent = "✗ Нет связи";
@@ -873,29 +1235,36 @@
         // Обновляем текст на активной кнопке.
         const activeBtn = useAlbum ? sendAlbumBtn : sendSeparateBtn;
         activeBtn.textContent = `Отправка ${i + 1}/${selected.length}…`;
-        const payload = {
+        const mode = m.viaFallback ? "B" : isBlob ? "A" : config.mode;
+        const base = {
           type: "ENQUEUE",
           // pageUrl = permalink (НЕ location.href) — иначе бот качает HTML ленты.
           pageUrl: permalink || location.href,
-          mediaUrl: m.url,
+          mediaUrl: null,
           referer: config.needsReferer ? location.origin + "/" : null,
           tags: extractTags(config),
           title: document.title,
           site: location.hostname.replace(/^www\./, ""),
-          mode: pickSendMode(m, config, isBlob),
+          mode,
           // media_group_id — одинаковый для всех выбранных медиа этого поста.
           // Бэкенд сохранит его; если у очереди group_albums=True, scheduler
           // отправит все посты с этим ID одним сообщением (send_media_group).
           mediaGroupId: useMgid,
         };
         try {
-          const resp = await chrome.runtime.sendMessage(payload);
-          tgqLog(
-            "sendSelected: mode=" + payload.mode,
-            "mediaUrl=" + (payload.mediaUrl || "(null)"),
-            "ответ:",
-            resp
-          );
+          let resp;
+          if (mode === "B" && m.url && isPikabuSite()) {
+            resp = await enqueueModeBWithCandidates(base, m, articleEl || null);
+          } else {
+            base.mediaUrl = m.url;
+            tgqLog(
+              "sendSelected: mode=" + base.mode,
+              "mediaUrl=" + (base.mediaUrl || "(null)"),
+              "pageUrl=" + base.pageUrl
+            );
+            resp = await chrome.runtime.sendMessage(base);
+            tgqLog("sendSelected: ответ бота:", resp);
+          }
           if (resp && resp.ok) {
             sent++;
             await markSent(m.url, permalink, resp.post_id);
