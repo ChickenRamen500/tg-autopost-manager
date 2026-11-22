@@ -188,6 +188,11 @@ CREATE TABLE IF NOT EXISTS task_queue (
     status     TEXT NOT NULL DEFAULT 'queued'
                CHECK(status IN ('queued', 'in_progress', 'done', 'error')),
     error      TEXT,
+    -- H6: момент ЗАХВАТА задачи worker'ом (take_next). Раньше stale-проверка
+    -- использовала created_at (время постановки в очередь) — задача, лежавшая
+    -- в очереди > stale_timeout до того как worker её взял, объявлялась stale
+    -- сразу после захвата и сбрасывалась (race с активной обработкой).
+    started_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );

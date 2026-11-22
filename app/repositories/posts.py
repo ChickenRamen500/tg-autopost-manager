@@ -182,6 +182,21 @@ async def set_tg_file_id(post_id: int, tg_file_id: str) -> bool:
     return changed
 
 
+async def clear_file_path(post_id: int) -> bool:
+    """Обнуляет file_path поста (ставит NULL).
+
+    Используется scheduler'ом при перекачке файла через worker: обнулённый
+    file_path заставляет worker не считать файл готовым, пока он не скачает
+    его заново по source_url.
+    """
+    db = get_db()
+    cur = await db.execute("UPDATE posts SET file_path = NULL WHERE id = ?", (post_id,))
+    await db.commit()
+    changed = cur.rowcount > 0
+    await cur.close()
+    return changed
+
+
 async def get_sent_file_paths() -> list[str]:
     """Пути к файлам всех отправленных постов (status='sent').
 
@@ -241,6 +256,23 @@ async def count_unsent_by_file_path(file_path: str, exclude_post_id: int | None 
     return int(row["c"]) if row else 0
 
 
+async def count_statuses_for_queue(queue_id: int) -> dict[str, int]:
+    """Распределение постов очереди по статусам (одним запросом).
+
+    Возвращает dict {status: count} для очереди. Статусы без постов отсутствуют
+    в результате — для удобства вызывающий код может .get(status, 0).
+    Используется уведомлением о запуске (сводка по очередям) и дашбордом.
+    """
+    db = get_db()
+    cur = await db.execute(
+        "SELECT status, COUNT(*) AS c FROM posts WHERE queue_id = ? GROUP BY status",
+        (queue_id,),
+    )
+    rows = await cur.fetchall()
+    await cur.close()
+    return {r["status"]: int(r["c"]) for r in rows}
+
+
 async def find_album_posts(queue_id: int, media_group_id: str, limit: int = 10) -> list[dict[str, Any]]:
     """Все pending-посты альбома (с одинаковым media_group_id) в очереди.
 
@@ -260,6 +292,27 @@ async def find_album_posts(queue_id: int, media_group_id: str, limit: int = 10) 
     rows = await cur.fetchall()
     await cur.close()
     return [_row_to_post(r) for r in rows]
+
+
+async def count_album_unready(queue_id: int, media_group_id: str) -> int:
+    """Количество постов альбома в статусах new/downloading (ещё не готовы к отправке).
+
+    Используется scheduler'ом (C3): если хотя бы один пост альбома ещё качается
+    worker'ом, весь альбом пропускается на этом тике — иначе альбом отправился бы
+    без недостающего поста (split), а тот дошёл бы позже отдельным сообщением.
+    """
+    db = get_db()
+    cur = await db.execute(
+        """
+        SELECT COUNT(*) AS c FROM posts
+        WHERE queue_id = ? AND media_group_id = ?
+          AND status IN ('new', 'downloading')
+        """,
+        (queue_id, media_group_id),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row["c"]) if row else 0
 
 
 async def get_post(post_id: int) -> dict[str, Any] | None:

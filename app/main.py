@@ -182,14 +182,37 @@ async def lifespan(_app: FastAPI):
     _deploy_notify_task = asyncio.create_task(_notify_restart_after_deploy(), name="deploy_restart_notify")
     _log_watcher_task = deploy_notify.start_log_error_watcher()
 
+    # 9. Уведомление о запуске/перезапуске бота (блок observability/UX):
+    # через STARTUP_NOTIFY_DELAY_SECONDS (по умолчанию 60) — даём polling'у и
+    # scheduler'у полностью подняться — отправляем в служебный канал ДВА
+    # сообщения: (1) «бот запущен, очереди загружены» + сводка по очередям с
+    # кол-вом постов; (2) описание последнего коммита GitHub (что сделано).
+    from app.services import startup_notify
+
+    async def _notify_startup_after_delay() -> None:
+        delay = settings.startup_notify_delay_seconds
+        if delay <= 0:
+            log.info("startup_notify: отключён (STARTUP_NOTIFY_DELAY_SECONDS=0)")
+            return
+        try:
+            await asyncio.sleep(delay)
+            await startup_notify.notify_startup()
+        except asyncio.CancelledError:
+            # shutdown до истечения задержки — нормально
+            raise
+
+    _startup_notify_task: asyncio.Task | None = None
+    if settings.startup_notify_delay_seconds > 0:
+        _startup_notify_task = asyncio.create_task(_notify_startup_after_delay(), name="startup_notify")
+
     try:
         yield
     finally:
         # Shutdown — закрываем ВСЕ ресурсы (code review CRITICAL #1)
         log.info("Остановка приложения…")
-        # Сначала отменяем свои фоновые задачи уведомлений (блок 8 lifespan) —
+        # Сначала отменяем свои фоновые задачи уведомлений (блок 8-9 lifespan) —
         # они могут обращаться к Bot, который закрывается ниже.
-        for _t in (_deploy_notify_task, _log_watcher_task):
+        for _t in (_deploy_notify_task, _log_watcher_task, _startup_notify_task):
             if _t and not _t.done():
                 _t.cancel()
         await deploy_notify.stop_log_error_watcher()
@@ -262,7 +285,7 @@ async def lifespan(_app: FastAPI):
         log.info("Приложение остановлено")
 
 
-app = FastAPI(title="TG Media Queue Bot", version="0.4.55-phase4", lifespan=lifespan)
+app = FastAPI(title="TG Media Queue Bot", version="0.4.63-phase4", lifespan=lifespan)
 
 # CORS для Chrome-расширения (Task 4): расширение делает fetch к bot_url с разных
 # хостов (x.com, gelbooru, ...) — без CORS-заголовков браузер блокирует запрос.

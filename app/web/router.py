@@ -480,6 +480,50 @@ def _safe_join(base: Path, subpath: str) -> Path | None:
     return resolved
 
 
+# C2 (security): системные/чувствительные директории, которые нельзя добавлять
+# как корни файлового браузера (иначе любой авторизованный пользователь получал
+# бы чтение /etc/passwd, ключей Docker, логов и т.п.). Проверка по resolved-пути.
+#
+# _SENSITIVE_EXACT — блокируем точное совпадение (корень диска/системы целиком):
+# пользователь должен указать конкретную подпапку с медиафайлами.
+_SENSITIVE_EXACT: set[str] = {
+    "/", "/app",
+    # Корни Windows-дисков целиком (C:\, D:\ ...) внутри контейнера —
+    # пользователь должен указать конкретную папку с медиа, а не весь диск.
+    "/mnt/c", "/mnt/d", "/mnt/e", "/mnt/f",
+    "/host_mnt/c", "/host_mnt/d",
+    # Корневые точки монтирования
+    "/mnt", "/media", "/host_mnt", "/volumes",
+}
+
+# _SENSITIVE_PREFIX — блокируем ЛЮБОЙ подпуть (любая глубина): системные директории
+_SENSITIVE_PREFIX: tuple[str, ...] = (
+    "/etc", "/proc", "/sys", "/dev", "/boot", "/usr", "/lib", "/lib64",
+    "/bin", "/sbin", "/run", "/var", "/root", "/home",
+    # Docker / секреты
+    "/run/secrets", "/.dockerenv",
+)
+
+
+def _is_sensitive_root(resolved_path: str) -> bool:
+    """True если resolved_path — системная/чувствительная директория.
+
+    - Точное совпадение с корнем диска/системы (/mnt/c, /, /app, …) → sensitive.
+    - Любой подпуть системной директории (/etc/passwd, /var/lib/docker, …) → sensitive.
+    - Конкретная папка пользователя (/mnt/c/Users/me/media) → НЕ sensitive (разрешено).
+    """
+    if not resolved_path:
+        return False
+    p = resolved_path.rstrip("/") or "/"
+    if p in _SENSITIVE_EXACT:
+        return True
+    for prefix in _SENSITIVE_PREFIX:
+        s = prefix.rstrip("/") or "/"
+        if p == s or p.startswith(s + "/"):
+            return True
+    return False
+
+
 _MEDIA_EXTS_WEB = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
                    ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 
@@ -1134,6 +1178,19 @@ async def web_local_files_roots_add(
         raise HTTPException(status_code=404, detail=f"Директория не существует: {p}")
 
     resolved = str(p.resolve())
+
+    # C2 (security): запретить добавлять системные/чувствительные директории
+    # как корни файлового браузера — иначе любой авторизованный пользователь
+    # мог бы читать /etc/passwd, ключи Docker, логи и т.п. через /web/local_files.
+    if _is_sensitive_root(resolved):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Корень «{resolved}» — системная/чувствительная директория, "
+                f"добавление запрещено из соображений безопасности. Укажите "
+                f"конкретную папку с медиафайлами (не корень диска/системы)."
+            ),
+        )
 
     # Читаем текущие пути из БД
     current = await app_settings_repo.get("web_local_roots") or ""

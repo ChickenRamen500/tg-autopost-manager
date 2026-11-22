@@ -80,15 +80,18 @@ async def _throttled_archive_send(
     *,
     op_name: str,
     post_id: int | None = None,
-) -> Any | None:
+) -> Any:
     """Отправляет в служебный канал с throttle + retry на TelegramRetryAfter.
 
     Гарантирует:
     - Минимальная пауза ARCHIVE_SEND_INTERVAL между запросами (даже если concurrent callers)
     - При 429 RetryAfter — sleep retry_after + 0.5 сек, retry 1 раз
-    - Любые другие ошибки — логируются, не роняют процесс (архив не критичен)
+    - Любые другие ошибки ПОДНИМАЮТСЯ (caller решает: archive_post — fallback на
+      document, archive_album — return False). Раньше всё проглатывалось и
+      возвращалось None → photo→document fallback был мёртвым кодом, а
+      archive_post ложно возвращал True («архивирован») при провале (H1/H2).
 
-    Возвращает результат send_callable или None при ошибке.
+    Возвращает результат send_callable (никогда не None при успехе).
     """
     from aiogram.exceptions import TelegramRetryAfter
 
@@ -104,20 +107,18 @@ async def _throttled_archive_send(
         try:
             result = await send_callable()
         except TelegramRetryAfter as e:
-            retry = float(e.retry_after) + 0.5
+            # M5: валидируем retry_after (может быть None/нечисловым) и ограничиваем
+            try:
+                retry = min(float(e.retry_after or 1) + 0.5, 60.0)
+            except (TypeError, ValueError):
+                retry = 5.0
             log.warning(
                 "Flood control на %s (пост #%s): ждём %.1f сек, retry",
                 op_name, post_id, retry,
             )
             await asyncio.sleep(retry)
-            try:
-                result = await send_callable()
-            except Exception as e2:  # noqa: BLE001 — архив не критичен
-                log.warning("Retry %s тоже упал (пост #%s): %s", op_name, post_id, e2)
-                return None
-        except Exception as e:  # noqa: BLE001 — архив не критичен
-            log.warning("Не удалось выполнить %s (пост #%s): %s", op_name, post_id, e)
-            return None
+            # retry может поднять — пробрасываем (caller обработает через свой except)
+            result = await send_callable()
 
         # Обновляем время последней отправки (даже если была RetryAfter — после
         # успешного retry сервер Telegram уже не считает запрос flood'ом, но
@@ -232,16 +233,23 @@ async def _do_album_archive_check(media_group_id: str) -> None:
             )
             return
 
-        # Все посты готовы → помечаем как архивированную ДО вызова archive_album,
-        # чтобы параллельный таймер не заархивировал повторно.
-        _archived_groups[media_group_id] = now
-
-        # Все посты готовы → архивируем как один альбом
-        await archive_album(group_posts, 0)
-        log.info(
-            "Альбом %s архивирован после debounce (%d постов)",
-            media_group_id, len(group_posts),
-        )
+        # Все посты готовы → архивируем как один альбом. H3: помечаем
+        # архивированной ТОЛЬКО при успехе — раньше marker ставился до отправки,
+        # и при провале archive_album (возвращает False без исключения) группа
+        # оставалась в _archived_groups навсегда и повторная архивация не выполнялась.
+        ok = await archive_album(group_posts, 0)
+        if ok:
+            _archived_groups[media_group_id] = now
+            log.info(
+                "Альбом %s архивирован после debounce (%d постов)",
+                media_group_id, len(group_posts),
+            )
+        else:
+            log.warning(
+                "Альбом %s: archive_album вернул ошибку — не помечаем архивированным, "
+                "попробуем при следующем поступлении поста группы",
+                media_group_id,
+            )
     except asyncio.CancelledError:
         # Таймер отменён новым постом группы — нормально
         pass
@@ -338,7 +346,9 @@ async def archive_post(post: dict[str, Any], target_channel_id: int, all_types: 
                     op_name="send_photo", post_id=post_id,
                 )
             except Exception as photo_err:  # noqa: BLE001
-                # PHOTO_INVALID_DIMENSIONS или file too big (>10MB) — fallback на document
+                # PHOTO_INVALID_DIMENSIONS или file too big (>10MB) — fallback на document.
+                # H1: теперь это живой код (_throttled_archive_send пробрасывает исключение,
+                # раньше проглатывал → fallback никогда не срабатывал).
                 err_str = str(photo_err)
                 if "too big for a photo" in err_str or "PHOTO_INVALID_DIMENSIONS" in err_str:
                     log.warning("Пост #%s: фото слишком большое/маленькое — fallback на send_document", post_id)

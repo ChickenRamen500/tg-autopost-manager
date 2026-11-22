@@ -137,6 +137,11 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
         ("tag_subscriptions", "notify_interval_minutes", "ALTER TABLE tag_subscriptions ADD COLUMN notify_interval_minutes INTEGER NOT NULL DEFAULT 60 CHECK(notify_interval_minutes >= 0)"),
         ("tag_subscriptions", "last_notified_at", "ALTER TABLE tag_subscriptions ADD COLUMN last_notified_at DATETIME"),
         ("tag_subscriptions", "default_queue_id", "ALTER TABLE tag_subscriptions ADD COLUMN default_queue_id INTEGER"),
+        # H6: started_at в task_queue — момент ЗАХВАТА задачи worker'ом.
+        # Stale-проверка теперь использует started_at, а не created_at (которое
+        # равно времени постановки в очередь и приводит к ложному stale-сбросу
+        # долго лежавших в очереди задач сразу после их захвата).
+        ("task_queue", "started_at", "ALTER TABLE task_queue ADD COLUMN started_at DATETIME"),
     ]
     for table, column, ddl in migrations:
         if not await _column_exists(db, table, column):

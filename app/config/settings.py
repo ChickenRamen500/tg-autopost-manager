@@ -162,6 +162,20 @@ class Settings:
         default_factory=lambda: _get_int("LOG_ERRORS_MAX_LINES_PER_REPORT", 10)
     )
 
+    # --- Уведомление о запуске/перезапуске бота ---
+    # Через сколько секунд после старта отправить в служебный канал сводку
+    # «бот запущен, очереди загружены» + описание последнего коммита GitHub.
+    # 0 — функция отключена. По умолчанию 60 сек (даём polling'у и scheduler'у
+    # подняться, чтобы бот был готов отправлять).
+    startup_notify_delay_seconds: int = field(
+        default_factory=lambda: _get_int("STARTUP_NOTIFY_DELAY_SECONDS", 60)
+    )
+    # Репозиторий GitHub для получения описания последнего коммита (формат
+    # owner/repo). По умолчанию — репозиторий этого проекта.
+    github_repo: str = field(default_factory=lambda: _get("GITHUB_REPO", "ChickenRamen500/tg-autopost-manager"))
+    # Ветка для получения последнего коммита.
+    github_branch: str = field(default_factory=lambda: _get("GITHUB_BRANCH", "main"))
+
     # --- Пути ---
     data_dir: Path = BASE_DIR / "data"
     db_path: Path = data_dir / "bot.db"

@@ -48,12 +48,16 @@ async def take_next() -> dict[str, Any] | None:
 
     Использует UPDATE ... RETURNING (SQLite ≥3.35) — один SQL-запрос, без гонок.
     Возвращает задачу с распарсенным payload или None, если очередь пуста.
+
+    H6: фиксирует started_at = CURRENT_TIMESTAMP — момент захвата. Stale-проверка
+    использует started_at (а не created_at), чтобы долго лежавшая в очереди
+    задача не объявлялась stale сразу после захвата.
     """
     db = get_db()
     cur = await db.execute(
         """
         UPDATE task_queue
-        SET status = 'in_progress', attempts = attempts + 1
+        SET status = 'in_progress', attempts = attempts + 1, started_at = CURRENT_TIMESTAMP
         WHERE id = (
             SELECT id FROM task_queue WHERE status = 'queued'
             ORDER BY created_at ASC LIMIT 1
@@ -119,19 +123,22 @@ async def requeue(task_id: int, reset_attempts: bool = False) -> bool:
 async def count_stale_in_progress(timeout_minutes: int = 30) -> int:
     """Количество зависших in_progress задач (worker упал, не вернув done/error).
 
-    in_progress старше timeout_minutes считается «перевисшим» — его worker
-    уже не подтвердит (упал / рестарт контейнера / OOM-kill).
+    in_progress, захваченное раньше timeout_minutes назад, считается «перевисшим» —
+    его worker уже не подтвердит (упал / рестарт контейнера / OOM-kill).
+
+    H6: сравнение по started_at (момент захвата задачей worker'ом), а не created_at
+    (момент постановки в очередь). COALESCE(started_at, created_at) — для старых
+    строк, захваченных до миграции (started_at ещё NULL).
 
     Сравнение <= (а не <): при timeout_minutes=0 все in_progress-задачи должны
     считаться stale, а строгий < пропускал бы задачи, созданные в ту же
-    секунду (created_at == now, T < T = False). Это критично для тестов и
-    для случая «worker упал мгновенно после старта».
+    секунду (started_at == now, T < T = False).
     """
     db = get_db()
     cur = await db.execute(
         "SELECT COUNT(*) AS c FROM task_queue "
         "WHERE status = 'in_progress' "
-        "AND datetime(created_at, '+' || ? || ' minutes') <= datetime('now')",
+        "AND datetime(COALESCE(started_at, created_at), '+' || ? || ' minutes') <= datetime('now')",
         (timeout_minutes,),
     )
     row = await cur.fetchone()
@@ -145,12 +152,14 @@ async def reset_stale_in_progress(timeout_minutes: int = 30) -> int:
     Возвращает количество сброшенных задач. Idempotent: при повторном вызове
     без новых stale-задач вернёт 0. Атомарный UPDATE ... RETURNING был бы
     избыточен — фоновый cleanup запускается по расписанию, гонок нет.
+
+    H6: stale-проверка по started_at (COALESCE на created_at для старых строк).
     """
     db = get_db()
     cur = await db.execute(
         "UPDATE task_queue SET status = 'queued' "
         "WHERE status = 'in_progress' "
-        "AND datetime(created_at, '+' || ? || ' minutes') <= datetime('now')",
+        "AND datetime(COALESCE(started_at, created_at), '+' || ? || ' minutes') <= datetime('now')",
         (timeout_minutes,),
     )
     await db.commit()

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -65,7 +66,7 @@ _SKIP_REMIND_SECONDS = 1800.0  # напоминание о зависшей оч
 def _log_skip(queue_id: int, reason: str, message: str) -> None:
     """Логирует причину пропуска тика очереди (INFO, без спама: по смене состояния)."""
     state = (reason, message)
-    now = asyncio.get_event_loop().time()
+    now = time.monotonic()
     if _skip_state.get(queue_id) == state and (
         now - _last_skip_log.get(queue_id, 0.0)
     ) < _SKIP_REMIND_SECONDS:
@@ -326,6 +327,8 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
     # (fallback в except ниже и подмена file_type здесь).
     send_file_type = file_type
     send_path = file_path
+    # H7: временный пережатый _tg.jpg не отслеживается в БД — чистим сами (иначе копится)
+    compressed_tmp: str | None = None
     if file_type == "photo" and os.path.getsize(file_path) > _TELEGRAM_PHOTO_MAX_BYTES:
         try:
             from app.services.media.transcode import compress_photo_for_telegram
@@ -336,6 +339,7 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
             compressed = None
         if compressed:
             send_path = compressed
+            compressed_tmp = compressed
             log.info(
                 "Пост #%s: фото > 10 МБ пережато в %s (%d байт) — отправляю как photo",
                 post["id"], send_path, os.path.getsize(send_path),
@@ -347,36 +351,43 @@ async def _send_one_post(post: dict[str, Any], channel: dict[str, Any], queue: d
             )
             send_file_type = "document"
 
-    doc = FSInputFile(send_path, filename=os.path.basename(send_path))
     try:
-        if send_file_type == "photo":
-            result = await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
-        elif send_file_type == "video":
-            result = await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
-        elif send_file_type == "gif":
-            result = await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
-        elif send_file_type == "audio":
-            result = await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
-        elif send_file_type == "voice":
-            result = await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
-        else:
-            result = await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
-    except Exception as e:
-        # PHOTO_INVALID_DIMENSIONS / too big for a photo: fallback на document
-        if file_type == "photo" and _is_photo_too_big_error(e):
-            log.warning(
-                "Пост #%s: %s — fallback на send_document",
-                post["id"], type(e).__name__,
-            )
-            doc2 = FSInputFile(file_path, filename=os.path.basename(file_path))
-            result = await bot.send_document(chat_id=chat_id, document=doc2, caption=caption)
-            await _capture_sent_file_id(post["id"], result)
-            log.info("Пост #%s отправлен как document (fallback)", post["id"])
-            return
-        raise
-    # Захват file_id из результата отправки: повторные отправки пойдут по file_id
-    await _capture_sent_file_id(post["id"], result)
-    log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
+        doc = FSInputFile(send_path, filename=os.path.basename(send_path))
+        try:
+            if send_file_type == "photo":
+                result = await bot.send_photo(chat_id=chat_id, photo=doc, caption=caption)
+            elif send_file_type == "video":
+                result = await bot.send_video(chat_id=chat_id, video=doc, caption=caption)
+            elif send_file_type == "gif":
+                result = await bot.send_animation(chat_id=chat_id, animation=doc, caption=caption)
+            elif send_file_type == "audio":
+                result = await bot.send_audio(chat_id=chat_id, audio=doc, caption=caption)
+            elif send_file_type == "voice":
+                result = await bot.send_voice(chat_id=chat_id, voice=doc, caption=caption)
+            else:
+                result = await bot.send_document(chat_id=chat_id, document=doc, caption=caption)
+        except Exception as e:
+            # PHOTO_INVALID_DIMENSIONS / too big for a photo: fallback на document
+            if file_type == "photo" and _is_photo_too_big_error(e):
+                log.warning(
+                    "Пост #%s: %s — fallback на send_document",
+                    post["id"], type(e).__name__,
+                )
+                doc2 = FSInputFile(file_path, filename=os.path.basename(file_path))
+                result = await bot.send_document(chat_id=chat_id, document=doc2, caption=caption)
+                await _capture_sent_file_id(post["id"], result)
+                log.info("Пост #%s отправлен как document (fallback)", post["id"])
+                return
+            raise
+        # Захват file_id из результата отправки: повторные отправки пойдут по file_id
+        await _capture_sent_file_id(post["id"], result)
+        log.info("Пост #%s отправлен локальным файлом %s", post["id"], file_path)
+    finally:
+        if compressed_tmp:
+            try:
+                os.remove(compressed_tmp)
+            except OSError:
+                pass
 
 
 async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any], queue: dict | None = None) -> None:
@@ -404,97 +415,139 @@ async def _send_album_group(posts: list[dict[str, Any]], channel: dict[str, Any]
     chat_id = channel["tg_chat_id"]
 
     media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument | InputMediaAudio] = []
-    for i, p in enumerate(posts):
-        # Caption только для первого элемента альбома (ограничение Telegram)
-        raw_caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
-
-        # Настройки очереди: strip_caption (убирать подпись), signature_template (добавить свою)
-        # Та же логика что в _send_one_post — иначе альбомы получали подпись без учёта настроек.
-        if i == 0 and queue:
-            if queue.get("strip_caption"):
-                raw_caption = None
-            sig = queue.get("signature_template")
-            if sig:
-                raw_caption = f"{sig}\n{raw_caption}" if raw_caption else sig
-        # P2-13: Telegram limit caption 1024 chars (для album — 1024, не 4096)
-        if raw_caption and len(raw_caption) > 1024:
-            raw_caption = raw_caption[:1021] + "..."
-        caption = raw_caption
-
-        ft = p["file_type"]
-        fid = p.get("tg_file_id")
-        file_path = p.get("file_path")
-
-        # Определяем источник медиа: tg_file_id (приоритет) или file_path (локальный файл)
-        if fid:
-            media_obj = fid
-        elif file_path:
-            # Проверка существования файла (см. комментарий в _send_one_post)
-            if not os.path.exists(file_path):
-                raise RuntimeError(
-                    f"Пост #{p['id']}: файл не найден на диске: {file_path}. "
-                    f"Файл удалён или контейнер пересоздан. "
-                    f"Удалите пост или переотправьте через расширение."
-                )
-            send_path = file_path
-            # Фото > 10 МБ Telegram не принимает даже в альбомах: пережимаем
-            # в JPEG; не получилось — отправляем элемент как document.
-            if ft == "photo" and os.path.getsize(file_path) > _TELEGRAM_PHOTO_MAX_BYTES:
-                try:
-                    from app.services.media.transcode import compress_photo_for_telegram
-
-                    compressed = await compress_photo_for_telegram(file_path)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("Пост #%s альбома: пережатие фото не удалось: %s", p["id"], e)
-                    compressed = None
-                if compressed:
-                    send_path = compressed
-                    log.info("Пост #%s альбома: фото > 10 МБ пережато в %s", p["id"], send_path)
-                else:
-                    log.info("Пост #%s альбома: фото > 10 МБ — элемент уйдёт как document", p["id"])
-                    ft = "document"
-            media_obj = FSInputFile(send_path)
-            log.info("Пост #%s альбома: отправка локального файла %s", p["id"], send_path)
-        else:
-            log.warning("Пост #%s альбома без tg_file_id и file_path — пропускаем", p["id"])
-            raise RuntimeError(f"Пост #{p['id']}: альбом требует tg_file_id или file_path для всех файлов")
-
-        if ft == "photo":
-            media.append(InputMediaPhoto(media=media_obj, caption=caption))
-        elif ft == "video":
-            media.append(InputMediaVideo(media=media_obj, caption=caption))
-        elif ft == "audio":
-            media.append(InputMediaAudio(media=media_obj, caption=caption))
-        else:
-            media.append(InputMediaDocument(media=media_obj, caption=caption))
-
-    if len(media) == 1:
-        await _send_one_post(posts[0], channel, queue)
-        return
-
+    # H7: пережатые _tg.jpg временные файлы альбома — чистим после отправки
+    compressed_tmps: list[str] = []
     try:
-        result = await bot.send_media_group(chat_id=chat_id, media=media)
-    except Exception as e:
-        # Страховка: даже после пережатия Telegram может отклонить альбом
-        # («too big for a photo»). Отправляем каждый пост отдельно —
-        # _send_one_post сам решает: photo / пережатое photo / document.
-        if "too big for a photo" in str(e):
-            log.warning(
-                "Альбом (media_group_id=%s) отклонён целиком (%s) — отправляю посты по одному",
-                posts[0].get("media_group_id"), type(e).__name__,
-            )
-            for p in posts:
-                await _send_one_post(p, channel, queue)
+        for i, p in enumerate(posts):
+            # Caption только для первого элемента альбома (ограничение Telegram)
+            raw_caption = (p.get("processed_caption") or p.get("original_caption")) if i == 0 else None
+
+            # Настройки очереди: strip_caption (убирать подпись), signature_template (добавить свою)
+            # Та же логика что в _send_one_post — иначе альбомы получали подпись без учёта настроек.
+            if i == 0 and queue:
+                if queue.get("strip_caption"):
+                    raw_caption = None
+                sig = queue.get("signature_template")
+                if sig:
+                    raw_caption = f"{sig}\n{raw_caption}" if raw_caption else sig
+            # P2-13: Telegram limit caption 1024 chars (для album — 1024, не 4096)
+            if raw_caption and len(raw_caption) > 1024:
+                raw_caption = raw_caption[:1021] + "..."
+            caption = raw_caption
+
+            ft = p["file_type"]
+            fid = p.get("tg_file_id")
+            file_path = p.get("file_path")
+
+            # Определяем источник медиа: tg_file_id (приоритет) или file_path (локальный файл)
+            if fid:
+                media_obj = fid
+            elif file_path:
+                # C1: проверка существования файла с той же логикой что в _send_one_post —
+                # если source_url это HTTP, поднимаем FileMissingError (caller перекачает
+                # через worker), иначе RuntimeError (перекачать нельзя). Раньше тут всегда
+                # был RuntimeError → альбомы с удалёнными файлами никогда не перекачивались.
+                if not os.path.exists(file_path):
+                    source_url = p.get("source_url") or ""
+                    source_type = p.get("source_type") or ""
+                    if source_type == "local_file" or source_url.startswith("/") or source_url.startswith("\\"):
+                        raise RuntimeError(
+                            f"Пост #{p['id']}: файл не найден на диске: {file_path}. "
+                            f"Локальный файл удалён или перемещён. Удалите пост или "
+                            f"переотправьте файл через браузер локальных файлов."
+                        )
+                    if source_url.startswith("http"):
+                        raise FileMissingError(
+                            post_id=p["id"],
+                            file_path=file_path,
+                            source_url=source_url,
+                            message=(
+                                f"Пост #{p['id']}: файл не найден на диске: {file_path}. "
+                                f"Перекачиваем через worker (source_url={source_url})."
+                            ),
+                        )
+                    raise RuntimeError(
+                        f"Пост #{p['id']}: файл не найден на диске: {file_path}. "
+                        f"source_url отсутствует или не HTTP — перекачать нельзя. "
+                        f"Удалите пост или переотправьте через расширение."
+                    )
+                send_path = file_path
+                # Фото > 10 МБ Telegram не принимает даже в альбомах: пережимаем
+                # в JPEG; не получилось — отправляем элемент как document.
+                if ft == "photo" and os.path.getsize(file_path) > _TELEGRAM_PHOTO_MAX_BYTES:
+                    try:
+                        from app.services.media.transcode import compress_photo_for_telegram
+
+                        compressed = await compress_photo_for_telegram(file_path)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Пост #%s альбома: пережатие фото не удалось: %s", p["id"], e)
+                        compressed = None
+                    if compressed:
+                        send_path = compressed
+                        compressed_tmps.append(compressed)
+                        log.info("Пост #%s альбома: фото > 10 МБ пережато в %s", p["id"], send_path)
+                    else:
+                        log.info("Пост #%s альбома: фото > 10 МБ — элемент уйдёт как document", p["id"])
+                        ft = "document"
+                media_obj = FSInputFile(send_path)
+                log.info("Пост #%s альбома: отправка локального файла %s", p["id"], send_path)
+            else:
+                log.warning("Пост #%s альбома без tg_file_id и file_path — пропускаем", p["id"])
+                raise RuntimeError(f"Пост #{p['id']}: альбом требует tg_file_id или file_path для всех файлов")
+
+            if ft == "photo":
+                media.append(InputMediaPhoto(media=media_obj, caption=caption))
+            elif ft == "video":
+                media.append(InputMediaVideo(media=media_obj, caption=caption))
+            elif ft == "audio":
+                media.append(InputMediaAudio(media=media_obj, caption=caption))
+            else:
+                media.append(InputMediaDocument(media=media_obj, caption=caption))
+
+        if len(media) == 1:
+            await _send_one_post(posts[0], channel, queue)
             return
-        raise
-    # Захват file_id для каждого поста альбома (message[i] ↔ media[i] ↔ posts[i])
-    if isinstance(result, (list, tuple)):
-        for i, msg in enumerate(result):
-            if i < len(posts):
-                await _capture_sent_file_id(posts[i]["id"], msg)
-    else:
-        await _capture_sent_file_id(posts[0]["id"], result)
-    log.info("Альбом (%d постов, media_group_id=%s) отправлен в канал %s", len(posts), posts[0].get("media_group_id"), chat_id)
+
+        try:
+            result = await bot.send_media_group(chat_id=chat_id, media=media)
+        except Exception as e:
+            # Страховка: даже после пережатия Telegram может отклонить альбом
+            # («too big for a photo» / PHOTO_INVALID_DIMENSIONS). Отправляем каждый
+            # пост отдельно — _send_one_post сам решает: photo / пережатое photo / document.
+            if _is_photo_too_big_error(e):
+                log.warning(
+                    "Альбом (media_group_id=%s) отклонён целиком (%s) — отправляю посты по одному",
+                    posts[0].get("media_group_id"), type(e).__name__,
+                )
+                # C2: помечаем уже доставленные посты sent по мере отправки, иначе при
+                # сбое среднего поста они остались бы pending и продублировались при retry.
+                sent_ids: list[int] = []
+                for p in posts:
+                    try:
+                        await _send_one_post(p, channel, queue)
+                        sent_ids.append(p["id"])
+                    except Exception:
+                        if sent_ids:
+                            await posts_repo.bulk_mark_sent(sent_ids)
+                            await _auto_delete_sent_files(sent_ids)
+                        raise
+                return
+            raise
+        # Захват file_id для каждого поста альбома (message[i] ↔ media[i] ↔ posts[i])
+        if isinstance(result, (list, tuple)):
+            for i, msg in enumerate(result):
+                if i < len(posts):
+                    await _capture_sent_file_id(posts[i]["id"], msg)
+        else:
+            await _capture_sent_file_id(posts[0]["id"], result)
+        log.info("Альбом (%d постов, media_group_id=%s) отправлен в канал %s", len(posts), posts[0].get("media_group_id"), chat_id)
+    finally:
+        # H7: чистим пережатые временные _tg.jpg файлы альбома
+        for tmp in compressed_tmps:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 async def _redownload_post(post_id: int, queue_id: int, queue_name: str) -> None:
@@ -540,10 +593,10 @@ async def _redownload_post(post_id: int, queue_id: int, queue_name: str) -> None
         )
         return
 
-    # 2. Обнуляем file_path (worker не должен считать файл готовым)
-    db = posts_repo.get_db()
-    await db.execute("UPDATE posts SET file_path = NULL WHERE id = ?", (post_id,))
-    await db.commit()
+    # 2. Обнуляем file_path (worker не должен считать файл готовым).
+    # M2: через репозиторий clear_file_path — раньше прямой db.execute без
+    # cur.close() → утечка курсора + обход репозиторного паттерна.
+    await posts_repo.clear_file_path(post_id)
 
     # 3. Меняем статус на 'new' (worker ищет new для скачивания)
     await posts_repo.update_status(post_id, "new")
@@ -625,7 +678,7 @@ async def send_post_from_queue(queue_id: int) -> None:
     _clear_skip(queue_id)  # пост найден — все проверки пройдены: сбрасываем состояние пропуска
 
     # Троттлинг (ТЗ §2.5.2 п.3) — защита от 429 при коротком интервале очереди
-    now = asyncio.get_event_loop().time()
+    now = time.monotonic()
     last = _last_send.get(queue_id, 0.0)
     wait = settings.send_throttle_seconds - (now - last)
     if wait > 0:
@@ -640,6 +693,17 @@ async def send_post_from_queue(queue_id: int) -> None:
     if group_albums and mgid:
         album_posts = await posts_repo.find_album_posts(queue_id, mgid, limit=10)
         if len(album_posts) > 1:
+            # C3: если часть постов альбома ещё качается (new/downloading) —
+            # пропускаем тик, иначе альбом уйдёт без недостающих постов (split),
+            # а докачавшийся позже пост придёт отдельным сообщением.
+            unready = await posts_repo.count_album_unready(queue_id, mgid)
+            if unready:
+                _log_skip(
+                    queue_id, "album_not_ready",
+                    f"Очередь #{queue_id} «{queue['name']}»: альбом {mgid} — {unready} "
+                    f"пост(ов) ещё качаются (new/downloading), ждём полной готовности — пропуск тика.",
+                )
+                return
             # Отправляем весь альбом одним вызовом
             sent_ids: list[int] = []
             max_attempts = settings.max_send_attempts
@@ -647,7 +711,7 @@ async def send_post_from_queue(queue_id: int) -> None:
             for _attempt in range(1, max_attempts + 1):
                 try:
                     await _send_album_group(album_posts, channel, queue)
-                    _last_send[queue_id] = asyncio.get_event_loop().time()
+                    _last_send[queue_id] = time.monotonic()
                     # Атомарно помечаем ВСЕ посты альбома как sent (P1-9: одна транзакция)
                     post_ids = [p["id"] for p in album_posts]
                     await posts_repo.bulk_mark_sent(post_ids)
@@ -655,6 +719,8 @@ async def send_post_from_queue(queue_id: int) -> None:
                     log.info("Альбом отправлен: посты %s", sent_ids)
                     # Автоочистка: скачанные файлы больше не нужны на диске
                     await _auto_delete_sent_files(post_ids)
+                    # H5: уведомления (блок C) — для альбомов тоже проверяем остаток очереди
+                    await _check_queue_notifications(queue, channel)
                     return
                 except FileMissingError as e:
                     # Один из постов альбома потерял файл → перекачиваем.
@@ -664,14 +730,26 @@ async def send_post_from_queue(queue_id: int) -> None:
                     return
                 except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
                     last_error = str(e)
+                    retry_after = getattr(e, "retry_after", None)
+                    if retry_after:
+                        # H4: 429 учитываем в max_attempts, иначе persistent flood
+                        # control мог крутить альбом бесконечно без mark_failed.
+                        log.warning(
+                            "429 rate limit на альбом %s: ждём %s сек (попытка %d/%d)",
+                            mgid, retry_after, _attempt, max_attempts,
+                        )
+                        await asyncio.sleep(float(retry_after))
+                        if _attempt >= max_attempts:
+                            for p in album_posts:
+                                await posts_repo.mark_failed(p["id"], last_error)
+                            log.error("Альбом %s переведён в failed после %d попыток (429)", mgid, max_attempts)
+                            from app.services.notifications import notify_send_error
+                            await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
+                            return
+                        continue
                     # Инкрементим попытки для всех постов альбома
                     for p in album_posts:
                         await posts_repo.increment_attempt(p["id"])
-                    retry_after = getattr(e, "retry_after", None)
-                    if retry_after:
-                        log.warning("429 rate limit на альбом %s: ждём %s сек", mgid, retry_after)
-                        await asyncio.sleep(float(retry_after))
-                        continue
                     log.warning("Ошибка отправки альбома %s (попытка %d/%d): %s", mgid, _attempt, max_attempts, e)
                     if _attempt >= max_attempts:
                         for p in album_posts:
@@ -682,7 +760,7 @@ async def send_post_from_queue(queue_id: int) -> None:
                         await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
                         return
                     await asyncio.sleep(2.0)
-            _last_send[queue_id] = asyncio.get_event_loop().time()
+            _last_send[queue_id] = time.monotonic()
             return
         # Альбом из 1 поста или не найден — отправляем как обычный пост
 
@@ -691,7 +769,7 @@ async def send_post_from_queue(queue_id: int) -> None:
     for _attempt in range(1, max_attempts + 1):
         try:
             await _send_one_post(post, channel, queue)
-            _last_send[queue_id] = asyncio.get_event_loop().time()
+            _last_send[queue_id] = time.monotonic()
             await posts_repo.mark_sent(post["id"])
             # Автоочистка: скачанный файл больше не нужен на диске
             await _auto_delete_sent_files([post["id"]])
@@ -722,11 +800,21 @@ async def send_post_from_queue(queue_id: int) -> None:
                 from app.services.notifications import notify_send_error
                 await notify_send_error(queue_id, queue["name"], post["id"], last_error)
                 return
-            # 429 Too Many Requests — retry_after
+            # 429 Too Many Requests — retry_after (H4: учитываем в max_attempts,
+            # иначе persistent flood control мог крутить пост бесконечно без failed).
             retry_after = getattr(e, "retry_after", None)
             if retry_after:
-                log.warning("429 rate limit на пост #%s: ждём %s сек", post["id"], retry_after)
+                log.warning(
+                    "429 rate limit на пост #%s: ждём %s сек (попытка %d/%d)",
+                    post["id"], retry_after, _attempt, max_attempts,
+                )
                 await asyncio.sleep(float(retry_after))
+                if _attempt >= max_attempts:
+                    await posts_repo.mark_failed(post["id"], last_error)
+                    log.error("Пост #%s переведён в failed после %d попыток (429): %s", post["id"], max_attempts, last_error)
+                    from app.services.notifications import notify_send_error
+                    await notify_send_error(queue_id, queue["name"], post["id"], last_error)
+                    return
                 continue
             attempts_done = await posts_repo.increment_attempt(post["id"])
             log.warning("Ошибка отправки поста #%s (попытка %d/%d): %s", post["id"], attempts_done, max_attempts, e)
@@ -740,7 +828,7 @@ async def send_post_from_queue(queue_id: int) -> None:
                 return
             await asyncio.sleep(2.0)
 
-    _last_send[queue_id] = asyncio.get_event_loop().time()
+    _last_send[queue_id] = time.monotonic()
 
 
 async def _check_queue_notifications(queue: dict, channel: dict) -> None:
