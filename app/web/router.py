@@ -1301,6 +1301,43 @@ async def action_assign_group(
     return _redirect_back(request)
 
 
+@router.post("/web/posts/{post_id}/send_now")
+async def action_send_post_now(
+    post_id: int,
+    request: Request,
+    _user: str = Depends(verify_web_user),
+) -> RedirectResponse:
+    """Ручная отправка поста прямо сейчас (кнопка «Отправить сейчас» на странице очереди).
+
+    Отправка идёт фоновым заданием (asyncio.create_task): страница сразу
+    редиректится обратно, результат виден по статусу поста (pending → sent)
+    и в логах scheduler'а. Ошибки доставки обрабатываются штатно —
+    retry → failed → уведомление админу (как при интервальной отправке).
+    """
+    post = await posts_repo.get_post(post_id)
+    if post is None:
+        raise HTTPException(status_code=404, detail=f"Пост #{post_id} не найден")
+
+    log.info("web: ручная отправка поста #%s запрошена (user=%s)", post_id, _user)
+
+    from app.scheduler import send_post_now  # ленивый импорт — цикл web↔scheduler
+
+    async def _runner() -> None:
+        try:
+            reason = await send_post_now(post_id)
+            if reason:
+                log.warning("web: ручная отправка поста #%s отклонена: %s", post_id, reason)
+            else:
+                log.info("web: ручная отправка поста #%s выполнена (user=%s)", post_id, _user)
+        except Exception as e:  # noqa: BLE001 — фоновая задача не должна ронять event loop
+            log.error(
+                "web: ручная отправка поста #%s упала с ошибкой: %s", post_id, e, exc_info=True
+            )
+
+    asyncio.create_task(_runner())
+    return _redirect_back(request)
+
+
 @router.post("/web/group/{media_group_id}/delete")
 async def action_delete_group(
     media_group_id: str,

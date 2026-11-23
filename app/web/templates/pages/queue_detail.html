@@ -115,6 +115,11 @@
                         </td>
                         <td class="small text-muted">{{ p.created_at }}</td>
                         <td class="text-end">
+                            <form method="post" action="/web/posts/{{ p.id }}/send_now" class="d-inline" data-confirm="Отправить пост #{{ p.id }} в канал прямо сейчас (без ожидания интервала очереди)?">
+                                <button type="submit" class="btn btn-sm btn-outline-primary" title="Отправить сейчас">
+                                    <i class="bi bi-send"></i>
+                                </button>
+                            </form>
                             <form method="post" action="/web/posts/{{ p.id }}/assign/0" class="d-inline" data-confirm="Переместить пост #{{ p.id }} во Входящие?">
                                 <button type="submit" class="btn btn-sm btn-outline-secondary" title="Во Входящие">
                                     <i class="bi bi-inbox"></i>

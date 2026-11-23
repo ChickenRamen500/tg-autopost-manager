@@ -617,6 +617,152 @@ async def _redownload_post(post_id: int, queue_id: int, queue_name: str) -> None
     )
 
 
+async def _deliver_album_with_retries(
+    album_posts: list[dict[str, Any]], channel: dict[str, Any], queue: dict[str, Any]
+) -> None:
+    """Отправляет альбом одним сообщением с retry-логикой (ТЗ §2.5.2, C3/H4/H5).
+
+    Общая функция для send_post_from_queue (интервальная отправка) и
+    send_post_now (ручная кнопка «Отправить сейчас» в вебе).
+    """
+    queue_id = queue["id"]
+    mgid = album_posts[0].get("media_group_id")
+    # Отправляем весь альбом одним вызовом
+    sent_ids: list[int] = []
+    max_attempts = settings.max_send_attempts
+    last_error: str | None = None
+    for _attempt in range(1, max_attempts + 1):
+        try:
+            await _send_album_group(album_posts, channel, queue)
+            _last_send[queue_id] = time.monotonic()
+            # Атомарно помечаем ВСЕ посты альбома как sent (P1-9: одна транзакция)
+            post_ids = [p["id"] for p in album_posts]
+            await posts_repo.bulk_mark_sent(post_ids)
+            sent_ids = post_ids
+            log.info("Альбом отправлен: посты %s", sent_ids)
+            # Автоочистка: скачанные файлы больше не нужны на диске
+            await _auto_delete_sent_files(post_ids)
+            # H5: уведомления (блок C) — для альбомов тоже проверяем остаток очереди
+            await _check_queue_notifications(queue, channel)
+            return
+        except FileMissingError as e:
+            # Один из постов альбома потерял файл → перекачиваем.
+            # Пост вернётся в pending после скачивания, альбом отправится
+            # на следующем тике scheduler'а (когда все посты снова pending).
+            await _redownload_post(e.post_id, queue_id, queue["name"])
+            return
+        except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
+            last_error = str(e)
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after:
+                # H4: 429 учитываем в max_attempts, иначе persistent flood
+                # control мог крутить альбом бесконечно без mark_failed.
+                log.warning(
+                    "429 rate limit на альбом %s: ждём %s сек (попытка %d/%d)",
+                    mgid, retry_after, _attempt, max_attempts,
+                )
+                await asyncio.sleep(float(retry_after))
+                if _attempt >= max_attempts:
+                    for p in album_posts:
+                        await posts_repo.mark_failed(p["id"], last_error)
+                    log.error("Альбом %s переведён в failed после %d попыток (429)", mgid, max_attempts)
+                    from app.services.notifications import notify_send_error
+                    await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
+                    return
+                continue
+            # Инкрементим попытки для всех постов альбома
+            for p in album_posts:
+                await posts_repo.increment_attempt(p["id"])
+            log.warning("Ошибка отправки альбома %s (попытка %d/%d): %s", mgid, _attempt, max_attempts, e)
+            if _attempt >= max_attempts:
+                for p in album_posts:
+                    await posts_repo.mark_failed(p["id"], last_error)
+                log.error("Альбом %s переведён в failed после %d попыток", mgid, max_attempts)
+                # Уведомление об ошибке (блок C) — для альбомов тоже
+                from app.services.notifications import notify_send_error
+                await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
+                return
+            await asyncio.sleep(2.0)
+    _last_send[queue_id] = time.monotonic()
+    return
+
+
+async def _deliver_post_with_retries(
+    post: dict[str, Any], channel: dict[str, Any], queue: dict[str, Any]
+) -> None:
+    """Отправляет один пост с retry/429/permanent-error логикой (ТЗ §2.5.2, H4).
+
+    Общая функция для send_post_from_queue (интервальная отправка) и
+    send_post_now (ручная кнопка «Отправить сейчас» в вебе).
+    """
+    queue_id = queue["id"]
+    max_attempts = settings.max_send_attempts
+    last_error: str | None = None
+    for _attempt in range(1, max_attempts + 1):
+        try:
+            await _send_one_post(post, channel, queue)
+            _last_send[queue_id] = time.monotonic()
+            await posts_repo.mark_sent(post["id"])
+            # Автоочистка: скачанный файл больше не нужен на диске
+            await _auto_delete_sent_files([post["id"]])
+            # Уведомления (блок C): проверяем остаток очереди
+            await _check_queue_notifications(queue, channel)
+            return
+        except FileMissingError as e:
+            # Файл удалён, но есть source_url → перекачиваем через worker.
+            # Не ретраим отправку (бесполезно до скачивания), не mark_failed.
+            await _redownload_post(e.post_id, queue_id, queue["name"])
+            return
+        except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
+            last_error = str(e)
+            # P2-6: permanent-error classification (ТЗ §2.5.2 п.5)
+            # Forbidden (bot kicked/blocked) и BadRequest (chat not found, entity_too_large)
+            # — НЕ retry, сразу mark_failed
+            error_str = str(e).lower()
+            is_permanent = any(keyword in error_str for keyword in [
+                "forbidden", "chat not found", "chat_id_invalid",
+                "entity_too_large", "bot was blocked", "not enough rights",
+                # Файл удалён, перекачать нельзя
+                "source_url отсутствует",
+                "локальный файл удалён",
+            ])
+            if is_permanent:
+                await posts_repo.mark_failed(post["id"], last_error)
+                log.error("Пост #%s: permanent error → failed без retry: %s", post["id"], last_error)
+                from app.services.notifications import notify_send_error
+                await notify_send_error(queue_id, queue["name"], post["id"], last_error)
+                return
+            # 429 Too Many Requests — retry_after (H4: учитываем в max_attempts,
+            # иначе persistent flood control мог крутить пост бесконечно без failed).
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after:
+                log.warning(
+                    "429 rate limit на пост #%s: ждём %s сек (попытка %d/%d)",
+                    post["id"], retry_after, _attempt, max_attempts,
+                )
+                await asyncio.sleep(float(retry_after))
+                if _attempt >= max_attempts:
+                    await posts_repo.mark_failed(post["id"], last_error)
+                    log.error("Пост #%s переведён в failed после %d попыток (429): %s", post["id"], max_attempts, last_error)
+                    from app.services.notifications import notify_send_error
+                    await notify_send_error(queue_id, queue["name"], post["id"], last_error)
+                    return
+                continue
+            attempts_done = await posts_repo.increment_attempt(post["id"])
+            log.warning("Ошибка отправки поста #%s (попытка %d/%d): %s", post["id"], attempts_done, max_attempts, e)
+            if attempts_done >= max_attempts:
+                await posts_repo.mark_failed(post["id"], last_error)
+                log.error("Пост #%s переведён в failed после %d попыток: %s", post["id"], max_attempts, last_error)
+                # Уведомление об ошибке (блок C)
+                from app.services.notifications import notify_send_error
+
+                await notify_send_error(queue_id, queue["name"], post["id"], last_error)
+                return
+            await asyncio.sleep(2.0)
+
+    _last_send[queue_id] = time.monotonic()
+
+
 async def send_post_from_queue(queue_id: int) -> None:
     """Отправляет следующий pending-пост из очереди (ТЗ §2.5.1).
 
@@ -704,131 +850,79 @@ async def send_post_from_queue(queue_id: int) -> None:
                     f"пост(ов) ещё качаются (new/downloading), ждём полной готовности — пропуск тика.",
                 )
                 return
-            # Отправляем весь альбом одним вызовом
-            sent_ids: list[int] = []
-            max_attempts = settings.max_send_attempts
-            last_error: str | None = None
-            for _attempt in range(1, max_attempts + 1):
-                try:
-                    await _send_album_group(album_posts, channel, queue)
-                    _last_send[queue_id] = time.monotonic()
-                    # Атомарно помечаем ВСЕ посты альбома как sent (P1-9: одна транзакция)
-                    post_ids = [p["id"] for p in album_posts]
-                    await posts_repo.bulk_mark_sent(post_ids)
-                    sent_ids = post_ids
-                    log.info("Альбом отправлен: посты %s", sent_ids)
-                    # Автоочистка: скачанные файлы больше не нужны на диске
-                    await _auto_delete_sent_files(post_ids)
-                    # H5: уведомления (блок C) — для альбомов тоже проверяем остаток очереди
-                    await _check_queue_notifications(queue, channel)
-                    return
-                except FileMissingError as e:
-                    # Один из постов альбома потерял файл → перекачиваем.
-                    # Пост вернётся в pending после скачивания, альбом отправится
-                    # на следующем тике scheduler'а (когда все посты снова pending).
-                    await _redownload_post(e.post_id, queue_id, queue["name"])
-                    return
-                except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
-                    last_error = str(e)
-                    retry_after = getattr(e, "retry_after", None)
-                    if retry_after:
-                        # H4: 429 учитываем в max_attempts, иначе persistent flood
-                        # control мог крутить альбом бесконечно без mark_failed.
-                        log.warning(
-                            "429 rate limit на альбом %s: ждём %s сек (попытка %d/%d)",
-                            mgid, retry_after, _attempt, max_attempts,
-                        )
-                        await asyncio.sleep(float(retry_after))
-                        if _attempt >= max_attempts:
-                            for p in album_posts:
-                                await posts_repo.mark_failed(p["id"], last_error)
-                            log.error("Альбом %s переведён в failed после %d попыток (429)", mgid, max_attempts)
-                            from app.services.notifications import notify_send_error
-                            await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
-                            return
-                        continue
-                    # Инкрементим попытки для всех постов альбома
-                    for p in album_posts:
-                        await posts_repo.increment_attempt(p["id"])
-                    log.warning("Ошибка отправки альбома %s (попытка %d/%d): %s", mgid, _attempt, max_attempts, e)
-                    if _attempt >= max_attempts:
-                        for p in album_posts:
-                            await posts_repo.mark_failed(p["id"], last_error)
-                        log.error("Альбом %s переведён в failed после %d попыток", mgid, max_attempts)
-                        # Уведомление об ошибке (блок C) — для альбомов тоже
-                        from app.services.notifications import notify_send_error
-                        await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
-                        return
-                    await asyncio.sleep(2.0)
-            _last_send[queue_id] = time.monotonic()
+            # Отправляем весь альбом одним вызовом (C3-ready: unready проверен выше)
+            await _deliver_album_with_retries(album_posts, channel, queue)
             return
         # Альбом из 1 поста или не найден — отправляем как обычный пост
 
-    max_attempts = settings.max_send_attempts
-    last_error: str | None = None
-    for _attempt in range(1, max_attempts + 1):
-        try:
-            await _send_one_post(post, channel, queue)
-            _last_send[queue_id] = time.monotonic()
-            await posts_repo.mark_sent(post["id"])
-            # Автоочистка: скачанный файл больше не нужен на диске
-            await _auto_delete_sent_files([post["id"]])
-            # Уведомления (блок C): проверяем остаток очереди
-            await _check_queue_notifications(queue, channel)
-            return
-        except FileMissingError as e:
-            # Файл удалён, но есть source_url → перекачиваем через worker.
-            # Не ретраим отправку (бесполезно до скачивания), не mark_failed.
-            await _redownload_post(e.post_id, queue_id, queue["name"])
-            return
-        except Exception as e:  # noqa: BLE001 — любая ошибка API/сети
-            last_error = str(e)
-            # P2-6: permanent-error classification (ТЗ §2.5.2 п.5)
-            # Forbidden (bot kicked/blocked) и BadRequest (chat not found, entity_too_large)
-            # — НЕ retry, сразу mark_failed
-            error_str = str(e).lower()
-            is_permanent = any(keyword in error_str for keyword in [
-                "forbidden", "chat not found", "chat_id_invalid",
-                "entity_too_large", "bot was blocked", "not enough rights",
-                # Файл удалён, перекачать нельзя
-                "source_url отсутствует",
-                "локальный файл удалён",
-            ])
-            if is_permanent:
-                await posts_repo.mark_failed(post["id"], last_error)
-                log.error("Пост #%s: permanent error → failed без retry: %s", post["id"], last_error)
-                from app.services.notifications import notify_send_error
-                await notify_send_error(queue_id, queue["name"], post["id"], last_error)
-                return
-            # 429 Too Many Requests — retry_after (H4: учитываем в max_attempts,
-            # иначе persistent flood control мог крутить пост бесконечно без failed).
-            retry_after = getattr(e, "retry_after", None)
-            if retry_after:
-                log.warning(
-                    "429 rate limit на пост #%s: ждём %s сек (попытка %d/%d)",
-                    post["id"], retry_after, _attempt, max_attempts,
-                )
-                await asyncio.sleep(float(retry_after))
-                if _attempt >= max_attempts:
-                    await posts_repo.mark_failed(post["id"], last_error)
-                    log.error("Пост #%s переведён в failed после %d попыток (429): %s", post["id"], max_attempts, last_error)
-                    from app.services.notifications import notify_send_error
-                    await notify_send_error(queue_id, queue["name"], post["id"], last_error)
-                    return
-                continue
-            attempts_done = await posts_repo.increment_attempt(post["id"])
-            log.warning("Ошибка отправки поста #%s (попытка %d/%d): %s", post["id"], attempts_done, max_attempts, e)
-            if attempts_done >= max_attempts:
-                await posts_repo.mark_failed(post["id"], last_error)
-                log.error("Пост #%s переведён в failed после %d попыток: %s", post["id"], max_attempts, last_error)
-                # Уведомление об ошибке (блок C)
-                from app.services.notifications import notify_send_error
+    await _deliver_post_with_retries(post, channel, queue)
 
-                await notify_send_error(queue_id, queue["name"], post["id"], last_error)
-                return
-            await asyncio.sleep(2.0)
 
-    _last_send[queue_id] = time.monotonic()
+async def send_post_now(post_id: int) -> str:
+    """Ручная отправка конкретного поста прямо сейчас (веб-кнопка «Отправить сейчас»).
+
+    Отличия от send_post_from_queue:
+      - отправляется КОНКРЕТНЫЙ пост, а не первый pending по порядку очереди;
+      - игнорируются активность очереди и временное окно (явное действие
+        пользователя: «отправить сейчас» значит именно «сейчас»);
+      - троттлинг send_throttle_seconds сохранён (защита от 429 при нескольких
+        кликах подряд);
+      - если очередь с group_albums=True и пост входит в альбом — уходит весь
+        альбом (включая сам пост, даже если он failed); если часть альбома ещё
+        качается (C3) — ручная отправка отклоняется, чтобы альбом не дробился.
+
+    Возвращает "" при успехе или человекочитаемую причину отказа (для лога).
+    Ошибки доставки обрабатываются штатно: retry → failed → уведомление админу.
+    """
+    post = await posts_repo.get_post(post_id)
+    if post is None:
+        return f"Пост #{post_id} не найден"
+    status = post.get("status")
+    if status == "sent":
+        return f"Пост #{post_id} уже отправлен (status=sent)"
+    if status == "downloading":
+        return f"Пост #{post_id} ещё скачивается — ручная отправка отклонена"
+    if status not in ("pending", "failed"):
+        return f"Пост #{post_id} в статусе '{status}' — ручная отправка отклонена"
+
+    queue_id = post.get("queue_id")
+    if not queue_id:
+        return f"Пост #{post_id} не назначен в очередь (Входящие) — нечего отправлять"
+    queue = await queues_repo.get_queue(queue_id)
+    if not queue:
+        return f"Очередь #{queue_id} не найдена"
+    channel = await channels_repo.get_channel(queue["channel_id"])
+    if not channel:
+        return f"Канал #{queue['channel_id']} очереди #{queue_id} не найден"
+
+    # Троттлинг (ТЗ §2.5.2 п.3) — как в send_post_from_queue: при нескольких
+    # кликах подряд отправки разойдутся на send_throttle_seconds
+    now = time.monotonic()
+    last = _last_send.get(queue_id, 0.0)
+    wait = settings.send_throttle_seconds - (now - last)
+    if wait > 0:
+        await asyncio.sleep(wait)
+
+    # Альбом: group_albums=True и есть media_group_id → уходит весь альбом
+    mgid = post.get("media_group_id")
+    if bool(queue.get("group_albums", 0)) and mgid:
+        # C3: часть альбома ещё качается (new/downloading) → не дробим альбом
+        unready = await posts_repo.count_album_unready(queue_id, mgid)
+        if unready:
+            return (
+                f"Альбом {mgid} не готов: {unready} пост(ов) ещё качаются "
+                f"(new/downloading) — попробуйте позже"
+            )
+        album_posts = await posts_repo.find_album_posts(queue_id, mgid, limit=10)
+        if post not in album_posts:
+            album_posts.append(post)
+            album_posts.sort(key=lambda p: (p.get("created_at") or "", p["id"]))
+        if len(album_posts) > 1:
+            await _deliver_album_with_retries(album_posts, channel, queue)
+            return ""
+
+    await _deliver_post_with_retries(post, channel, queue)
+    return ""
 
 
 async def _check_queue_notifications(queue: dict, channel: dict) -> None:
