@@ -183,3 +183,59 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+// --- Автовосстановление кнопок после установки/обновления/перезагрузки (v1.3.1) ---
+// Chrome НЕ ре-инъектирует content scripts в УЖЕ ОТКРЫТЫЕ вкладки при
+// перезагрузке расширения (chrome://extensions → ↻). Для обычных сайтов это
+// незаметно (новая страница = новая инъекция), но x.com — SPA: если вкладка
+// осталась открытой и пользователь ходит по ней внутренней навигацией, кнопка
+// «пропадает», хотя расширение обновлено. Решение: при onInstalled сами
+// ре-инъектируем content scripts во все открытые вкладки поддерживаемых
+// сайтов. Повторная инъекция безопасна: content.js при старте сам чистит
+// UI (кнопки/попапы/тосты) от умерших скриптов и инициализируется заново.
+const HOST_MATCH_PATTERNS = [
+  "*://gelbooru.com/*",
+  "*://danbooru.donmai.us/*",
+  "*://x.com/*",
+  "*://twitter.com/*",
+  "*://*.pikabu.ru/*",
+  "*://*.pixiv.net/*",
+  "*://pixiv.net/*",
+];
+
+async function reinjectContentScripts(reason) {
+  let tabs = [];
+  try {
+    // Доступ к url вкладок разрешён без permission "tabs": хосты покрыты
+    // host_permissions (см. manifest.json).
+    tabs = await chrome.tabs.query({ url: HOST_MATCH_PATTERNS });
+  } catch (e) {
+    console.warn("[tgq][bg] reinject: tabs.query failed:", e && e.message);
+    return;
+  }
+  let okCount = 0;
+  for (const tab of tabs) {
+    if (!tab || typeof tab.id !== "number") continue;
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["site-config.js", "utils.js", "content.js"],
+      });
+      okCount++;
+    } catch (e) {
+      // Вкладка в момент загрузки, discarded, chrome:// и т.п. — не критично:
+      // при следующей навигации инъекция произойдёт штатно.
+      console.log("[tgq][bg] reinject: пропущен tab", tab.id, "-", e && e.message);
+    }
+  }
+  console.log(
+    `[tgq][bg] reinject (${reason}): вкладок подходящих ${tabs.length}, инъекцировано ${okCount}`
+  );
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
+  // Срабатывает при установке, обновлении и перезагрузке (↻) расширения.
+  // Инъекция идемпотентна: content.js при старте сам чистит UI от мёртвых
+  // кнопок прошлых скриптов и инициализируется заново.
+  reinjectContentScripts(details && details.reason ? details.reason : "installed");
+});

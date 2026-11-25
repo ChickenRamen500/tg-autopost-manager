@@ -18,6 +18,8 @@
 (() => {
   "use strict";
 
+  const TGQ_VERSION = "1.3.1";
+
   const PICKER_ID = "tgq-picker";
   const QUEUE_POPUP_ID = "tgq-queue-popup";
   const LONG_PRESS_MS = 2000; // удержание кнопки — попап выбора очереди
@@ -25,11 +27,28 @@
   const config = getConfigForHostname(location.hostname);
   if (!config) return;
 
+  // Очистка UI от предыдущей инъекции (v1.3.1). Повторная инъекция возможна
+  // только при переустановке/обновлении/перезагрузке расширения (background.js
+  // ре-инъекцирует content scripts во все открытые вкладки при onInstalled) —
+  // все старые скрипты в этот момент уже мертвы (chrome.runtime недоступен),
+  // их кнопки бесполезны. Убираем их вместе с попапами/тостами: новые придут
+  // от свежего скрипта ниже. Штатная инъекция манифестом происходит один раз
+  // на загрузку документа — там чистить нечего, не влияет.
+  try {
+    document
+      .querySelectorAll(".tgq-article-btn, .tgq-list-send, #" + PICKER_ID + ", ." + QUEUE_POPUP_ID + ", #tgq-toast-host")
+      .forEach((el) => el.remove());
+  } catch (e) {
+    /* ignore */
+  }
+
   // Маркер версии в консоли — чтобы видеть, что расширение обновлено
   // (18+ пикабу и новые фичи не работают, пока расширение не перезагружено).
   try {
     console.log(
-      "[tgq] content script v1.3.0 (pikabu 18+: cache-bust + GIF-анализ + лайтбокс + кандидаты)"
+      "[tgq] content script v" +
+        TGQ_VERSION +
+        " (автовосстановление кнопок после перезагрузки расширения; пикабу 18+: cache-bust + GIF-анализ + лайтбокс + кандидаты)"
     );
   } catch (e) {
     /* ignore */
@@ -84,6 +103,32 @@
 
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  // Выбор режима отправки одного медиа (v1.3.1 — восстановлена логика v1.2.0,
+  // потерянная при рефакторинге 1.3.0):
+  //   • viaFallback (18+/NSFW пикабу, resolved из страницы поста) → B всегда.
+  //   • blob-видео → A (сервер качает через yt-dlp).
+  //   • uploadImagesViaBrowser (пикабу): CDN отдаёт img/gif только с cookies
+  //     браузера — анонимное скачивание сервером получает заглушку NSFW.
+  //     Поэтому картинки/гифки пикабу качает браузер и заливает сам (mode B,
+  //     quick_add_upload). Видео пикабу CDN не защищает → остаётся mode A.
+  //   • иначе — режим сайта из конфига (x.com → B, booru → A).
+  function computeSendMode(media, isBlob) {
+    if (media && media.viaFallback) return "B";
+    if (isBlob) return "A";
+    if (config && config.uploadImagesViaBrowser) {
+      const k = media && media.kind;
+      if (k === "img" || k === "gif") return "B";
+    }
+    return (config && config.mode) || "A";
+  }
+
+  // Скрипт-«сирота»: расширение перезагружали, а вкладка не перезагружалась —
+  // chrome.runtime в таком контексте выбрасывает "Extension context invalidated".
+  function isOrphanError(e) {
+    const msg = (e && (e.message || String(e))) || "";
+    return /Extension context invalidated|Контекст расширения недействителен/i.test(msg);
   }
 
   function isPikabuSite() {
@@ -785,7 +830,7 @@
     let lastError = null;
     for (const m of mediaList) {
       const isBlob = !m.url && m.kind === "video";
-      const mode = m.viaFallback ? "B" : isBlob ? "A" : config.mode;
+      const mode = computeSendMode(m, isBlob);
       // base payload без mediaUrl — его проставит отправка (кандидаты пикабу).
       const base = {
         type: "ENQUEUE",
@@ -822,7 +867,11 @@
         }
       } catch (e) {
         failed++;
-        lastError = e && e.message;
+        if (isOrphanError(e)) {
+          lastError = "Расширение перезагружено — обновите страницу (F5)";
+        } else {
+          lastError = e && e.message;
+        }
       }
     }
     if (sourceBtn) {
@@ -967,7 +1016,7 @@
     btn.textContent = "… Отправка";
 
     const isBlobVideo = !media.url && media.kind === "video";
-    const mode = media.viaFallback ? "B" : isBlobVideo ? "A" : config.mode;
+    const mode = computeSendMode(media, isBlobVideo);
     // blob: видео → mediaUrl=null + mode=A (бэкенд использует yt-dlp на permalink).
     // viaFallback (18+/NSFW пикабу) → mode=B: браузер скачает и зальёт сам.
     // pageUrl = permalink (НЕ location.href!) — иначе бот качает HTML ленты x.com/home.
@@ -1024,10 +1073,20 @@
         }
       }
     } catch (e) {
-      btn.textContent = "✗ Нет связи";
       btn.classList.add("tgq-error");
       btn.disabled = false;
-      tgqShowToast("Нет связи с ботом — проверьте настройки", "err");
+      if (isOrphanError(e)) {
+        // Скрипт остался от предыдущей версии расширения: вкладку надо обновить.
+        btn.textContent = "✗ Обновите страницу";
+        tgqShowToast(
+          "Расширение было перезагружено — обновите страницу (F5), и кнопка заработает",
+          "err",
+          9000
+        );
+      } else {
+        btn.textContent = "✗ Нет связи";
+        tgqShowToast("Нет связи с ботом — проверьте настройки", "err");
+      }
     }
   }
 
@@ -1235,7 +1294,7 @@
         // Обновляем текст на активной кнопке.
         const activeBtn = useAlbum ? sendAlbumBtn : sendSeparateBtn;
         activeBtn.textContent = `Отправка ${i + 1}/${selected.length}…`;
-        const mode = m.viaFallback ? "B" : isBlob ? "A" : config.mode;
+        const mode = computeSendMode(m, isBlob);
         const base = {
           type: "ENQUEUE",
           // pageUrl = permalink (НЕ location.href) — иначе бот качает HTML ленты.
@@ -1275,6 +1334,9 @@
         } catch (e) {
           failed++;
           tgqWarn("sendSelected: enqueue error:", e);
+          if (isOrphanError(e)) {
+            tgqShowToast("Расширение было перезагружено — обновите страницу (F5)", "err", 9000);
+          }
         }
       }
       overlay.remove();
@@ -1683,6 +1745,34 @@
     });
   }
 
+  // Диагностика инъекции (v1.3.1): одна строка в консоль при изменении
+  // состояния — сколько article найдено, сколько с медиа, сколько кнопок стоит.
+  // По ней удалённо видно, почему кнопка не появилась (вёрстка/медиа/кнопка).
+  let lastInjectDiag = "";
+  function logInjectDiag() {
+    try {
+      const sel = config.articleSelector || "article";
+      const articles = document.querySelectorAll(sel);
+      let withMedia = 0;
+      for (const a of articles) {
+        if (collectMediaInArticle(a, config).length) withMedia++;
+      }
+      const btns = document.querySelectorAll(".tgq-article-btn").length;
+      const sig = articles.length + "/" + withMedia + "/" + btns;
+      if (sig !== lastInjectDiag) {
+        lastInjectDiag = sig;
+        tgqLog(
+          location.hostname +
+            ": articles=" + articles.length +
+            ", с медиа=" + withMedia +
+            ", кнопок=" + btns
+        );
+      }
+    } catch (e) {
+      /* диагностика не критична */
+    }
+  }
+
   async function injectButtons() {
     // Страницы списков (Gelbooru search) — свой UI, отдельный от article-кнопок.
     if (config.listPage) {
@@ -1701,17 +1791,45 @@
         /* skip broken article */
       }
     }
+    logInjectDiag();
   }
 
   // --- Старт + наблюдение за SPA (ТЗ §9.6) ---
+  let spaObserver = null;
   if (config.spa) {
     let t = null;
-    const obs = new MutationObserver(() => {
+    spaObserver = new MutationObserver(() => {
       clearTimeout(t);
       t = setTimeout(scheduleInject, 400);
     });
-    obs.observe(document.documentElement, { childList: true, subtree: true });
+    spaObserver.observe(document.documentElement, { childList: true, subtree: true });
   }
+
+  // Watchdog «сироты» (v1.3.1): если расширение перезагрузили, а вкладку нет,
+  // chrome.runtime умирает ("Extension context invalidated") — клики по нашим
+  // кнопкам выдают «Нет связи», а MutationObserver продолжает лепить мёртвые
+  // кнопки на новые посты, мешая живому скрипту (если он был ре-инъекцирован).
+  // Сирота сам прибирается: отключает наблюдатель и убирает мёртвые кнопки.
+  // Удаление кнопок — мутация DOM: у живого скрипта MutationObserver тут же
+  // вернёт на место его рабочие кнопки.
+  const orphanWatchdog = setInterval(() => {
+    let dead = false;
+    try {
+      dead = !(typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id);
+    } catch (e) {
+      dead = true;
+    }
+    if (!dead) return;
+    try { clearInterval(orphanWatchdog); } catch (e) {}
+    try { if (spaObserver) spaObserver.disconnect(); } catch (e) {}
+    try {
+      document.querySelectorAll(".tgq-article-btn, .tgq-list-send").forEach((b) => b.remove());
+      const host = document.getElementById("tgq-toast-host");
+      if (host) host.remove();
+    } catch (e) {}
+    tgqLog("контекст расширения мёртв — старый скрипт остановлен (кнопки восстановит свежая инъекция или F5)");
+  }, 5000);
+
   scheduleInject();
   // Отложенные попытки: тяжёлые страницы (x.com/pixiv) рендерят медиа позже.
   setTimeout(scheduleInject, 1500);
