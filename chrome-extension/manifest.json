@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Send to TG Bot",
-  "version": "1.3.1",
-  "description": "Быстрая постановка контента с сайтов в очередь Telegram-бота (TG Media Queue Bot). v1.3.1: автовосстановление кнопок во всех открытых вкладках после перезагрузки расширения (SPA вроде x.com), пикабу 18+ — cache-bust, GIF-анализ кадров, перебор URL-кандидатов и авто-лайтбокс (v1.3.0)",
+  "version": "1.3.2",
+  "description": "Быстрая постановка контента с сайтов в очередь Telegram-бота (TG Media Queue Bot). v1.3.2: twitter/x 2026 — новые селекторы твитов (X убрал data-testid/role у article) и приоритет action bar по aria-label; v1.3.1: автовосстановление кнопок после перезагрузки расширения; пикабу 18+ — cache-bust, GIF-анализ кадров, перебор URL-кандидатов и авто-лайтбокс (v1.3.0)",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "*://gelbooru.com/*",

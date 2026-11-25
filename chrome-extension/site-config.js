@@ -143,7 +143,15 @@ const SITE_CONFIGS = {
   "x.com": {
     mode: "B", // браузерное скачивание (cookies пользователя)
     // Один твит = один article. На ленте — много articles; в каждом своя кнопка.
-    articleSelector: "article[data-testid='tweet'], article[role='article']",
+    // 2026 (v1.3.2): X убрал data-testid='tweet' и role='article' из разметки
+    // твитов (редизайн на utility-классы) — из-за этого кнопка пропала со всех
+    // страниц x.com. Твит теперь опознаём по ссылке на статус внутри
+    // (a[href*='/status/'], :has поддержан в Chrome 105+). Старые селекторы
+    // оставлены первыми — для совместимости, если X откатит или для других
+    // фронтендов X (nitter и т.п.).
+    articleSelector:
+      "article[data-testid='tweet'], article[role='article'], " +
+      "article:has(a[href*='/status/']), article:has(a[href*='/statuses/'])",
     // Twitter: картинки — <img src="https://pbs.twimg.com/media/...">. Видео — blob: (HLS).
     mediaSelector: "img[src*='pbs.twimg.com/media'], video[poster]",
     mediaAttrPriority: ["src"],
@@ -151,22 +159,34 @@ const SITE_CONFIGS = {
     needsReferer: false,
     spa: true,
     tagsSelector: "",
-    // Action bar твита — div[role='group'] (reply/retweet/like/share).
-    buttonAnchorSelector: "div[role='group'], [role='group']",
+    // Action bar твита — div[role='group'] с aria-label «N replies…»
+    // («N ответов…» в русской локали). 2026 (v1.3.2): внутри article появились
+    // СЛУЖЕБНЫЕ группы без aria-label (Seek slider у видео и т.п.), причём
+    // ПЕРВЫМИ — поэтому сначала группа с лейблом реплаев (регистронезависимо,
+    // флаг 'i'), фолбэк — любая группа (старое поведение).
+    buttonAnchorSelector:
+      "div[role='group'][aria-label*='repl' i], div[role='group'][aria-label*='ответ' i], " +
+      "div[role='group'], [role='group']",
     buttonPosition: "append",
     // Permalink твита: a[href*='/status/'] — ссылка на время/дату или "Show this thread".
     permalinkSelector: "a[href*='/status/'], a[href*='/statuses/']",
   },
   "twitter.com": {
     mode: "B",
-    articleSelector: "article[data-testid='tweet'], article[role='article']",
+    // 2026 (v1.3.2): новые селекторы — см. комментарий в конфиге x.com выше.
+    articleSelector:
+      "article[data-testid='tweet'], article[role='article'], " +
+      "article:has(a[href*='/status/']), article:has(a[href*='/statuses/'])",
     mediaSelector: "img[src*='pbs.twimg.com/media'], video[poster]",
     mediaAttrPriority: ["src"],
     mediaHosts: ["pbs.twimg.com", "video.twimg.com"],
     needsReferer: false,
     spa: true,
     tagsSelector: "",
-    buttonAnchorSelector: "div[role='group'], [role='group']",
+    // 2026 (v1.3.2): приоритет action bar с aria-label — см. x.com выше.
+    buttonAnchorSelector:
+      "div[role='group'][aria-label*='repl' i], div[role='group'][aria-label*='ответ' i], " +
+      "div[role='group'], [role='group']",
     buttonPosition: "append",
     permalinkSelector: "a[href*='/status/'], a[href*='/statuses/']",
   },
@@ -798,32 +818,59 @@ function getArticlePermalink(articleEl, config) {
 
   // 1) Способ 1: config.permalinkSelector — CSS-селектор(ы) внутри article.
   if (config.permalinkSelector) {
+    // v1.3.2: собираем ВСЕХ кандидатов по всем частям селектора (в порядке DOM).
+    const candidates = [];
     for (const sel of config.permalinkSelector.split(",").map((s) => s.trim())) {
       if (!sel) continue;
       try {
-        const el = articleEl.querySelector(sel);
-        if (!el) continue;
-        // <link rel="canonical" href="..."> — читаем href.
-        // <a href="..."> — читаем href.
-        const href = el.getAttribute("href");
-        if (!href) continue;
-        // Относительные ссылки (/user/status/123) → абсолютные.
-        const abs = new URL(href, location.origin).href;
-        // Фильтр: только http(s), не якоря (#...) и не просто location.href.
-        if (/^https?:/.test(abs) && !abs.endsWith("#")) {
-          // Для Twitter: отрезаем query-параметры (?s=46, ?ref_src=...),
-          // оставляем чистый permalink /user/status/id
-          if (abs.includes("/status/") || abs.includes("/statuses/")) {
-            try {
-              const u = new URL(abs);
-              u.search = "";
-              return u.href;
-            } catch {}
-          }
-          return abs;
-        }
+        articleEl.querySelectorAll(sel).forEach((el) => candidates.push(el));
       } catch (e) {
         /* invalid selector — skip */
+      }
+    }
+    // v1.3.2 (X 2026): ПЕРВЫЙ /status/-линк в твите новой вёрстки ведёт на
+    // МЕДИА (/status/.../photo/1, /video/1). Если взять его как permalink:
+    //   • makeMediaGroupId вытянет последнее число («1») → ВСЕ альбомы
+    //     получат один media_group_id и схлопнутся в одну группу;
+    //   • mode A (yt-dlp) получит ссылку на фото вместо твита.
+    // Поэтому предпочитаем «чистый» permalink (.../status/<id> без суффикса);
+    // если чистого нет — первого кандидата (старое поведение для других сайтов).
+    let chosen = null;
+    for (const c of candidates) {
+      try {
+        const p = new URL(c.getAttribute("href") || "", location.origin).pathname;
+        if (/\/status(?:es)?\/\d+\/?$/.test(p)) {
+          chosen = c;
+          break;
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    if (!chosen) chosen = candidates[0] || null;
+    if (chosen) {
+      // <a href="..."> — читаем href.
+      const href = chosen.getAttribute("href");
+      if (href) {
+        try {
+          // Относительные ссылки (/user/status/123) → абсолютные.
+          const abs = new URL(href, location.origin).href;
+          // Фильтр: только http(s), не якоря (#...) и не просто location.href.
+          if (/^https?:/.test(abs) && !abs.endsWith("#")) {
+            // Для Twitter: отрезаем query-параметры (?s=46, ?ref_src=...),
+            // оставляем чистый permalink /user/status/id
+            if (abs.includes("/status/") || abs.includes("/statuses/")) {
+              try {
+                const u = new URL(abs);
+                u.search = "";
+                return u.href;
+              } catch {}
+            }
+            return abs;
+          }
+        } catch (e) {
+          /* invalid href — fall through */
+        }
       }
     }
   }

@@ -18,7 +18,7 @@
 (() => {
   "use strict";
 
-  const TGQ_VERSION = "1.3.1";
+  const TGQ_VERSION = "1.3.2";
 
   const PICKER_ID = "tgq-picker";
   const QUEUE_POPUP_ID = "tgq-queue-popup";
@@ -48,7 +48,7 @@
     console.log(
       "[tgq] content script v" +
         TGQ_VERSION +
-        " (автовосстановление кнопок после перезагрузки расширения; пикабу 18+: cache-bust + GIF-анализ + лайтбокс + кандидаты)"
+        " (twitter/x 2026: новые селекторы твитов; автовосстановление кнопок после перезагрузки расширения; пикабу 18+: cache-bust + GIF-анализ + лайтбокс + кандидаты)"
     );
   } catch (e) {
     /* ignore */
@@ -1745,25 +1745,29 @@
     });
   }
 
-  // Диагностика инъекции (v1.3.1): одна строка в консоль при изменении
-  // состояния — сколько article найдено, сколько с медиа, сколько кнопок стоит.
-  // По ней удалённо видно, почему кнопка не появилась (вёрстка/медиа/кнопка).
+  // Диагностика инъекции (v1.3.1, расширена в v1.3.2): одна строка в консоль
+  // при изменении состояния — сколько article найдено ПО СЕЛЕКТОРУ и сколько
+  // их вообще на странице, сколько с медиа, сколько кнопок стоит. Сравнение
+  // «по селектору» vs «article-всего» сразу видно, когда сайт сменил вёрстку
+  // (как X в 2026: убрал data-testid/role у твитов → селектор 0, article > 0).
   let lastInjectDiag = "";
   function logInjectDiag() {
     try {
       const sel = config.articleSelector || "article";
       const articles = document.querySelectorAll(sel);
+      const allArticles = document.querySelectorAll("article");
       let withMedia = 0;
       for (const a of articles) {
         if (collectMediaInArticle(a, config).length) withMedia++;
       }
       const btns = document.querySelectorAll(".tgq-article-btn").length;
-      const sig = articles.length + "/" + withMedia + "/" + btns;
+      const sig = articles.length + "/" + allArticles.length + "/" + withMedia + "/" + btns;
       if (sig !== lastInjectDiag) {
         lastInjectDiag = sig;
         tgqLog(
           location.hostname +
-            ": articles=" + articles.length +
+            ": по селектору=" + articles.length +
+            " (article-всего=" + allArticles.length + ")" +
             ", с медиа=" + withMedia +
             ", кнопок=" + btns
         );
