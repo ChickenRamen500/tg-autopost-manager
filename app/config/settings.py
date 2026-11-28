@@ -76,6 +76,15 @@ class Settings:
     send_throttle_seconds: float = field(default_factory=lambda: float(_get("SEND_THROTTLE_SECONDS", "1.1") or 1.1))
     # Лимит попыток отправки поста до перевода в failed (ТЗ §2.5.2 п.4)
     max_send_attempts: int = field(default_factory=lambda: _get_int("MAX_SEND_ATTEMPTS", 3))
+    # Пауза перед единственным «осторожным» ретраем после неопределённой сетевой
+    # ошибки (v0.4.67): обрыв интернета в момент отправки мог ДОСТАВИТЬ сообщение
+    # до Telegram (ответ потерян) — мгновенные ретраи дублировали пост в канале
+    # до max_send_attempts раз (симптом: после появления интернета пост уходит
+    # в канал 3 раза). Теперь: пауза (сеть успевает восстановиться) + один ретрай,
+    # вторая неопределённая ошибка → failed без повторной отправки.
+    network_uncertain_retry_delay: float = field(
+        default_factory=lambda: float(_get("NETWORK_UNCERTAIN_RETRY_DELAY", "30.0") or 30.0)
+    )
     # Часовой пояс для daily_window очередей (Asia/Yekaterinburg — TZ пользователя)
     timezone: str = field(default_factory=lambda: _get("TIMEZONE", "Asia/Yekaterinburg"))
 
@@ -233,6 +242,11 @@ class Settings:
             problems.append(
                 f"MAX_SEND_ATTEMPTS={self.max_send_attempts} должен быть > 0 "
                 "(иначе посты никогда не перейдут в failed и будут крутиться в очереди бесконечно)"
+            )
+        if self.network_uncertain_retry_delay <= 0:
+            problems.append(
+                f"NETWORK_UNCERTAIN_RETRY_DELAY={self.network_uncertain_retry_delay} должен быть > 0 "
+                "(пауза перед осторожным ретраем защищает от дублей при обрыве сети)"
             )
 
         # --- Фаза 3: worker ---

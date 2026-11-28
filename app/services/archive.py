@@ -169,6 +169,13 @@ _archived_groups: dict[str, float] = {}  # media_group_id → timestamp
 # Таймаут для очистки _archived_groups — чтобы при повторной отправке того же
 # твита (через час) альбом мог архивироваться заново.
 _ARCHIVED_GROUPS_TTL: int = 3600  # 1 час
+# v0.4.67: группы, чья архивация идёт ПРЯМО СЕЙЧАС (send_media_group в полёте).
+# Защита от дубля альбома в служебном канале: маркер _archived_groups ставится
+# только ПОСЛЕ успешной отправки, поэтому два таймера, сработавшие с интервалом
+# меньше длительности отправки, оба проходили проверку и отправляли альбом
+# дважды. Маркер ставится ДО отправки — параллельный таймер его видит и
+# пропускает группу.
+_album_archiving_now: set[str] = set()
 
 
 def _get_album_timers_lock() -> asyncio.Lock:
@@ -184,12 +191,23 @@ async def schedule_album_archive(media_group_id: str) -> None:
     Если уже есть запланированная архивация для этой группы — отменяем её
     и начинаем новый отсчёт. Когда таймер срабатывает, проверяем все ли посты
     группы имеют file_path, и если да — archive_album.
+
+    v0.4.67: таймер, чья архивация УЖЕ идёт (send_media_group в полёте),
+    НЕ отменяем — отмена рвёт HTTP-запрос на середине: Telegram мог уже
+    опубликовать альбом, а маркер «архивировано» не ставится → повторная
+    архивация = дубль в служебном канале. Вместо отмены просто планируем
+    новый таймер: он сработает позже и пропустит группу через _archived_groups.
     """
     lock = _get_album_timers_lock()
     async with lock:
-        # Отменяем существующий таймер для этой группы
+        # Отменяем существующий таймер для этой группы (если он ещё спит —
+        # если его архивация уже идёт, не трогаем, см. комментарий выше)
         existing = _album_archive_timers.get(media_group_id)
-        if existing and not existing.done():
+        if (
+            existing
+            and not existing.done()
+            and media_group_id not in _album_archiving_now
+        ):
             existing.cancel()
 
         # Планируем новый
@@ -210,9 +228,16 @@ async def _do_album_archive_check(media_group_id: str) -> None:
         for k in expired:
             _archived_groups.pop(k, None)
 
-        # Защита от повторной архивации: если группа уже архивирована — пропускаем.
-        if media_group_id in _archived_groups:
-            log.info("Альбом %s уже архивирован — пропускаем", media_group_id)
+        # Защита от повторной архивации: если группа уже архивирована ИЛИ её
+        # архивация идёт прямо сейчас — пропускаем (v0.4.67: раньше проверялся
+        # только _archived_groups, который заполняется ПОСЛЕ успешной отправки,
+        # поэтому два таймера с близким временем срабатывания оба отправляли
+        # альбом → дубль в служебном канале).
+        if (
+            media_group_id in _archived_groups
+            or media_group_id in _album_archiving_now
+        ):
+            log.info("Альбом %s уже архивирован/архивируется — пропускаем", media_group_id)
             return
 
         from app.repositories import posts as posts_repo
@@ -237,7 +262,13 @@ async def _do_album_archive_check(media_group_id: str) -> None:
         # архивированной ТОЛЬКО при успехе — раньше marker ставился до отправки,
         # и при провале archive_album (возвращает False без исключения) группа
         # оставалась в _archived_groups навсегда и повторная архивация не выполнялась.
-        ok = await archive_album(group_posts, 0)
+        # v0.4.67: маркер «идёт архивация» ставим ДО отправки (параллельный
+        # таймер пропустит группу), снимаем в finally при любом исходе.
+        _album_archiving_now.add(media_group_id)
+        try:
+            ok = await archive_album(group_posts, 0)
+        finally:
+            _album_archiving_now.discard(media_group_id)
         if ok:
             _archived_groups[media_group_id] = now
             log.info(
@@ -260,7 +291,16 @@ async def _do_album_archive_check(media_group_id: str) -> None:
     finally:
         lock = _get_album_timers_lock()
         async with lock:
-            _album_archive_timers.pop(media_group_id, None)
+            # v0.4.67: убираем из словаря только СВОЮ запись. Раньше отменённый
+            # таймер стирал запись НОВОГО таймера (перезаписанную в
+            # schedule_album_archive): следующий пост группы не находил таймер
+            # в словаре → не отменял живущий → ДВА таймера жили параллельно и
+            # оба отправляли альбом → дубль в служебном канале.
+            try:
+                if _album_archive_timers.get(media_group_id) is asyncio.current_task():
+                    _album_archive_timers.pop(media_group_id, None)
+            except Exception:  # noqa: BLE001 — cleanup не критичен
+                pass
 
 
 def _sanitize_tag_id(value: str | int | None) -> str:

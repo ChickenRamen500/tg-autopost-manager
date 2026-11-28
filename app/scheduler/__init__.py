@@ -51,6 +51,66 @@ def _is_photo_too_big_error(e: Exception) -> bool:
     s = str(e)
     return "too big for a photo" in s or "PHOTO_INVALID_DIMENSIONS" in s
 
+
+# --- Классификация сетевых ошибок отправки (v0.4.67, фикс «пост уходит 3 раза») ---
+#
+# Симптом: интернет на сервере пропадает в момент отправки запланированного поста,
+# после восстановления пост появляется в канале 3 раза.
+#
+# Причина: retry-цикл (_deliver_post_with_retries/_deliver_album_with_retries)
+# на ЛЮБУЮ ошибку делал мгновенные ретраи (пауза 2 сек) до max_send_attempts (3).
+# Но обрыв соединения при чтении ОТВЕТА не означает, что запрос не дошёл:
+# Telegram мог УЖЕ опубликовать сообщение (запрос ушёл полностью, потерян
+# только ответ). Каждый мгновенный ретрай публиковал сообщение заново →
+# 3 попытки = до 3 копий в канале.
+#
+# Решение: разделяем ошибки на классы.
+#   safe      — запрос гарантированно НЕ доставлен (коннект/DNS упали ДО
+#               отправки) → ретраим как раньше, дубля быть не может;
+#   uncertain — запрос МОГ быть доставлен, потерян ответ (таймаут, обрыв
+#               середины обмена) → пауза network_uncertain_retry_delay (сеть
+#               успевает восстановиться) и ровно ОДИН осторожный ретрай;
+#               повторная неопределённая ошибка → failed без повторной
+#               отправки. Худший случай — 2 копии вместо 4 (1 неопределённая
+#               + 1 ретрай), обычно — 1.
+#   other     — всё прочее (не сетевое), обрабатывается прежней логикой.
+
+_SAFE_NET_PHRASES = (
+    "cannot connect", "clientconnectorerror", "connection refused",
+    "name or service not known", "temporary failure in name resolution",
+    "getaddrinfo failed", "no route to host", "network is unreachable",
+    "name does not resolve",
+)
+
+_UNCERTAIN_NET_PHRASES = (
+    "timeout", "timed out", "server disconnected", "serverdisconnectederror",
+    "connection reset", "connection aborted", "connection closed",
+    "broken pipe", "incomplete read", "payload error", "clientpayloaderror",
+    "eof occurred", "read error", "session is closed", "event loop is closed",
+)
+
+
+def _classify_send_error(e: BaseException) -> str:
+    """Классифицирует ошибку отправки: 'safe' | 'uncertain' | 'other'."""
+    blob = (str(e) + " " + type(e).__name__).lower()
+    # 1. Явный обрыв СЕРЕДИНЫ обмена — самым первым (важнее общих слов):
+    if any(m in blob for m in _UNCERTAIN_NET_PHRASES):
+        return "uncertain"
+    # 2. Явная ошибка коннекта/DNS ДО отправки — безопасно для ретрая:
+    if any(m in blob for m in _SAFE_NET_PHRASES):
+        return "safe"
+    # 3. Aiogram-класс сетевой ошибки без узнаваемого текста — считаем
+    #    худший случай (запрос мог уйти).
+    try:
+        from aiogram.exceptions import TelegramNetworkError
+
+        if isinstance(e, TelegramNetworkError):
+            return "uncertain"
+    except ImportError:  # noqa: BLE001 — aiogram всегда есть в рантайме
+        pass
+    return "other"
+
+
 # --- Диагностика «молчаливых» пропусков тиков (баг «очередь не отправляет») ---
 # Раньше все ранние return в send_post_from_queue были немыми: при зависшей
 # очереди в логе не было НИЧЕГО (только apscheduler «executed successfully») —
@@ -631,6 +691,10 @@ async def _deliver_album_with_retries(
     sent_ids: list[int] = []
     max_attempts = settings.max_send_attempts
     last_error: str | None = None
+    # v0.4.67: неопределённая сетевая ошибка (сообщение могло быть доставлено,
+    # ответ потерян) — ровно один осторожный ретрай после паузы, иначе failed.
+    # Без этого обрыв интернета в момент отправки давал до 3 копий альбома.
+    uncertain_retry_done = False
     for _attempt in range(1, max_attempts + 1):
         try:
             await _send_album_group(album_posts, channel, queue)
@@ -670,6 +734,26 @@ async def _deliver_album_with_retries(
                     await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
                     return
                 continue
+            # v0.4.67: неопределённая сетевая ошибка — альбом МОГ уже уйти в канал
+            if _classify_send_error(e) == "uncertain":
+                if uncertain_retry_done or _attempt >= max_attempts:
+                    for p in album_posts:
+                        await posts_repo.mark_failed(p["id"], last_error)
+                    log.error(
+                        "Альбом %s: неопределённая сетевая ошибка x2 — failed БЕЗ повторной "
+                        "отправки (защита от дублей): %s", mgid, last_error,
+                    )
+                    from app.services.notifications import notify_send_error
+                    await notify_send_error(queue_id, queue["name"], album_posts[0]["id"], last_error or "")
+                    return
+                uncertain_retry_done = True
+                log.warning(
+                    "Альбом %s: неопределённая сетевая ошибка (сообщение могло быть доставлено, "
+                    "ответ потерян): %s. Пауза %.0f сек, единственный осторожный ретрай",
+                    mgid, e, settings.network_uncertain_retry_delay,
+                )
+                await asyncio.sleep(settings.network_uncertain_retry_delay)
+                continue
             # Инкрементим попытки для всех постов альбома
             for p in album_posts:
                 await posts_repo.increment_attempt(p["id"])
@@ -698,6 +782,10 @@ async def _deliver_post_with_retries(
     queue_id = queue["id"]
     max_attempts = settings.max_send_attempts
     last_error: str | None = None
+    # v0.4.67: неопределённая сетевая ошибка (см. _deliver_album_with_retries) —
+    # один осторожный ретрай после паузы, вторая → failed. Раньше мгновенные
+    # ретраи при обрыве интернета давали до 3 копий поста в канале.
+    uncertain_retry_done = False
     for _attempt in range(1, max_attempts + 1):
         try:
             await _send_one_post(post, channel, queue)
@@ -747,6 +835,25 @@ async def _deliver_post_with_retries(
                     from app.services.notifications import notify_send_error
                     await notify_send_error(queue_id, queue["name"], post["id"], last_error)
                     return
+                continue
+            # v0.4.67: неопределённая сетевая ошибка — сообщение МОГЛО уйти в канал
+            if _classify_send_error(e) == "uncertain":
+                if uncertain_retry_done or _attempt >= max_attempts:
+                    await posts_repo.mark_failed(post["id"], last_error)
+                    log.error(
+                        "Пост #%s: неопределённая сетевая ошибка x2 — failed БЕЗ повторной "
+                        "отправки (защита от дублей): %s", post["id"], last_error,
+                    )
+                    from app.services.notifications import notify_send_error
+                    await notify_send_error(queue_id, queue["name"], post["id"], last_error)
+                    return
+                uncertain_retry_done = True
+                log.warning(
+                    "Пост #%s: неопределённая сетевая ошибка (сообщение могло быть доставлено, "
+                    "ответ потерян): %s. Пауза %.0f сек, единственный осторожный ретрай",
+                    post["id"], e, settings.network_uncertain_retry_delay,
+                )
+                await asyncio.sleep(settings.network_uncertain_retry_delay)
                 continue
             attempts_done = await posts_repo.increment_attempt(post["id"])
             log.warning("Ошибка отправки поста #%s (попытка %d/%d): %s", post["id"], attempts_done, max_attempts, e)
